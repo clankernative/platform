@@ -38,6 +38,11 @@ InstanceSpec :: {
 		delivery : Str,
 		sdk : Str,
 		owners : List(Str),
+
+		## day2-app's `admins`: the owners and the instance's apply identity, sorted. Day2 renders the app's access
+		## policy from them at activation. The apply identity is an admin so the instance's automatic maintenance
+		## can act on the app; the `owners` selector still admits only the people.
+		admins : List(Str),
 		size : Str,
 		verification : U64,
 		schedules : Str,
@@ -88,6 +93,10 @@ InstanceSpec :: {
 		people_domain : Str,
 		apps_domain : Str,
 		operators : List(Str),
+
+		## The service account the instance applies its roots and maintains its apps as. The instance's bootstrap
+		## creates it; the platform only names it.
+		apply_identity : Str,
 		instance_repository : Str,
 		app_ci_repository : Str,
 		required_check : Str,
@@ -119,6 +128,7 @@ InstanceSpec :: {
 	derived = |spec| {
 		registry = "${spec.region}-docker.pkg.dev/${spec.project}"
 		tofu_state_bucket = "${spec.project}-tofu-state"
+		apply_identity = "${spec.org}-infra@${spec.project}.iam.gserviceaccount.com"
 		{
 			installation: spec.installation.to_str(),
 			platform_repository,
@@ -132,6 +142,7 @@ InstanceSpec :: {
 			people_domain: spec.people,
 			apps_domain: spec.domain,
 			operators: spec.operators,
+			apply_identity,
 			instance_repository: "${spec.org}/instance",
 			app_ci_repository: "${spec.org}/app-ci",
 			required_check: "${spec.org}/app-ci: ${required_context}",
@@ -140,7 +151,9 @@ InstanceSpec :: {
 			platform_state_prefixes,
 			cluster: { name: cluster_name, kube_context: "gke_${spec.project}_${spec.zone}_${cluster_name}" },
 			app_namespace_prefix,
-			apps: spec.apps.map(|bound| derive_app(spec.org, spec.domain, spec.project, registry, bound)),
+			apps: spec
+				.apps
+				.map(|bound| derive_app(spec.org, spec.domain, spec.project, registry, apply_identity, bound)),
 		}
 	}
 }
@@ -203,8 +216,8 @@ SpecApp : {
 	schedules : Schedules,
 }
 
-derive_app : Str, Str, Str, Str, SpecApp -> InstanceSpec.App
-derive_app = |org, domain, project, registry, bound| {
+derive_app : Str, Str, Str, Str, Str, SpecApp -> InstanceSpec.App
+derive_app = |org, domain, project, registry, apply_identity, bound| {
 	id = bound.id.to_str()
 	hostname = "${id}.${domain}"
 	preset = size_preset(bound.size)
@@ -213,6 +226,7 @@ derive_app = |org, domain, project, registry, bound| {
 		delivery: delivery_name(bound.delivery),
 		sdk: bound.sdk,
 		owners: bound.owners,
+		admins: bound.owners.append(apply_identity).sort_with(Names.order),
 		size: match bound.size {
 			Standard => "standard"
 			Large => "large"
@@ -311,13 +325,14 @@ checked = |raw| {
 	}
 	org = text(forge, "org")?
 	if !valid_org(org) {
-		return Err(BadJson("forge.org must be 2-40 lowercase letters, digits or inner hyphens"))
+		return Err(BadJson("forge.org must be 2-24 lowercase letters, digits or inner hyphens, starting with a letter"))
 	}
 	domains = root.get("domains")?
 	exact(domains, "domains", ["people", "apps"])?
 	people = text(domains, "people")?
-	if !valid_domain(people) {
-		return Err(BadJson("domains.people must be a lowercase DNS name"))
+	# Every owner is one of an app's rendered admins, and day2-app requires a person among them.
+	if !valid_domain(people) or people == "gserviceaccount.com" or people.ends_with(".gserviceaccount.com") {
+		return Err(BadJson("domains.people must be a lowercase DNS name, not a service-account domain"))
 	}
 	domain = text(domains, "apps")?
 	if !valid_domain(domain) or domain.count_utf8_bytes() > 232 {
@@ -514,8 +529,9 @@ hyphenated = |value, min, max| {
 valid_project : Str -> Bool
 valid_project = |value| hyphenated(value, 6, 30)
 
+## `<org>-infra` is the apply identity's service-account ID, which GCP caps at 30 bytes.
 valid_org : Str -> Bool
-valid_org = |value| hyphenated(value, 2, 40) and !value.contains("--")
+valid_org = |value| hyphenated(value, 2, 24) and !value.contains("--")
 
 # area-locationN, for example us-central1 or northamerica-northeast2.
 valid_region : Str -> Bool
@@ -571,18 +587,21 @@ valid_domain = |value| {
 	value.count_utf8_bytes() <= 253 and labels.len() >= 2 and labels.all(valid_label) and top
 }
 
+## An address is at most 256 bytes, the longest authority actor day2 accepts.
 valid_email : Str, Str -> Bool
 valid_email = |value, domain| match value.split_on("@") {
 	[local, host] => {
 		bytes = local.to_utf8()
 		host
 			== domain
-			and !bytes.is_empty()
-				and bytes.len()
-					<= 64
-					and !local.starts_with(".")
-						and !local.ends_with(".")
-							and bytes.all(|byte| lower(byte) or digit(byte) or [46, 45, 95].contains(byte))
+			and value.count_utf8_bytes()
+				<= 256
+				and !bytes.is_empty()
+					and bytes.len()
+						<= 64
+						and !local.starts_with(".")
+							and !local.ends_with(".")
+								and bytes.all(|byte| lower(byte) or digit(byte) or [46, 45, 95].contains(byte))
 	}
 	_ => Bool.False
 }
@@ -620,6 +639,7 @@ expect match InstanceSpec.from_json(sample) {
 									delivery: "automatic",
 									sdk: "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
 									owners: ["lin@example.com"],
+									admins: ["lin@example.com", "tools-infra@exampleco-tools.iam.gserviceaccount.com"],
 									size: "standard",
 									verification: 4,
 									schedules: "enabled",
@@ -646,6 +666,29 @@ expect match InstanceSpec.from_json(sample) {
 									},
 									sqlite_storage_gb: 5,
 								})
+	}
+	Err(_) => Bool.False
+}
+
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => spec.derived().apply_identity == "tools-infra@exampleco-tools.iam.gserviceaccount.com"
+	Err(_) => Bool.False
+}
+
+# The longest org still names a 30-byte service-account ID.
+expect match InstanceSpec.from_json(sample.replace_first("\"org\":\"tools\"", "\"org\":\"${Str.repeat("t", 24)}\"")) {
+	Ok(spec) => spec.derived().apply_identity
+		== "${Str.repeat("t", 24)}-infra@exampleco-tools.iam.gserviceaccount.com"
+	Err(_) => Bool.False
+}
+
+# Admins are sorted, so an owner may sort after the apply identity.
+expect match InstanceSpec.from_json(
+	sample.replace_first("\"owners\":[\"lin@example.com\"]", "\"owners\":[\"zed@example.com\"]"),
+) {
+	Ok(spec) => match spec.derived().apps.first() {
+		Ok(go) => go.admins == ["tools-infra@exampleco-tools.iam.gserviceaccount.com", "zed@example.com"]
+		Err(_) => Bool.False
 	}
 	Err(_) => Bool.False
 }
@@ -745,6 +788,9 @@ expect rejects("\"kind\":\"gitea\"", "\"kind\":\"github\"")
 expect rejects("https://git.example.com", "https://git.example.com/tools")
 expect rejects("https://git.example.com", "http://git.example.com")
 expect rejects("\"org\":\"tools\"", "\"org\":\"Tools\"")
+expect rejects("\"org\":\"tools\"", "\"org\":\"${Str.repeat("t", 25)}\"")
+expect rejects("\"org\":\"tools\"", "\"org\":\"1tools\"")
+expect rejects("\"org\":\"tools\"", "\"org\":\"tools-\"")
 expect rejects("\"apps\":\"apps.example.com\"", "\"apps\":\"localhost\"")
 expect rejects("\"ada@example.com\",\"grace@example.com\"", "\"grace@example.com\",\"ada@example.com\"")
 expect rejects("\"ada@example.com\",\"grace@example.com\"", "\"ada@example.com\",\"ada@example.com\"")
@@ -775,3 +821,16 @@ expect rejects("\"owners\":[\"lin@example.com\"]", "\"owners\":\"lin@example.com
 expect rejects("\"owners\":[\"lin@example.com\"]", "\"owners\":[\"lin@elsewhere.com\"]")
 expect rejects("[\"kay@example.com\",\"lin@example.com\"]", "[\"lin@example.com\",\"kay@example.com\"]")
 expect rejects("[\"kay@example.com\",\"lin@example.com\"]", "[\"kay@example.com\",\"kay@example.com\"]")
+
+# An address is capped at the 256-byte authority actor limit, below what its parts' own limits allow.
+expect {
+	long = "${Str.repeat("a", 63)}.${Str.repeat("b", 63)}.${Str.repeat("c", 63)}.com"
+	valid_email("${Str.repeat("x", 60)}@${long}", long) and !valid_email("${Str.repeat("x", 61)}@${long}", long)
+}
+
+# A service-account people domain is refused even when every address is at it.
+expect {
+	moved = sample.replace_each("example.com\"", "corp.iam.gserviceaccount.com\"")
+	moved != sample and InstanceSpec.from_json(moved).is_err()
+		and InstanceSpec.from_json(sample.replace_each("example.com\"", "corp.example.org\"")).is_ok()
+}

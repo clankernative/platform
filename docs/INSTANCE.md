@@ -62,7 +62,13 @@ derivation; there is no second schema.
   repository is a platform constant, not an input, so an instance cannot select a
   fork.
 - `forge.kind` is `gitea`. Other forges become new closed values, never free text.
-- Operators are lowercase addresses in `domains.people`.
+- `forge.org` is 2–24 lowercase letters, digits or inner hyphens, starting with
+  a letter. It also names the instance's apply identity, `<org>-infra`, and GCP
+  caps a service-account ID at 30 bytes.
+- `domains.people` is not a service-account domain: owners become rendered
+  admins, and day2-app requires a person among them.
+- Operators are lowercase addresses in `domains.people`. Every address is at
+  most 256 bytes, the longest authority actor day2 accepts.
 - `delivery` is `automatic`, `manual` or `paused`.
 - `extension` is required and is either `null` or the app's pinned Chrome
   extension ID: exactly 32 letters `a`–`p`.
@@ -86,6 +92,7 @@ Nothing below can be configured, restated or overridden.
 
 | Name | Value |
 | --- | --- |
+| Apply identity | `<org>-infra@<project>.iam.gserviceaccount.com` |
 | Instance repository | `<org>/instance` |
 | App CI repository | `<org>/app-ci` |
 | Required app check | `<org>/app-ci: day2 / verification (pull_request)` |
@@ -93,6 +100,7 @@ Nothing below can be configured, restated or overridden.
 | Shared OpenTofu state bucket | `<project>-tofu-state` |
 | Platform root state | bucket `<project>-tofu-state`, prefixes `foundation` (project), `platform/cluster`, `platform/tenancy`, `platform/app` (app edges) and `day2` (roots an instance opts into, such as its CI integration); the security shell's prefix is not derived yet |
 | Cluster | `day2`, kube context `gke_<project>_<zone>_day2` |
+| App admins | the app's `owners` and the apply identity, sorted |
 | App repository | `<org>/<id>` |
 | App hostname | `<id>.<domains.apps>` |
 | App namespace | `app-<id>` (prefix `app-`) |
@@ -104,6 +112,14 @@ Nothing below can be configured, restated or overridden.
 | Extension downloads | `/downloads/<id>.crx` and `/downloads/updates.xml`, when `extension` is set |
 | Extension update URL | `https://<id>.<domains.apps>/downloads/updates.xml`, when `extension` is set |
 | Extension signing key | Secret Manager secret `<id>-chrome-extension-signing-key`, when `extension` is set |
+
+The apply identity is the service account the instance applies its roots and
+maintains its apps as. The instance's bootstrap creates it; the platform only
+names it. It is one of every app's admins so automatic maintenance can act on
+the app after activation. Like every admin it passes the app's owner checks,
+which cover audit history, app secrets and SQLite downloads; it already
+controls the cluster the app runs on, and it is not among the IAP members. The
+`owners` authority selector still admits only the people among the admins.
 
 No two apps may pin the same `extension`: an extension ID is one key, one
 update URL and one Admin policy entry.
@@ -142,8 +158,9 @@ the spec cannot yet describe: the installation security shell
 (`security-shell-edge`, `security-shell`), opt-in integrations under
 `deploy/integrations/` (such as `gitea-instance-ci`), optional stacks (such as
 `qualification-runner`) and roots an instance owns itself. Day2 renders an
-app's access policy at release activation from day2-app's `admins` (step 3);
-this command does not set them yet.
+app's access policy at release activation from day2-app's `admins`, which this
+command renders. `instance plan` and `apply` do not run day2-app yet (step 3),
+so an instance's own day2-app apply must pass them.
 
 ### Variables
 
@@ -157,13 +174,15 @@ size preset or a fixed platform constant:
 | `cluster` | `project_id`, `region`, `zone`, `cluster_name`, `cluster_labels`, `subnet_cidr`, `pod_cidr`, `service_cidr`, `shared_node_pod_pids_limit` |
 | `tenancy` | `kube_context`, `app_namespace_prefix` |
 | `app-edge` | `project_id`, `region`, `cluster_name`, `cluster_location`, `kube_context`, `app_id`, `namespace_prefix`, `domain`, `iap_members`, `deployer_subjects`, `offsite_backup_readers`, `sqlite_storage_gb`, `storage_class_name`, `kube_dns_service_ip`, `cluster_cidrs` |
-| `day2-app` | `kube_context`, `app_id`, `namespace`, `installation`, `environment`, `hosted_domain`, `edge_origin`, `runtime_resources`, `pod_pids_limit`, `backup_bucket` |
+| `day2-app` | `kube_context`, `app_id`, `namespace`, `installation`, `environment`, `hosted_domain`, `admins`, `edge_origin`, `runtime_resources`, `pod_pids_limit`, `backup_bucket` |
 
 - **People.** Only the `operators` deploy an app by hand
   (`deployer_subjects`). They also hold every app's off-site backups and are
   named in its IAP members, which also admit `domain:<domains.people>`.
   `owners` get no infrastructure authority. CI service accounts hold
-  project-level grants from the instance's bootstrap and are never listed.
+  project-level grants from the instance's bootstrap and are never listed in
+  infrastructure inputs. An app's `admins` are its owners and the apply
+  identity: in-app authority, not infrastructure.
 - **Sizes.** The app resources row above. Every preset has the same volume
   until resizing is designed: moving an app to a size with a smaller volume
   would try to shrink its PVC, which cannot shrink.
@@ -185,7 +204,7 @@ it:
 - discovered IDs (`project_number`, `cloudflare_zone_id`,
   `backend_service_name`);
 - images and artifact IDs;
-- access policy (step 3) and extension download routes (step 4);
+- extension download routes (step 4);
 - per-app extras: runtime identities, secrets, provider credentials, resource
   catalogs and policies, schedules, pod labels and guardrail overrides
   (`container_max`, `resource_guardrails`).

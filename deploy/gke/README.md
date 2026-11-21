@@ -401,7 +401,9 @@ app's `admins`: at activation day2 renders the operation policy, readers and
 writers from the artifact's declared audiences (see
 [rendered authority](../../docs/AUTHORITY.md#rendered-authority)). There is no
 hand-written policy here: the root binds only a rendered authority, so the app
-must be built with audiences. Match the node
+must be built with audiences. An instance takes `admins` from
+`day2 instance render`: the app's owners and the instance's apply identity (see
+[rendered inputs](../../docs/INSTANCE.md#rendered-inputs)). Match the node
 pool's actual PID bound; a declared value is not a substitute for checking it.
 Initialize, plan and apply `day2-app` with its separate backend. Confirm rollout,
 readiness, authenticated access, denial for an unauthorized account, app operation

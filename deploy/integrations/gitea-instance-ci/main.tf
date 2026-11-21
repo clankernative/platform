@@ -275,6 +275,15 @@ resource "google_service_account_iam_member" "apply_workload_identity" {
   service_account_id = "projects/${var.project_id}/serviceAccounts/${var.apply_service_account_email}"
   role               = "roles/iam.workloadIdentityUser"
   member             = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.ci_role/apply"
+
+  lifecycle {
+    # Every app's rendered admins name the instance's derived apply identity (docs/INSTANCE.md), and automatic
+    # maintenance is admitted only for an admin, so applies must run as exactly that account.
+    precondition {
+      condition     = var.apply_service_account_email == "${split("/", var.repository)[0]}-infra@${var.project_id}.iam.gserviceaccount.com"
+      error_message = "apply_service_account_email must be the instance's apply identity, <org>-infra@<project_id>.iam.gserviceaccount.com, as day2 instance check prints it."
+    }
+  }
 }
 
 resource "google_service_account" "plan" {

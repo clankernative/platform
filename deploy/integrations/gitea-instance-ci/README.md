@@ -43,7 +43,10 @@ repository name and native IDs, existing workload identity pool, apply identity,
 state bucket, Gitea server URL and OIDC issuer URL. Set `gitea_url` and
 `oidc_issuer_uri` explicitly, for example `https://git.example.com` and
 `https://git-oidc.example.com`; neither has a platform default. Keep a separate
-backend prefix for this root.
+backend prefix for this root. The apply identity must be the instance's derived
+`<org>-infra@<project>.iam.gserviceaccount.com`, as `day2 instance check`
+prints it: every app's rendered `admins` name it, and automatic maintenance is
+admitted only for an admin.
 
 Before applying, enable Compute, IAP, IAM, IAM Credentials, STS and Secret
 Manager in the selected project. Create the workload identity pool and the

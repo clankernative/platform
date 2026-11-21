@@ -406,6 +406,7 @@ checked_json = |request, path, spec| {
 			gcp: { project: names.gcp_project, region: names.gcp_region, zone: names.gcp_zone },
 			domains: { people: names.people_domain, apps: names.apps_domain },
 			operators: names.operators,
+			apply_identity: names.apply_identity,
 			repositories: { instance: names.instance_repository, app_ci: names.app_ci_repository },
 			required_check: names.required_check,
 			sdk_registry: names.sdk_registry,
@@ -424,6 +425,7 @@ checked_json = |request, path, spec| {
 							delivery: bound.delivery,
 							sdk: bound.sdk,
 							owners: bound.owners,
+							admins: bound.admins,
 							size: bound.size,
 							verification: bound.verification,
 							schedules: bound.schedules,
@@ -462,6 +464,7 @@ checked_text = |request, path, spec| {
 							[
 								"  ${bound.id}  /  ${bound.delivery}  /  ${bound.sdk}",
 								row("  owners", Str.join_with(bound.owners, ", ")),
+								row("  admins", Str.join_with(bound.admins, ", ")),
 								row(
 									"  runtime",
 									"${
@@ -524,6 +527,7 @@ checked_text = |request, path, spec| {
 			row("Operators", Str.join_with(names.operators, ", ")),
 			"",
 			"DERIVED NAMES",
+			row("Apply identity", names.apply_identity),
 			row("Instance repository", names.instance_repository),
 			row("App CI repository", names.app_ci_repository),
 			row("Required app check", names.required_check),
