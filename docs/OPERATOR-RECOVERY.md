@@ -18,12 +18,58 @@ Two kinds of pending invocation never finish on their own:
   stopped before finishing it, for example when maintenance stopped the app
   mid-request. Only that request was running it: that scheduler resumes
   commands, never queries or pages, and a page load's identity is random, so no
-  later request repeats it. It stays pending, and a migration refuses the store
-  with `migration_requires_drained_invocations`, so every activation of a new
-  image fails until it is gone. A rolling profile drains queries and pages too,
+  later request repeats it. It stays pending until a migration abandons it
+  (below) or an operator does. A rolling profile drains queries and pages too,
   so nothing there is orphaned; a native-storage app is not supported.
 
-A local operator ends either explicitly, as one list of up to 16 invocations:
+### A migration abandons its orphaned requests
+
+Every activation of a new image migrates the store after the app stops:
+
+```
+day2 migration-apply INSTANCE APP TARGET PLAN_FILE LOCAL_OPERATOR
+```
+
+The migration holds the migration exclusion: the operation lease and the
+exclusive serving lock, which no `day2-serve` (or runtime-pair executor) can
+hold beside it. A request cut off by that stop, or by any earlier stop or crash,
+is then provably over, so the migration abandons it itself instead of refusing
+the store with `migration_requires_drained_invocations` until an operator does:
+
+- It abandons exactly the invocations `orphaned_request` accepts (below), by
+  the same check: pending, unblocked, admitted by a direct request, of an
+  operation the store's scheduler never resumes, in an ordinary non-rolling
+  store.
+- It abandons under `LOCAL_OPERATOR`, who must be an instance operator or a
+  policy administrator when there is something to abandon
+  (`recovery_operator_required`). A GKE maintenance session passes its request's
+  operator, who already needs that standing to activate.
+- The abandonments commit in the migration's own transaction. Work the
+  scheduler finishes, such as an accepted command, must still drain first: the
+  migration is then refused as before, and any refusal changes nothing.
+  Replaying a recorded migration still abandons a request orphaned since, so
+  its activation can proceed.
+- Blocked work, including a blocked request, is left for an operator.
+- Each one is recorded like an operator's, with cause `orphaned_request`, the
+  operator as audit actor, `request_id` `migration:` plus the invocation id (a
+  prefix operator requests may not use) and a reason saying no server held the
+  store. `day2 migration-apply` lists their receipts under `abandoned`.
+- The store must already hold `day2_abandonments`, which every runtime from
+  `3a29178b` on creates.
+
+GKE activation migrates a copy of the store before its confirmation and
+journals that copy's list as `rehearsal-abandoned`, printing any it finds. The
+copy taken once the app has stopped lists what the live migration will abandon;
+the earlier copy taken while the source still serves also lists reads that
+were then in flight and finished there.
+
+The lock is what keeps servers off the store, so this holds only for processes
+that take it. `day2 serve-local`, `day2 invoke`, `day2 resume` and the local
+development server do not: never migrate a store one of them is using.
+
+### Abandoning explicitly
+
+A local operator ends either kind explicitly, as one list of up to 16 invocations:
 
 ```
 day2 recovery-abandon INSTANCE APP LOCAL_OPERATOR REQUESTS_JSON

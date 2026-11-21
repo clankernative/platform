@@ -1120,7 +1120,12 @@ fn settlement_of_an_admitted_attempt_survives_artifact_activation() -> Result<()
     })?;
     let candidate = replacement.runtime.artifact();
     let plan = day2::migration::plan(&world.runtime, candidate)?;
-    day2::migration::apply(&world.runtime, candidate, &plan)?;
+    day2::migration::apply(
+        &world.runtime,
+        candidate,
+        &plan,
+        &day2::authority_state::LocalOperator::assert_local("admin")?,
+    )?;
     day2::migration::activate(&world.runtime, candidate)?;
     let result = simulation.perform_admitted_effect(admitted)?;
     simulation.settle_effect(result)?;

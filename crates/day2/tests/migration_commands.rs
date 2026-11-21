@@ -4,6 +4,11 @@ use day2::{authority_state, invocations, migration, store::Fault};
 use std::{fs, process::Command};
 use support::World;
 
+/// The Reports policy names `admin` as an administrator.
+fn admin() -> Result<authority_state::LocalOperator> {
+    authority_state::LocalOperator::assert_local("admin")
+}
+
 #[test]
 fn migration_and_activation_require_drain_at_acceptance_preparation_and_external_effect_boundaries()
 -> Result<()> {
@@ -39,7 +44,7 @@ fn migration_and_activation_require_drain_at_acceptance_preparation_and_external
         let before = world.runtime.inspect()?;
         let plan = migration::plan(&world.runtime, world.runtime.artifact())?;
         assert_eq!(
-            migration::apply(&world.runtime, world.runtime.artifact(), &plan)
+            migration::apply(&world.runtime, world.runtime.artifact(), &plan, &admin()?)
                 .unwrap_err()
                 .to_string(),
             "migration_requires_drained_invocations"
@@ -52,7 +57,7 @@ fn migration_and_activation_require_drain_at_acceptance_preparation_and_external
                 .iter()
                 .all(|item| item.status == "success")
         );
-        migration::apply(&world.runtime, world.runtime.artifact(), &plan)?;
+        migration::apply(&world.runtime, world.runtime.artifact(), &plan, &admin()?)?;
         migration::activate(&world.runtime, world.runtime.artifact())?;
     }
     Ok(())
@@ -62,16 +67,16 @@ fn migration_and_activation_require_drain_at_acceptance_preparation_and_external
 fn replaying_a_migration_receipt_does_not_bypass_new_pending_commands() -> Result<()> {
     let world = World::new()?;
     let plan = migration::plan(&world.runtime, world.runtime.artifact())?;
-    migration::apply(&world.runtime, world.runtime.artifact(), &plan)?;
+    migration::apply(&world.runtime, world.runtime.artifact(), &plan, &admin()?)?;
     world.submit("late", Fault::None)?;
     assert_eq!(
-        migration::apply(&world.runtime, world.runtime.artifact(), &plan)
+        migration::apply(&world.runtime, world.runtime.artifact(), &plan, &admin()?)
             .unwrap_err()
             .to_string(),
         "migration_requires_drained_invocations"
     );
     invocations::drain(&world.runtime, 16)?;
-    migration::apply(&world.runtime, world.runtime.artifact(), &plan)?;
+    migration::apply(&world.runtime, world.runtime.artifact(), &plan, &admin()?)?;
     Ok(())
 }
 
@@ -109,12 +114,21 @@ fn rehearse(
         .context("plan")?
         .to_owned();
     let mut outputs = Vec::new();
-    for step in ["migration-plan", "migration-apply"] {
-        outputs.push((
-            step.to_owned(),
-            day2(&[step, &instance, "reports", &artifact, &plan])?,
-        ));
-    }
+    outputs.push((
+        "migration-plan".to_owned(),
+        day2(&["migration-plan", &instance, "reports", &artifact, &plan])?,
+    ));
+    outputs.push((
+        "migration-apply".to_owned(),
+        day2(&[
+            "migration-apply",
+            &instance,
+            "reports",
+            &artifact,
+            &plan,
+            "admin",
+        ])?,
+    ));
     let expected = serde_json::to_string(
         &authority_state::current(&rusqlite::Connection::open(&store)?)?.stamp,
     )?;
@@ -184,6 +198,34 @@ const DROP_CREDENTIAL_UNIT: &str =
     DROP TABLE day2_credential_lineages; DROP TABLE day2_credential_confirmations;
     DROP TABLE day2_credential_browser; DROP TABLE day2_credential_origins;
     DROP TABLE day2_credential_schema_version;";
+
+/// The deploy Home's stop cut short: a page load or query a request admitted,
+/// left pending in the store with no server to finish it.
+#[test]
+fn a_rehearsed_activation_abandons_a_request_its_stop_cut_off() -> Result<()> {
+    let world = World::new()?;
+    world.runtime.accept(
+        "reports.list",
+        "alice",
+        "cut-off-read",
+        &serde_json::json!({"after":"","limit":2}),
+        100,
+    )?;
+    let (copy, outputs) = rehearse(&world, None)?;
+    succeeded(&outputs)?;
+    let applied: serde_json::Value = serde_json::from_slice(&outputs[1].1.stdout)?;
+    assert_eq!(applied["abandoned"][0]["invocation"], "cut-off-read");
+    assert_eq!(applied["abandoned"][0]["cause"], "orphaned_request");
+    assert_eq!(applied["abandoned"].as_array().map(Vec::len), Some(1));
+    let status: String = rusqlite::Connection::open(copy.path().join(".state/reports.sqlite"))?
+        .query_row(
+            "SELECT status FROM day2_invocations WHERE id='cut-off-read'",
+            [],
+            |row| row.get(0),
+        )?;
+    assert_eq!(status, "failure");
+    Ok(())
+}
 
 #[test]
 fn rehearsed_activation_admits_only_a_store_the_target_opens() -> Result<()> {

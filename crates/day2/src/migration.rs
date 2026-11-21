@@ -179,11 +179,21 @@ fn plan_contracts(
     })
 }
 
-pub fn apply(runtime: &Runtime, target: &LoadedArtifact, supplied: &Plan) -> Result<()> {
-    let _exclusion = crate::deployment::migration_exclusion(
+/// Apply a checked migration plan while no `day2-serve` holds the store. The
+/// migration first abandons any orphaned request it finds, under `operator`
+/// ([`crate::recovery::abandon_orphaned_requests`]), and returns their
+/// receipts; it commits them with the migration, or refuses and changes nothing.
+pub fn apply(
+    runtime: &Runtime,
+    target: &LoadedArtifact,
+    supplied: &Plan,
+    operator: &crate::authority_state::LocalOperator,
+) -> Result<Vec<crate::recovery::Receipt>> {
+    let exclusion = crate::deployment::migration_exclusion(
         runtime.db().parent().context("store directory")?,
         runtime.app(),
     )?;
+    let at_ms = runtime.host().now_ms()?;
     // Never execute SQL supplied by an operator or app. Recompute the checked transition.
     apply_plan(
         runtime.db(),
@@ -191,6 +201,7 @@ pub fn apply(runtime: &Runtime, target: &LoadedArtifact, supplied: &Plan) -> Res
         &target.contract().schema,
         supplied,
         &plan(runtime, target)?,
+        |tx| crate::recovery::abandon_orphaned_requests(tx, runtime, &exclusion, operator, at_ms),
     )
 }
 
@@ -200,7 +211,8 @@ fn apply_plan(
     target: &crate::schema::Schema,
     supplied: &Plan,
     expected: &Plan,
-) -> Result<()> {
+    orphaned: impl FnOnce(&Connection) -> Result<Vec<crate::recovery::Receipt>>,
+) -> Result<Vec<crate::recovery::Receipt>> {
     ensure!(supplied == expected, "migration_plan_mismatch");
     let id = supplied.id()?;
     let mut connection = open(path)?;
@@ -214,6 +226,7 @@ fn apply_plan(
         r.get(0)
     })?;
     ensure!(scope == supplied.scope, "migration_scope_mismatch");
+    let abandoned = orphaned(&tx)?;
     let pending = runnable_pending(&tx)?;
     ensure!(pending == 0, "migration_requires_drained_invocations");
     let current: String =
@@ -234,7 +247,9 @@ fn apply_plan(
                 && current == target,
             "migration_journal_mismatch"
         );
-        return Ok(());
+        // A replay publishes nothing new, except the requests it abandoned.
+        tx.commit()?;
+        return Ok(abandoned);
     }
     ensure!(current == supplied.source_schema, "stale_migration_plan");
     for rollup in source
@@ -301,7 +316,7 @@ fn apply_plan(
         params![id, supplied.source_schema, supplied.target_schema],
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(abandoned)
 }
 
 pub fn activate(runtime: &Runtime, target: &LoadedArtifact) -> Result<()> {
@@ -545,6 +560,11 @@ mod tests {
     use super::*;
     use rusqlite::TransactionBehavior;
 
+    /// These stores hold no runtime, so nothing is orphaned.
+    fn none(_: &Connection) -> Result<Vec<crate::recovery::Receipt>> {
+        Ok(Vec::new())
+    }
+
     #[test]
     fn explicit_retirement_preserves_rows_audit_and_indexes_and_freezes_archived_models()
     -> Result<()> {
@@ -657,7 +677,7 @@ mod tests {
             connection.execute("INSERT INTO day2_meta VALUES(?1,?2)", params![key, value])?;
         }
         let apply =
-            |plan: &Plan| apply_plan(&path, &source.schema, &target.schema, plan, &expected);
+            |plan: &Plan| apply_plan(&path, &source.schema, &target.schema, plan, &expected, none);
         let mut forged = expected.clone();
         forged.retire_models.clear();
         assert_eq!(
@@ -905,7 +925,9 @@ mod tests {
                 &target.schema,
                 supplied,
                 &make_plan(&source, &target)?,
+                none,
             )
+            .map(drop)
         };
         let connection = open(&db)?;
         for ddl in old.ddl()? {
@@ -1019,13 +1041,13 @@ mod tests {
                 })
             };
         let first = plan(&source_schema, &target_schema)?;
-        apply_plan(&path, &source_schema, &target_schema, &first, &first)?;
-        apply_plan(&path, &source_schema, &target_schema, &first, &first)?;
+        apply_plan(&path, &source_schema, &target_schema, &first, &first, none)?;
+        apply_plan(&path, &source_schema, &target_schema, &first, &first, none)?;
         assert_eq!(target_schema.rollups[0].mismatches(&db)?, 0);
         let mut changed = target_schema.clone();
         changed.rollups[0].group[1].bucket = Some(crate::rollup::Bucket::Hour);
         let next = plan(&target_schema, &changed)?;
-        apply_plan(&path, &target_schema, &changed, &next, &next)?;
+        apply_plan(&path, &target_schema, &changed, &next, &next, none)?;
         assert_eq!(changed.rollups[0].mismatches(&db)?, 0);
         assert_eq!(
             db.query_row("SELECT count(*) FROM events_daily", [], |r| r
@@ -1034,7 +1056,7 @@ mod tests {
         );
         db.execute_batch("UPDATE events SET amount=9223372036854775807 WHERE id=1")?;
         let back = plan(&changed, &target_schema)?;
-        assert!(apply_plan(&path, &changed, &target_schema, &back, &back).is_err());
+        assert!(apply_plan(&path, &changed, &target_schema, &back, &back, none).is_err());
         assert_eq!(changed.rollups[0].mismatches(&db)?, 0);
         assert_eq!(
             db.query_row("SELECT value FROM day2_meta WHERE key='schema'", [], |r| {
@@ -1043,7 +1065,7 @@ mod tests {
             changed.hash()?
         );
         let remove = plan(&changed, &source_schema)?;
-        apply_plan(&path, &changed, &source_schema, &remove, &remove)?;
+        apply_plan(&path, &changed, &source_schema, &remove, &remove, none)?;
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name LIKE 'day2_rollup_%' OR name='events_daily'",[],|r|r.get::<_,i64>(0))?,0);
         Ok(())
     }
@@ -1106,8 +1128,15 @@ mod tests {
         ] {
             connection.execute("INSERT INTO day2_meta VALUES(?1,?2)", params![key, value])?;
         }
-        let error =
-            apply_plan(&path, &source_schema, &target_schema, &expected, &expected).unwrap_err();
+        let error = apply_plan(
+            &path,
+            &source_schema,
+            &target_schema,
+            &expected,
+            &expected,
+            none,
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("UNIQUE constraint failed"),
             "{error:#}"
@@ -1150,8 +1179,22 @@ mod tests {
             0
         );
         connection.execute("UPDATE entries SET account='b' WHERE id=2", [])?;
-        apply_plan(&path, &source_schema, &target_schema, &expected, &expected)?;
-        apply_plan(&path, &source_schema, &target_schema, &expected, &expected)?;
+        apply_plan(
+            &path,
+            &source_schema,
+            &target_schema,
+            &expected,
+            &expected,
+            none,
+        )?;
+        apply_plan(
+            &path,
+            &source_schema,
+            &target_schema,
+            &expected,
+            &expected,
+            none,
+        )?;
         assert_eq!(
             connection.query_row(
                 "SELECT value FROM day2_meta WHERE key='schema'",
