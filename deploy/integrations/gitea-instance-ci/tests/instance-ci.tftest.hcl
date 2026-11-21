@@ -16,7 +16,7 @@ variables {
   repository                  = "example-org/instance-config"
   repository_id               = "203"
   repository_owner_id         = "74"
-  apply_service_account_email = "infra-apply@example-project.iam.gserviceaccount.com"
+  apply_service_account_email = "example-org-infra@example-project.iam.gserviceaccount.com"
   state_bucket_name           = "example-project-tofu-state"
   plan_secret_ids             = ["cloudflare-api-token"]
 }
@@ -50,7 +50,7 @@ run "identities_are_bound_to_the_repository_ids_and_one_workflow_each" {
   assert {
     condition = (
       google_service_account_iam_member.apply_workload_identity.member == "principalSet://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/instance-ci/attribute.ci_role/apply" &&
-      google_service_account_iam_member.apply_workload_identity.service_account_id == "projects/example-project/serviceAccounts/infra-apply@example-project.iam.gserviceaccount.com" &&
+      google_service_account_iam_member.apply_workload_identity.service_account_id == "projects/example-project/serviceAccounts/example-org-infra@example-project.iam.gserviceaccount.com" &&
       google_service_account_iam_member.plan_workload_identity.member == "principalSet://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/instance-ci/attribute.ci_role/plan"
     )
     error_message = "only ci_role=apply reaches the apply identity, and only ci_role=plan the plan identity"
@@ -65,6 +65,16 @@ run "identities_are_bound_to_the_repository_ids_and_one_workflow_each" {
     )
     error_message = "ci_role maps to apply, plan or none, and no actor claim is mapped"
   }
+}
+
+run "apply_identity_is_the_instances_derived_apply_identity" {
+  command = plan
+
+  variables {
+    apply_service_account_email = "infra-apply@example-project.iam.gserviceaccount.com"
+  }
+
+  expect_failures = [google_service_account_iam_member.apply_workload_identity]
 }
 
 run "plan_identity_is_read_only" {
