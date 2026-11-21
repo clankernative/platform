@@ -1,11 +1,14 @@
 //! Join two published SDK closures and one independently reviewed runtime pair.
 //! Uses the instance publisher's digest-addressed blobs. The index is a
 //! publication input, never a native test runner or a deployment approval.
-use super::tooling_distribution::{BlobIdentity, Distribution, OPERATOR_FILES, verify};
 use anyhow::{Context, Result, ensure};
 use day2::{
     automation,
     runtime_pair::{Admission, Manifest, Profile, Receipt, RuntimeIdentity},
+    sdk_release::{
+        self, BlobIdentity, DISTRIBUTION_LIMIT, Distribution, EVIDENCE_LIMIT, FILE_LIMIT,
+        MANIFEST_LIMIT, Release, verify,
+    },
     security_admission::{Containment, LinuxEvidence},
 };
 use serde::{Deserialize, Serialize};
@@ -13,8 +16,6 @@ use serde_json::{Value, json};
 use std::{io::Write, path::Path};
 
 const INDEX_LIMIT: u64 = 65_536;
-const EVIDENCE_LIMIT: u64 = 1_048_576;
-const ARCHIVE_LIMIT: u64 = 256 << 20;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -28,67 +29,8 @@ struct Index {
     recipe: String,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SdkRelease {
-    version: u32,
-    platform_commit: String,
-    profile: String,
-    target: String,
-    runtime: Image,
-    tooling: Image,
-    distribution: BlobIdentity,
-    operator: BlobIdentity,
-    evidence: Evidence,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Image {
-    image: String,
-    // Existing SDK manifest field: the builder's image ID, which may be
-    // a config, a runnable manifest or an OCI index.
-    config: String,
-}
-
-impl Image {
-    fn validate(&self) -> Result<()> {
-        let (repo, digest) = self
-            .image
-            .rsplit_once('@')
-            .context("immutable SDK image required")?;
-        let (registry, name) = repo
-            .split_once('/')
-            .context("SDK image registry required")?;
-        ensure!(
-            self.image.len() <= 512
-                && !registry.is_empty()
-                && registry
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-:".contains(&b))
-                && name
-                    .split('/')
-                    .all(|part| !part.is_empty() && part != "." && part != "..")
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-/".contains(&b)),
-            "invalid SDK image repository"
-        );
-        day2_assets::hash_part(digest)?;
-        day2_assets::hash_part(&self.config)?;
-        Ok(())
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Evidence {
-    native: BlobIdentity,
-    strict: BlobIdentity,
-}
-
 struct Sdk {
-    release: SdkRelease,
+    release: Release,
     runtime: RuntimeIdentity,
 }
 
@@ -99,68 +41,23 @@ fn blob(root: &Path, file: &BlobIdentity, limit: u64) -> Result<Vec<u8>> {
 
 impl Sdk {
     fn load(root: &Path, manifest: &BlobIdentity) -> Result<Self> {
-        let release: SdkRelease = day2::json::decode(&blob(root, manifest, INDEX_LIMIT)?)?;
-        ensure!(
-            release.version == 1
-                && release.profile == "linux_sqlite_single_v1"
-                && release.target == "linux-x86_64"
-                && release.platform_commit.len() == 40
-                && release
-                    .platform_commit
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-            "unsupported pair SDK release"
-        );
-        release.runtime.validate()?;
-        release.tooling.validate()?;
+        let release = Release::decode(&blob(root, manifest, MANIFEST_LIMIT)?)
+            .context("unsupported pair SDK release")?;
         let distribution: Distribution =
-            day2::json::decode(&blob(root, &release.distribution, INDEX_LIMIT)?)?;
-        ensure!(
-            distribution.format == 1
-                && distribution.target == release.target
-                && distribution.operator == release.operator
-                && distribution.operator_files.len() == OPERATOR_FILES.len()
-                && OPERATOR_FILES
-                    .iter()
-                    .all(|name| distribution.operator_files.contains_key(*name)),
-            "pair SDK distribution changed"
-        );
-        for file in distribution
-            .operator_files
-            .values()
-            .chain([&distribution.worker])
-        {
-            day2_assets::hash_part(&file.digest)?;
-            ensure!(
-                (1..=ARCHIVE_LIMIT).contains(&file.bytes),
-                "pair SDK file size"
-            );
-        }
-        day2_assets::hash_part(&distribution.inputs)?;
-        blob(root, &release.operator, ARCHIVE_LIMIT)?;
+            day2::json::decode(&blob(root, &release.distribution, DISTRIBUTION_LIMIT)?)?;
+        distribution
+            .bind(&release)
+            .context("pair SDK distribution changed")?;
+        blob(root, &release.operator, FILE_LIMIT)?;
 
         let native_bytes = blob(root, &release.evidence.native, EVIDENCE_LIMIT)?;
         let native: Value = day2::json::decode(&native_bytes)?;
         let evidence = LinuxEvidence::from_receipt(&native_bytes)?;
-        ensure!(
-            native["source_revision"] == release.platform_commit
-                && native["environment"]["architecture"] == "x86_64"
-                && evidence.runtime_image == release.runtime.config
-                && native["tooling_image"] == release.tooling.config
-                && native["workflow"] == distribution.workflow_sources
-                && evidence.toolchain == distribution.toolchain
-                && native["tooling_distribution"]["distribution"] == release.distribution.digest
-                && native["tooling_distribution"]["operator"]
-                    == serde_json::to_value(&release.operator)?
-                && native["tooling_distribution"]["worker"]
-                    == serde_json::to_value(&distribution.worker)?,
-            "native receipt does not bind the selected SDK"
-        );
-        day2_assets::hash_part(&distribution.workflow_sources)?;
-
         let strict: Value =
             day2::json::decode(&blob(root, &release.evidence.strict, EVIDENCE_LIMIT)?)?;
-        validate_strict(&native, &strict, &evidence.receipt_digest)?;
+        sdk_release::bind_evidence(&release, &distribution, &native, &strict)
+            .context("native receipt does not bind the selected SDK")?;
+        validate_strict(&native, &strict)?;
         Ok(Self {
             runtime: RuntimeIdentity {
                 platform_inventory: evidence.platform_inventory.clone(),
@@ -171,7 +68,8 @@ impl Sdk {
     }
 }
 
-fn validate_strict(native: &Value, strict: &Value, native_digest: &str) -> Result<()> {
+/// The complete strict campaign, beyond the binding sdk_release checks.
+fn validate_strict(native: &Value, strict: &Value) -> Result<()> {
     let results = strict["results"]
         .as_object()
         .context("strict campaign results required")?;
@@ -185,19 +83,7 @@ fn validate_strict(native: &Value, strict: &Value, native_digest: &str) -> Resul
     }
     ensure!(
         strict["format"] == 1
-            && strict["status"] == "strict-admission-passed"
-            && strict["qualification"] == false
             && strict["error"].is_null()
-            && strict["qualification_digest"] == native_digest
-            && [
-                "runtime_image",
-                "tooling_image",
-                "platform",
-                "platform_inventory",
-                "artifact"
-            ]
-            .iter()
-            .all(|key| strict[*key] == native[*key])
             && results.len() == actions.len()
             && actions
                 .iter()
@@ -295,6 +181,7 @@ pub(super) fn execute(root: &Path, request: &Path, blobs: &Path, output: &Path) 
 mod tests {
     use super::*;
     use day2::digest;
+    use day2::sdk_release::OPERATOR_FILES;
     use std::fs;
 
     fn store(root: &Path, bytes: &[u8]) -> Result<BlobIdentity> {

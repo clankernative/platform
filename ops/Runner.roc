@@ -9,6 +9,7 @@ import pf.Stdout
 import ops.Workflow
 import ops.LocalDev
 import ops.InstanceRoots
+import ops.InstanceRelease
 import ops.Build
 import ops.Delegation
 import ops.Check
@@ -58,6 +59,9 @@ run! = |args| match args {
 	# Only the host starts these, for `day2 instance plan` and `day2 instance apply`; they have no `platform` entry.
 	["instance-plan-session", request] => InstanceRoots.plan!(request, call!)
 	["instance-apply-session", request] => InstanceRoots.apply!(request, call!)
+	# Only the host starts these, for `day2 instance release publish` and `fetch`; they have no `platform` entry.
+	["instance-release-publish-session", request] => InstanceRelease.publish!(request, call!)
+	["instance-release-fetch-session", request] => InstanceRelease.fetch!(request, call!)
 	["build-recipe"] => Build.recipe!(call!)
 	["build-delegation"] => Delegation.build!(call!)
 	["build-delegation-business"] => Delegation.business!(call!)

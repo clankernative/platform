@@ -24,6 +24,7 @@ Problem := [
 	MetadataTooLarge,
 	PlanFailed(Str),
 	ApplyFailed(Str),
+	ReleaseFailed(Str),
 ].{
 	Dto : { code : Str, message : Str, hint : Str, exit_code : I32, retryable : Bool }
 
@@ -47,7 +48,7 @@ Problem := [
 		| InvalidCatalog(_)
 		| UnsupportedArtifact(_)
 		| MetadataTooLarge => 5
-		PlanFailed(_) | ApplyFailed(_) => 6
+		PlanFailed(_) | ApplyFailed(_) | ReleaseFailed(_) => 6
 	}
 
 	code : Problem -> Str
@@ -76,11 +77,12 @@ Problem := [
 		MetadataTooLarge => "metadata_too_large"
 		PlanFailed(_) => "plan_failed"
 		ApplyFailed(_) => "apply_failed"
+		ReleaseFailed(_) => "release_failed"
 	}
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan <directory>."
+		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan|apply|release <directory>."
 		MissingCommand => "Describe options require the command app describe <app>."
 		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
@@ -104,6 +106,7 @@ Problem := [
 		MetadataTooLarge => "Metadata exceeds the 1 MiB limit."
 		PlanFailed(detail) => "The instance plan failed: ${detail}"
 		ApplyFailed(detail) => "The instance apply failed: ${detail}"
+		ReleaseFailed(detail) => "The instance release failed: ${detail}"
 	}
 
 	hint : Problem -> Str
@@ -128,6 +131,9 @@ Problem := [
 		ApplyFailed(
 			_,
 		) => "Apply as an operator with a CLI built from day2.json's platform commit, OpenTofu 1.12.3 on PATH and a new output directory outside the instance. A failed or refused root keeps its logs there; a plan that deletes, replaces or forgets a resource is never applied."
+		ReleaseFailed(
+			_,
+		) => "Publish as an operator with gcloud and docker signed in for the instance project; fetch with read access to its state bucket. Published objects are never replaced, and a cached blob or operator file that changed is refused, never repaired."
 		InvalidAppName(_) => "Use a lowercase identifier up to 48 bytes; day2_ and sqlite_ prefixes are reserved."
 		InvalidOperationName(_) => "Use dot-separated lowercase identifiers, at most 80 bytes in total."
 		_ => "Run day2 --help for usage and examples."

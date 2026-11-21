@@ -104,6 +104,7 @@ pub mod sandbox;
 pub mod schedules;
 pub mod schema;
 pub mod sdk;
+pub mod sdk_release;
 pub mod security_admission;
 mod web_app_secrets;
 // Private external-epoch protocol; live enrollment producers remain unqualified.

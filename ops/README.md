@@ -19,6 +19,7 @@ Roc recipes; the recipes select steps, their order, examples, and checks.
 | [AppSecrets.roc](AppSecrets.roc) | Owner-managed create/rotate/reveal/delete transition table embedded in the runtime; opt-in synthetic provider canaries with guarded cleanup |
 | [Infra.roc](Infra.roc) | Construct the resource graph → prepare → version → init → validate → plan → show → receipt |
 | [InstanceRoots.roc](InstanceRoots.roc) | `day2 instance plan` and `apply` only: prepare the rendered request → read credentials once → per core root init → plan → show (→ apply the saved plan; a failed shared root stops the rest) → receipt |
+| [InstanceRelease.roc](InstanceRelease.roc) | `day2 instance release publish` and `fetch` only: validate the whole publication → verify both images → create each blob (an existing object only once its pinned generation verifies) → manifest last; fetch the manifest → distribution → native and strict evidence, each verified in the cache → operator CLI, verified file by file |
 | [Ci.roc](Ci.roc) | Source-event trigger policy and the mandatory isolated build/admission/check/evidence recipe |
 | [Verify.roc](Verify.roc) | Platform fixture selection, regression suites, CLI compilation and verification receipts |
 | [Simulation.roc](Simulation.roc) | Run and replay the shared control-world corpus, then generated schedules, before issuing mandatory campaign evidence |

@@ -882,6 +882,117 @@ fn instance_sessions_have_no_platform_entry() -> Result<()> {
     Ok(())
 }
 
+/// Runs a release session against a fake host in which the step `failing`
+/// fails. Returns the session's result and its effects in order.
+fn release_session(session: &str, failing: &str) -> Result<(Result<Value>, Vec<String>)> {
+    assert!(
+        automation::SOURCES
+            .iter()
+            .any(|(name, _)| *name == "ops/InstanceRelease.roc")
+    );
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &[session, "/private/release/request.json"],
+        |request| {
+            let input: Value = request.decode()?;
+            let step = match request.action.as_str() {
+                "instance-release-prepare" => {
+                    // The host reads the CLI's rendered request from its file.
+                    assert_eq!(input, json!({"request": "/private/release/request.json"}));
+                    "prepare".to_owned()
+                }
+                "instance-release-image" => format!("image {}", input["name"].as_str().unwrap()),
+                "instance-release-blob" => format!("blob {}", input["name"].as_str().unwrap()),
+                "instance-release-manifest" | "instance-release-operator" => {
+                    assert_eq!(input, json!({}));
+                    request
+                        .action
+                        .trim_start_matches("instance-release-")
+                        .to_owned()
+                }
+                _ => panic!("unexpected release effect: {}", request.action),
+            };
+            effects.push(step.clone());
+            if step == failing {
+                bail!("injected {step} refusal");
+            }
+            Ok(json!({ "step": step }))
+        },
+    );
+    Ok((result, effects))
+}
+
+#[test]
+fn release_publication_verifies_images_then_blobs_and_publishes_the_manifest_last() -> Result<()> {
+    let (result, effects) = release_session("instance-release-publish-session", "")?;
+    assert_eq!(result?, json!({"step": "manifest"}));
+    assert_eq!(
+        effects,
+        [
+            "prepare",
+            "image runtime",
+            "image tooling",
+            "blob native",
+            "blob strict",
+            "blob distribution",
+            "blob operator",
+            "manifest",
+        ]
+    );
+    // A refused image stops before anything is uploaded; a failed upload stops
+    // before the manifest, so no release becomes selectable.
+    let (result, effects) = release_session("instance-release-publish-session", "image tooling")?;
+    assert!(result.is_err());
+    assert_eq!(effects, ["prepare", "image runtime", "image tooling"]);
+    let (result, effects) =
+        release_session("instance-release-publish-session", "blob distribution")?;
+    assert!(result.is_err());
+    assert_eq!(
+        effects.last().map(String::as_str),
+        Some("blob distribution")
+    );
+    assert!(!effects.iter().any(|step| step == "manifest"));
+    Ok(())
+}
+
+#[test]
+fn release_fetch_binds_each_blob_before_the_operator() -> Result<()> {
+    let (result, effects) = release_session("instance-release-fetch-session", "")?;
+    assert_eq!(result?, json!({"step": "operator"}));
+    assert_eq!(
+        effects,
+        [
+            "prepare",
+            "blob manifest",
+            "blob distribution",
+            "blob native",
+            "blob strict",
+            "operator",
+        ]
+    );
+    let (result, effects) = release_session("instance-release-fetch-session", "blob native")?;
+    assert!(result.is_err());
+    assert_eq!(
+        effects,
+        [
+            "prepare",
+            "blob manifest",
+            "blob distribution",
+            "blob native"
+        ]
+    );
+    for session in ["instance-release-publish", "instance-release-fetch"] {
+        let result = automation::run(
+            &automation::runner()?,
+            &["platform", session, "/private/release/request.json"],
+            |request| panic!("unexpected effect: {}", request.action),
+        );
+        assert!(result.is_err(), "{session}");
+    }
+    Ok(())
+}
+
 #[test]
 fn centralized_ci_runs_the_shared_roc_campaign_before_publishing_evidence() -> Result<()> {
     let mut finished = false;
