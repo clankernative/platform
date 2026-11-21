@@ -5,6 +5,7 @@ import Problem
 import Names
 import InstanceSpec
 import InstanceRender
+import InstanceRelease
 
 ## Status, error, stream, and exit code are projections of one closed outcome.
 Output :: { outcome : Outcome }.{
@@ -15,6 +16,7 @@ Output :: { outcome : Outcome }.{
 		Checked(Cli.Instance, Names.LocalPath, InstanceSpec),
 		Rendered(Cli.Instance, Names.LocalPath, InstanceSpec),
 		Ran(Cli.Roots, Names.LocalPath, InstanceSpec, InstanceRender.Receipt),
+		Released(Cli.Release, Names.LocalPath, InstanceSpec, InstanceRelease.Report),
 		Failed(Problem, Cli.Format, Cli.Command),
 	]
 
@@ -47,6 +49,7 @@ Output :: { outcome : Outcome }.{
 			Outcome.Checked(request, path, spec) => checked_text(request, path, spec)
 			Outcome.Rendered(request, path, spec) => rendered_text(request, path, spec)
 			Outcome.Ran(request, path, spec, receipt) => ran_text(request, path, spec, receipt)
+			Outcome.Released(request, path, spec, receipt) => released_text(request, path, spec, receipt)
 			Outcome.Failed(problem, _, _) => error_text(problem)
 		}
 	}
@@ -79,6 +82,7 @@ format = |outcome| match outcome {
 	Output.Outcome.Described(loaded) => loaded.request().parts().format
 	Output.Outcome.Checked(request, _, _) | Output.Outcome.Rendered(request, _, _) => request.parts().format
 	Output.Outcome.Ran(request, _, _, _) => request.parts().format
+	Output.Outcome.Released(request, _, _, _) => request.parts().format
 }
 
 next_actions : Source -> List(Cli.Action)
@@ -134,6 +138,7 @@ json = |outcome| match outcome {
 	Output.Outcome.Checked(request, path, spec) => checked_json(request, path, spec)
 	Output.Outcome.Rendered(request, path, spec) => rendered_json(request, path, spec)
 	Output.Outcome.Ran(request, path, spec, receipt) => ran_json(request, path, spec, receipt)
+	Output.Outcome.Released(request, path, spec, receipt) => released_json(request, path, spec, receipt)
 	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
 	Output.Outcome.Help(_) => info_json(Bool.True)
 	Output.Outcome.Version(_) => info_json(Bool.False)
@@ -378,6 +383,94 @@ ran_text = |request, path, spec, receipt| {
 	)
 }
 
+## After a publication, fetch what was published as a deploy job would; after a fetch, check the spec.
+release_actions : Cli.Release, InstanceRelease.Report -> List(Cli.Action)
+release_actions = |request, report| {
+	check = Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(request.instance()))
+	match request.parts().action {
+		Cli.ReleaseAction.Publish(_) => [
+			Cli.Action.new(
+				"Fetch and verify the published release, as a deploy job would.",
+				Cli.Request.Release(request.fetching(report.receipt.reference)),
+			),
+			check,
+		]
+		Cli.ReleaseAction.Fetch(_) => [check]
+	}
+}
+
+released_json : Cli.Release, Names.LocalPath, InstanceSpec, InstanceRelease.Report -> Str
+# Keep the wire record concrete, as success_json does for the same compiler reason. The host's receipt goes out
+# verbatim: the envelope is encoded with `"receipt":null`, which only that key can spell (quotes inside a string are
+# escaped), and the host's text replaces it.
+released_json = |request, path, spec, report| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: request.command().name(),
+		exit_code: 0.I32,
+		context: { spec_path: path.to_str(), spec_validation: "checked" },
+		result: { installation: spec.derived().installation, receipt: null },
+		error: null,
+		next_actions: release_actions(request, report).map(|action| action.dto()),
+	})
+		.replace_first("\"receipt\":null", "\"receipt\":${report.text}")
+}
+
+released_text : Cli.Release, Names.LocalPath, InstanceSpec, InstanceRelease.Report -> Str
+released_text = |request, path, spec, report| {
+	receipt = report.receipt
+	row = |label, value| "  ${label}${Str.repeat(" ", 10 - label.count_utf8_bytes())}${Output.safe(value)}"
+	next =
+		Str.join_with(
+			release_actions(request, report)
+				.map(|action| action.dto())
+				.map(|action| "  ${Output.safe(action.description)}\n    ${Output.safe(action.command)}"),
+			"\n\n",
+		)
+	outcome = match (receipt.cache, receipt.cli) {
+		(Ok(cache), Ok(cli)) => [
+			"OPERATOR  /  every file verified against the distribution",
+			"  ${Output.safe(cli)}",
+			"",
+			"CACHE  /  integrity and qualification evidence verified; approval is the digest you pinned",
+			"  ${Output.safe(cache)}",
+		]
+		_ => [
+			"MANIFEST  /  published last",
+			"  ${Output.safe(receipt.files.manifest)}",
+			"",
+			"APPROVE",
+			"  Select it by pinning an app's sdk in day2.json to ${Output.safe(receipt.reference.digest)}.",
+		]
+	}
+	title = match request.parts().action {
+		Cli.ReleaseAction.Publish(_) => "SDK release published"
+		Cli.ReleaseAction.Fetch(_) => "SDK release fetched and verified"
+	}
+	Str.join_with(
+		[
+			"DAY2  /  instance ${spec.derived().installation}  /  ${title}",
+			"",
+			"SPEC",
+			"  ${Output.safe(path.to_str())}",
+			"",
+			"RELEASE",
+			"  ${Output.safe(receipt.reference.digest)} (${receipt.reference.bytes.to_str()} bytes)",
+			row("Platform", "${receipt.platform_commit} / ${receipt.profile} / ${receipt.target}"),
+			row("Runtime", receipt.runtime_image),
+			row("Tooling", receipt.tooling_image),
+			row("Objects", receipt.objects),
+			"",
+		]
+			.concat(outcome)
+			.concat(["", "NEXT", next]),
+		"\n",
+	)
+}
+
 toggled : Cli.Instance -> Cli.Instance
 toggled = |request| request.with_format(
 	match request.parts().format {
@@ -408,6 +501,7 @@ checked_json = |request, path, spec| {
 			operators: names.operators,
 			repositories: { instance: names.instance_repository, app_ci: names.app_ci_repository },
 			required_check: names.required_check,
+			artifact_registry: names.artifact_registry,
 			sdk_registry: names.sdk_registry,
 			tofu_state_bucket: names.tofu_state_bucket,
 			platform_state_prefixes: names.platform_state_prefixes,
@@ -527,6 +621,7 @@ checked_text = |request, path, spec| {
 			row("Instance repository", names.instance_repository),
 			row("App CI repository", names.app_ci_repository),
 			row("Required app check", names.required_check),
+			row("Artifact registry", names.artifact_registry),
 			row("SDK registry", names.sdk_registry),
 			row("OpenTofu state", names.tofu_state_bucket),
 			row(
@@ -679,6 +774,8 @@ info_json = |is_help| {
 				"instance.render",
 				"instance.plan",
 				"instance.apply",
+				"instance.release.publish",
+				"instance.release.fetch",
 			],
 			platform_commands: [
 				"platform.build",
@@ -872,6 +969,47 @@ expect match (
 			and response.body().contains("OpenTofu apply")
 				and response.body().contains("REVIEWED PLAN\n  r/receipt.json")
 					and response.body().contains("refused: the plan deletes, replaces or forgets a resource")
+	}
+	_ => Bool.False
+}
+
+published_receipt : Str
+published_receipt =
+	\\{"format":1,"mode":"publish","reference":{"digest":"sha256:cc689326c54b7a9cba772211381d9e7442a3e4d7137a3ede128593d6e0e76432","bytes":1236},
+	\\"platform_commit":"c","profile":"linux_sqlite_single_v1","target":"linux-x86_64","runtime_image":"r","tooling_image":"t",
+	\\"objects":"gs://b/day2/platform-releases/sha256",
+	\\"files":{"manifest":"/i/new.json","distribution":null,"native":null,"strict":null},"cache":null,"cli":null}
+
+# A publication reports its reference and suggests fetching exactly that release; a fetch receipt cannot stand in.
+expect match (
+	Cli.parse(["instance", "release", "publish", "d", "r.json", "new.json"]),
+	InstanceSpec.from_json(planned_spec),
+	Names.LocalPath.from_str("d/day2.json"),
+) {
+	(Ok(Cli.Request.Release(request)), Ok(spec), Ok(path)) => match InstanceRelease.receipt(
+		published_receipt,
+		request.parts().action,
+	) {
+		Ok(receipt) => {
+			text = Output.new(Output.Outcome.Released(request, path, spec, receipt)).body()
+			agent =
+				Output.new(Output.Outcome.Released(request.with_format(Cli.Format.Json), path, spec, receipt)).body()
+			text.contains("SDK release published")
+				and text
+					.contains(
+						"day2 instance release fetch d 'sha256:cc689326c54b7a9cba772211381d9e7442a3e4d7137a3ede128593d6e0e76432' 1236",
+					)
+					and agent.contains("\"command\":\"instance.release.publish\"")
+						and agent.contains("\"receipt\":${published_receipt}}")
+							and text.contains("MANIFEST  /  published last\n  /i/new.json")
+								and agent.contains("\"argv\":[\"day2\",\"instance\",\"release\",\"fetch\",\"d\",")
+									and InstanceRelease.receipt(
+										published_receipt.replace_first("\"cli\":null", "\"cli\":\"/c\""),
+										request.parts().action,
+									)
+										.is_err()
+		}
+		Err(_) => Bool.False
 	}
 	_ => Bool.False
 }

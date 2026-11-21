@@ -8,6 +8,7 @@ test_suite(name = "all_tests", tests = ["//crates/worker:unit_lib", "//crates/xt
 
 exports_files([
     "cli/main.roc",
+    "cli/fixtures/release-receipt.json",
     "cli/InstanceRender.roc",
     "cli/InstanceSpec.roc",
     "cli/JsonValue.roc",
@@ -71,6 +72,7 @@ exports_files([
     "ops/GkeRelease.roc",
     "ops/GoogleWorkspaceQualification.roc",
     "ops/Infra.roc",
+    "ops/InstanceRelease.roc",
     "ops/InstanceRoots.roc",
     "ops/Linux.roc",
     "ops/RuntimeImage.roc",

@@ -10,10 +10,26 @@ Cli :: [].{
 
 	Source := [Demo, Instance(Names.LocalPath), Environment]
 
-	Request := [Help(Format), Version(Format), Describe(Describe), Check(Instance), Render(Instance), Roots(Roots)]
+	Request := [
+		Help(Format),
+		Version(Format),
+		Describe(Describe),
+		Check(Instance),
+		Render(Instance),
+		Roots(Roots),
+		Release(Release),
+	]
 
 	## The command a response reports, including failures before a request exists.
-	Command := [AppDescribe, InstanceCheck, InstanceRender, InstancePlan, InstanceApply].{
+	Command := [
+		AppDescribe,
+		InstanceCheck,
+		InstanceRender,
+		InstancePlan,
+		InstanceApply,
+		InstanceReleasePublish,
+		InstanceReleaseFetch,
+	].{
 		name : Command -> Str
 		name = |command| match command {
 			AppDescribe => "app.describe"
@@ -21,6 +37,8 @@ Cli :: [].{
 			InstanceRender => "instance.render"
 			InstancePlan => "instance.plan"
 			InstanceApply => "instance.apply"
+			InstanceReleasePublish => "instance.release.publish"
+			InstanceReleaseFetch => "instance.release.fetch"
 		}
 	}
 
@@ -78,6 +96,43 @@ Cli :: [].{
 
 		## The same instance, as `check` and `render` read it.
 		instance : Roots -> Instance
+		instance = |request| Instance.{ directory: request.directory, format: request.format }
+	}
+
+	## An approved release manifest, named by its digest and size.
+	Reference : { digest : Str, bytes : U64 }
+
+	## day2 instance release publish DIRECTORY REQUEST NEW_MANIFEST publishes the qualified SDK release REQUEST
+	## describes into DIRECTORY's state bucket and writes its manifest to NEW_MANIFEST. day2 instance release fetch
+	## DIRECTORY DIGEST BYTES fetches and verifies the approved release DIGEST into the local release cache.
+	ReleaseAction := [Publish({ request : Names.LocalPath, output : Names.LocalPath }), Fetch(Reference)].{
+		verb : ReleaseAction -> Str
+		verb = |action| match action {
+			Publish(_) => "publish"
+			Fetch(_) => "fetch"
+		}
+	}
+
+	Release :: { action : ReleaseAction, directory : Names.LocalPath, format : Format }.{
+		parts : Release -> { action : ReleaseAction, directory : Names.LocalPath, format : Format }
+		parts = |request| { action: request.action, directory: request.directory, format: request.format }
+
+		with_format : Release, Format -> Release
+		with_format = |request, format| { ..request, format }
+
+		## The same instance fetching an approved release, such as the one just published.
+		fetching : Release, Reference -> Release
+		fetching = |request, reference| { ..request, action: ReleaseAction.Fetch(reference) }
+
+		## The command a response reports.
+		command : Release -> Command
+		command = |request| match request.action {
+			ReleaseAction.Publish(_) => Command.InstanceReleasePublish
+			ReleaseAction.Fetch(_) => Command.InstanceReleaseFetch
+		}
+
+		## The same instance, as `check` and `render` read it.
+		instance : Release -> Instance
 		instance = |request| Instance.{ directory: request.directory, format: request.format }
 	}
 
@@ -148,6 +203,7 @@ Cli :: [].{
 					| ["instance", "apply"] => Ok(Request.Help(raw.format))
 					["instance", "check", _] | ["instance", "render", _] => Ok(Request.Help(raw.format))
 					["instance", "plan", ..] | ["instance", "apply", ..] => Ok(Request.Help(raw.format))
+					["instance", "release", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 						Ok(Request.Help(raw.format))
@@ -176,6 +232,23 @@ Cli :: [].{
 						),
 					)
 				}
+				["instance", "release"]
+				| ["instance", "release", "publish"]
+				| ["instance", "release", "publish", _]
+				| ["instance", "release", "publish", _, _]
+				| ["instance", "release", "fetch"]
+				| ["instance", "release", "fetch", _]
+				| ["instance", "release", "fetch", _, _] => Err(Problem.MissingArgument)
+				["instance", "release", "publish", directory, request, output] => {
+					action = ReleaseAction.Publish({
+						request: release_path("publish", request, "a publication request file")?,
+						output: release_path("publish", output, "a new manifest file")?,
+					})
+					Ok(Request.Release(release(action, directory, raw)?))
+				}
+				["instance", "release", "fetch", directory, digest, bytes] => Ok(
+					Request.Release(release(ReleaseAction.Fetch(reference(digest, bytes)?), directory, raw)?),
+				)
 				["instance", "check", value] => Ok(Request.Check(instance("check", value, raw)?))
 				["instance", "render", value] => Ok(Request.Render(instance("render", value, raw)?))
 				["app", "describe", name] => {
@@ -215,6 +288,7 @@ Cli :: [].{
 		Request.Describe(value) => value.format
 		Request.Check(value) | Request.Render(value) => value.format
 		Request.Roots(value) => value.format
+		Request.Release(value) => value.format
 	}
 
 	quote : Str -> Str
@@ -259,6 +333,13 @@ Cli :: [].{
 					},
 				)
 				.concat([value.output.to_str()])
+			Request.Release(value) => ["day2", "instance", "release", value.action.verb(), value.directory.to_str()]
+				.concat(
+					match value.action {
+						ReleaseAction.Publish(paths) => [paths.request.to_str(), paths.output.to_str()]
+						ReleaseAction.Fetch(approved) => [approved.digest, approved.bytes.to_str()]
+					},
+				)
 		}
 		base.concat(
 			match request_format(request) {
@@ -313,6 +394,49 @@ local_path = |verb, value, role|
 	Names.LocalPath.from_str(value)
 		.map_err(|_| Problem.InvalidArguments("instance ${verb} requires ${role} of at most 4096 bytes"))
 
+release : Cli.ReleaseAction, Str, Raw -> Try(Cli.Release, Problem)
+release = |action, directory, raw| {
+	verb = action.verb()
+	if has_options(raw) {
+		return Err(Problem.ConflictingOptions("instance release ${verb} accepts only --agent or --json."))
+	}
+	Ok(Cli.Release.{ action, directory: release_path(verb, directory, "an instance directory")?, format: raw.format })
+}
+
+release_path : Str, Str, Str -> Try(Names.LocalPath, Problem)
+release_path = |verb, value, role|
+	Names.LocalPath.from_str(value)
+		.map_err(|_| Problem.InvalidArguments("instance release ${verb} requires ${role} of at most 4096 bytes"))
+
+## A manifest reference as the instance approves it: sha256:<64 lowercase hex digits>, and its size in canonical
+## decimal, 1 to 65536 bytes.
+reference : Str, Str -> Try(Cli.Reference, Problem)
+reference = |digest, bytes| {
+	hex = digest.drop_prefix("sha256:").to_utf8()
+	if
+		!digest.starts_with("sha256:")
+			or hex.len() != 64 or !hex.all(|byte| decimal(byte) or (byte >= 'a' and byte <= 'f'))
+			{
+				return Err(
+					Problem.InvalidArguments(
+						"instance release fetch requires the manifest digest as sha256:<64 lowercase hex digits>",
+					),
+				)
+			}
+	digits = bytes.to_utf8()
+	size = match U64.from_str(bytes) {
+		Ok(value) if digits.all(decimal) and !bytes.starts_with("0") => value
+		_ => 0
+	}
+	if size < 1 or size > 65_536 {
+		return Err(Problem.InvalidArguments("instance release fetch requires the manifest size, 1 to 65536 bytes"))
+	}
+	Ok({ digest, bytes: size })
+}
+
+decimal : U8 -> Bool
+decimal = |byte| byte >= '0' and byte <= '9'
+
 ## The instance verb follows the family, after any flags.
 instance_command : List(Str) -> Cli.Command
 instance_command = |args| match args {
@@ -320,8 +444,18 @@ instance_command = |args| match args {
 	["render", ..] => Cli.Command.InstanceRender
 	["plan", ..] => Cli.Command.InstancePlan
 	["apply", ..] => Cli.Command.InstanceApply
+	["release", .. as rest] => release_command(rest)
 	[arg, .. as rest] if arg.starts_with("-") => instance_command(rest)
 	_ => Cli.Command.InstanceCheck
+}
+
+## The release verb follows `release`, after any flags. An incomplete release command reports the read-only fetch.
+release_command : List(Str) -> Cli.Command
+release_command = |args| match args {
+	["--instance", _, .. as rest] | ["--operation", _, .. as rest] => release_command(rest)
+	["publish", ..] => Cli.Command.InstanceReleasePublish
+	[arg, .. as rest] if arg.starts_with("-") => release_command(rest)
+	_ => Cli.Command.InstanceReleaseFetch
 }
 
 has_options : Raw -> Bool
@@ -447,3 +581,51 @@ expect match Cli.parse(["instance", "render"]) {
 	_ => Bool.False
 }
 expect Cli.requested(["--operation", "instance", "app", "describe", "links"]).name() == "app.describe"
+expect match Cli.parse(
+	["instance", "release", "fetch", "../acme", "sha256:${Str.repeat("ab", 32)}", "1236", "--agent"],
+) {
+	Ok(Cli.Request.Release(value)) => match value.parts().action {
+		Cli.ReleaseAction.Fetch(approved) => approved.bytes
+			== 1236
+			and value.command().name() == "instance.release.fetch"
+		_ => Bool.False
+	}
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "release", "publish", ".", "request.json", "new.json"]) {
+	Ok(Cli.Request.Release(value)) => Cli.Action.new("", Cli.Request.Release(value)).dto().argv
+		== ["day2", "instance", "release", "publish", ".", "request.json", "new.json"]
+	_ => Bool.False
+}
+# A digest or size that is not the canonical approved reference is refused before anything runs.
+expect
+	[
+		["sha256:${Str.repeat("AB", 32)}", "1236"],
+		["sha256:${Str.repeat("ab", 31)}", "1236"],
+		["${Str.repeat("ab", 32)}", "1236"],
+		["sha256:${Str.repeat("ab", 32)}", "0"],
+		["sha256:${Str.repeat("ab", 32)}", "01236"],
+		["sha256:${Str.repeat("ab", 32)}", "65537"],
+		["sha256:${Str.repeat("ab", 32)}", "+12"],
+		["sha256:${Str.repeat("ab", 32)}", "12 "],
+	]
+		.all(
+			|pair| match Cli.parse(["instance", "release", "fetch", "."].concat(pair)) {
+				Err(Problem.InvalidArguments(_)) => Bool.True
+				_ => Bool.False
+			},
+		)
+expect match Cli.parse(["instance", "release", "fetch", ".", "sha256:${Str.repeat("ab", 32)}"]) {
+	Err(Problem.MissingArgument) => Bool.True
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "release", "publish", ".", "r.json", "n.json", "--demo"]) {
+	Err(Problem.ConflictingOptions(_)) => Bool.True
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "release", "list", ".", "a", "b"]) {
+	Err(Problem.UnknownCommand) => Bool.True
+	_ => Bool.False
+}
+expect Cli.requested(["instance", "release", "--agent", "publish", "."]).name() == "instance.release.publish"
+expect Cli.requested(["--agent", "instance", "release", "fetch"]).name() == "instance.release.fetch"

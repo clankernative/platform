@@ -140,9 +140,14 @@ mod tests {
     }
 
     fn run(args: &[&str], instance: Option<&Path>) -> Output {
+        run_with(args, instance, &[])
+    }
+
+    fn run_with(args: &[&str], instance: Option<&Path>, env: &[(&str, &Path)]) -> Output {
         let mut command = Command::new(binary());
         command
             .args(args)
+            .envs(env.iter().copied())
             .env_remove("DAY2_INSTANCE")
             .stdin(Stdio::null());
         if let Some(path) = instance {
@@ -400,6 +405,11 @@ mod tests {
         fs::copy(
             root().join("fixtures/links-artifact.json"),
             scratch.0.join("fixtures/links-artifact.json"),
+        )
+        .unwrap();
+        fs::copy(
+            root().join("fixtures/release-receipt.json"),
+            scratch.0.join("fixtures/release-receipt.json"),
         )
         .unwrap();
         let check = || {
@@ -1018,7 +1028,9 @@ mod tests {
                     "instance.check",
                     "instance.render",
                     "instance.plan",
-                    "instance.apply"
+                    "instance.apply",
+                    "instance.release.publish",
+                    "instance.release.fetch"
                 ])
             );
             assert_eq!(value["result"]["supports_authentication"], false);
@@ -1326,6 +1338,10 @@ mod tests {
         assert_eq!(
             result["required_check"],
             "tools/app-ci: day2 / verification (pull_request)"
+        );
+        assert_eq!(
+            result["artifact_registry"],
+            "us-central1-docker.pkg.dev/exampleco-tools"
         );
         assert_eq!(
             result["sdk_registry"],
@@ -2133,6 +2149,151 @@ mod tests {
         assert_eq!(code, "apply_failed");
         assert!(message.contains("platform commit"), "{message}");
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn instance_release_validates_before_it_runs_and_fails_closed() {
+        let scratch = Scratch::new();
+        let instance = scratch.0.join("instance");
+        fs::create_dir(&instance).unwrap();
+        let request = scratch.0.join("request.json");
+        let manifest = scratch.0.join("manifest.json");
+        // Neither gcloud nor docker is on PATH, so nothing here can reach a bucket or registry.
+        let tools = scratch.0.join("no-tools");
+        fs::create_dir(&tools).unwrap();
+        let cache = scratch.0.join("cache");
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let (directory, requested, new) = (
+            instance.to_str().unwrap(),
+            request.to_str().unwrap(),
+            manifest.to_str().unwrap(),
+        );
+        let release = |args: &[&str], code: i32| {
+            let value = envelope(
+                &run_with(
+                    args,
+                    None,
+                    &[
+                        ("PATH", tools.as_path()),
+                        ("DAY2_RELEASE_CACHE", cache.as_path()),
+                    ],
+                ),
+                code,
+            );
+            assert!(value["result"].is_null(), "{args:?}");
+            (
+                value["command"].as_str().unwrap().to_owned(),
+                value["error"]["code"].as_str().unwrap().to_owned(),
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        };
+        let publish = [
+            "instance", "release", "publish", directory, requested, new, "--agent",
+        ];
+        let fetch = [
+            "instance",
+            "release",
+            "fetch",
+            directory,
+            digest.as_str(),
+            "1236",
+            "--agent",
+        ];
+        for (args, command) in [
+            (
+                vec!["instance", "release", "--agent"],
+                "instance.release.fetch",
+            ),
+            (
+                vec![
+                    "instance", "release", "publish", directory, requested, "--agent",
+                ],
+                "instance.release.publish",
+            ),
+            (
+                vec![
+                    "instance",
+                    "release",
+                    "fetch",
+                    directory,
+                    digest.as_str(),
+                    "--agent",
+                ],
+                "instance.release.fetch",
+            ),
+        ] {
+            let (reported, code, _) = release(args.as_slice(), 2);
+            assert_eq!(
+                (reported.as_str(), code.as_str()),
+                (command, "missing_argument"),
+                "{args:?}"
+            );
+        }
+        // Only a canonical approved reference reaches the host.
+        for (reference, size) in [
+            ("sha256:ab", "1236"),
+            (digest.as_str(), "0"),
+            (digest.as_str(), "65537"),
+            (digest.as_str(), "01236"),
+        ] {
+            let args = [
+                "instance", "release", "fetch", directory, reference, size, "--agent",
+            ];
+            assert_eq!(release(&args, 2).1, "invalid_arguments", "{args:?}");
+        }
+        let mut demo = publish.to_vec();
+        demo.push("--demo");
+        assert_eq!(release(&demo, 2).1, "conflicting_options");
+        // The spec is validated before anything runs, exactly as check and render validate it.
+        assert_eq!(release(&publish, 3).1, "metadata_unreadable");
+        assert_eq!(release(&fetch, 3).1, "metadata_unreadable");
+        fs::write(
+            instance.join("day2.json"),
+            SPEC.replacen(r#""org":"tools""#, r#""org":"Tools""#, 1),
+        )
+        .unwrap();
+        assert_eq!(release(&fetch, 5).1, "invalid_spec");
+        fs::write(instance.join("day2.json"), SPEC).unwrap();
+        // The host validates the publication before it pulls or uploads anything.
+        let (command, code, message) = release(&publish, 6);
+        assert_eq!(
+            (command.as_str(), code.as_str()),
+            ("instance.release.publish", "release_failed")
+        );
+        assert!(message.contains("request.json"), "{message}");
+        fs::write(
+            &request,
+            serde_json::to_vec(&json!({"profile": "linux_sqlite_rwo_v1"})).unwrap(),
+        )
+        .unwrap();
+        let (_, _, message) = release(&publish, 6);
+        assert!(message.contains("only linux_sqlite_single_v1"), "{message}");
+        assert!(!manifest.exists());
+        // A publication never overwrites a manifest file.
+        fs::write(&manifest, b"reviewed").unwrap();
+        let (_, _, message) = release(&publish, 6);
+        assert!(message.contains("new manifest file"), "{message}");
+        assert_eq!(fs::read(&manifest).unwrap(), b"reviewed");
+        // A fetch refuses a cache that is not a directory, then a missing gcloud.
+        fs::write(&cache, b"").unwrap();
+        let (command, code, message) = release(&fetch, 6);
+        assert_eq!(
+            (command.as_str(), code.as_str()),
+            ("instance.release.fetch", "release_failed")
+        );
+        assert!(message.contains("platform release cache"), "{message}");
+        fs::remove_file(&cache).unwrap();
+        let (_, _, message) = release(&fetch, 6);
+        assert!(message.contains("gcloud"), "{message}");
+        // Only the key's lock was created; nothing was cached.
+        let cached: Vec<_> = fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(cached, [format!("{}.lock", "ab".repeat(32))]);
     }
 
     #[test]
