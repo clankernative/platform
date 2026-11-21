@@ -1017,7 +1017,8 @@ mod tests {
                     "app.describe",
                     "instance.check",
                     "instance.render",
-                    "instance.plan"
+                    "instance.plan",
+                    "instance.apply"
                 ])
             );
             assert_eq!(value["result"]["supports_authentication"], false);
@@ -2052,6 +2053,78 @@ mod tests {
         assert_eq!(code, "plan_failed");
         assert!(message.contains("new output directory"), "{message}");
         assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn instance_apply_validates_before_it_runs_and_fails_closed() {
+        let scratch = Scratch::new();
+        let instance = scratch.0.join("instance");
+        let platform = scratch.0.join("platform");
+        let output = scratch.0.join("apply");
+        fs::create_dir(&instance).unwrap();
+        fs::create_dir(&platform).unwrap();
+        let (directory, checkout, new) = (
+            instance.to_str().unwrap(),
+            platform.to_str().unwrap(),
+            output.to_str().unwrap(),
+        );
+        let apply = |args: &[&str], code: i32| {
+            let value = envelope(&run(args, None), code);
+            assert_eq!(value["command"], "instance.apply", "{args:?}");
+            assert!(value["result"].is_null(), "{args:?}");
+            (
+                value["error"]["code"].clone(),
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        };
+        for args in [
+            vec!["instance", "apply", "--agent"],
+            vec!["instance", "apply", directory, checkout, "--agent"],
+        ] {
+            assert_eq!(apply(args.as_slice(), 2).0, "missing_argument");
+        }
+        assert_eq!(
+            apply(
+                &[
+                    "instance", "apply", directory, checkout, new, "--demo", "--agent"
+                ],
+                2
+            )
+            .0,
+            "conflicting_options"
+        );
+        // The spec is validated before anything runs.
+        assert_eq!(
+            apply(
+                &["instance", "apply", directory, checkout, new, "--agent"],
+                3
+            )
+            .0,
+            "metadata_unreadable"
+        );
+        // The host validates the apply request as it validates a plan's: a checkout
+        // without the platform commit is refused before anything is written.
+        fs::write(instance.join("day2.json"), SPEC).unwrap();
+        fs::create_dir_all(instance.join("gcp/config/app-edge")).unwrap();
+        for inputs in [
+            "project",
+            "cluster",
+            "tenancy",
+            "app-edge/go",
+            "app-edge/home",
+        ] {
+            fs::write(instance.join(format!("gcp/config/{inputs}.tfvars")), "").unwrap();
+        }
+        let (code, message) = apply(
+            &["instance", "apply", directory, checkout, new, "--agent"],
+            6,
+        );
+        assert_eq!(code, "apply_failed");
+        assert!(message.contains("platform commit"), "{message}");
+        assert!(!output.exists());
     }
 
     #[test]

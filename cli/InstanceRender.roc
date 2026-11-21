@@ -160,7 +160,8 @@ InstanceRender :: [].{
 		tfvars_json = |root, names| Value.Fields(root.variables(names)).json()
 
 		## Where the instance commits this root's inputs the spec cannot describe yet, relative to the instance
-		## directory. `instance plan` passes the file before the rendered variables, so a rendered value wins.
+		## directory. `instance plan` and `apply` pass the file before the rendered variables, so a rendered value
+		## wins.
 		committed_inputs : Root -> Str
 		committed_inputs = |root| match root {
 			Project | Cluster | Tenancy => "gcp/config/${root.name()}.tfvars"
@@ -168,8 +169,8 @@ InstanceRender :: [].{
 			Day2App(bound) => "gcp/config/apps/${bound.id}.tfvars"
 		}
 
-		## `instance plan` runs every core root except day2-app, whose image and artifact inputs come from the
-		## release controller (step 3 of docs/INSTANCE.md).
+		## `instance plan` and `apply` run every core root except day2-app, whose image and artifact inputs come
+		## from the release controller (step 3 of docs/INSTANCE.md).
 		plannable : Root -> Bool
 		plannable = |root| match root {
 			Day2App(_) => Bool.False
@@ -188,11 +189,22 @@ InstanceRender :: [].{
 		}
 	}
 
-	## The request `instance plan` hands its recipe. The host validates every field again.
-	plan_request : InstanceSpec, { instance : Str, checkout : Str, output : Str } -> Str
-	plan_request = |spec, paths| {
+	## What a run of the core roots does: `instance plan` is read-only; `instance apply` applies each saved plan.
+	Mode := [Plan, Apply].{
+		name : Mode -> Str
+		name = |mode| match mode {
+			Plan => "plan"
+			Apply => "apply"
+		}
+	}
+
+	## The request `instance plan` or `apply` hands its recipe. The host validates every field again, and refuses
+	## a request whose mode differs from the command that started it.
+	request : InstanceSpec, Mode, { instance : Str, checkout : Str, output : Str } -> Str
+	request = |spec, mode, paths| {
 		names = spec.derived()
 		Json.to_str({
+			mode: mode.name(),
 			instance: paths.instance,
 			checkout: paths.checkout,
 			output: paths.output,
@@ -226,11 +238,11 @@ InstanceRender :: [].{
 		})
 	}
 
-	## What the host reports after planning: the exact stacks and engine, and every planned root's backend,
-	## inputs, status and changed resources. `instance_commit` is empty when the instance is not a git checkout.
+	## What the host reports after a run: its mode, the exact stacks and engine, and every root's backend, inputs,
+	## status and changed resources. `instance_commit` is empty when the instance is not a git checkout.
 	Receipt : {
 		format : U64,
-		applied : Bool,
+		mode : Str,
 		ok : Bool,
 		commit : Str,
 		stacks_tree : Str,
@@ -257,21 +269,29 @@ InstanceRender :: [].{
 		directory : Str,
 	}
 
-	## A receipt is accepted only in format 1, never applied, with known statuses and an `ok` that agrees with them.
-	receipt : Str -> Try(Receipt, [InvalidReceipt])
-	receipt = |raw| {
+	## A receipt is accepted only in format 1, for the mode that was run, with that mode's statuses and an `ok`
+	## that agrees with them. Only an apply has applied or skipped roots, and a root is skipped only after a failure.
+	receipt : Str, Mode -> Try(Receipt, [InvalidReceipt])
+	receipt = |raw, mode| {
 		parsed : Try(Receipt, _)
 		parsed = Json.parse(raw)
 		decoded = parsed.map_err(|_| InvalidReceipt)?
-		known = ["no_changes", "changes", "failed_credentials", "failed_init", "failed_plan", "failed_show"]
-		failed = decoded.roots.any(|root| root.status.starts_with("failed_"))
+		failures = ["failed_credentials", "failed_init", "failed_plan", "failed_show"]
+		known = match mode {
+			Mode.Plan => ["no_changes", "changes"].concat(failures)
+			Mode.Apply => ["no_changes", "applied", "skipped", "failed_apply", "refused_destroy"].concat(failures)
+		}
+		failed = decoded.roots.any(|root| root.status.starts_with("failed_") or root.status.starts_with("refused_"))
+		skipped = decoded.roots.any(|root| root.status == "skipped")
 		if
 			decoded.format
 				== 1
-				and !decoded.applied
+				and decoded.mode
+					== mode.name()
 					and decoded.roots.all(|root| known.contains(root.status))
 						and decoded.ok
 							== !failed
+							and (failed or !skipped)
 				{
 					Ok(decoded)
 				} else {
@@ -389,7 +409,7 @@ expect InstanceRender.Value.Fields([("a\"b", Text("c\\d"))]).json() == "{\"a\\\"
 
 receipt_sample : Str, Bool -> Str
 receipt_sample = |status, ok|
-	\\{"format":1,"applied":false,"ok":OK,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
+	\\{"format":1,"mode":"plan","ok":OK,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
 	\\"instance_commit":"","instance_clean":false,"engine":{"version":"1.12.3","digest":"sha256:e"},
 	\\"roots":[{"label":"project","stack":"project","backend":{"bucket":"b","prefix":"foundation"},"new_root":false,
 	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"STATUS",
@@ -397,20 +417,30 @@ receipt_sample = |status, ok|
 		.replace_first("OK", if ok "true" else "false")
 		.replace_first("STATUS", status)
 
-expect InstanceRender.receipt(receipt_sample("no_changes", Bool.True)).is_ok()
-expect InstanceRender.receipt(receipt_sample("failed_plan", Bool.False)).is_ok()
-# An ok that disagrees with the statuses, an unknown status or an applied plan is refused.
-expect InstanceRender.receipt(receipt_sample("failed_plan", Bool.True)).is_err()
-expect InstanceRender.receipt(receipt_sample("no_changes", Bool.False)).is_err()
-expect InstanceRender.receipt(receipt_sample("planned", Bool.True)).is_err()
-expect InstanceRender.receipt(
-	receipt_sample("no_changes", Bool.True).replace_first("\"applied\":false", "\"applied\":true"),
-)
-	.is_err()
+apply_sample : Str, Bool -> Str
+apply_sample = |status, ok| receipt_sample(status, ok).replace_first("\"mode\":\"plan\"", "\"mode\":\"apply\"")
 
-# The plan request carries the CLI's own rendering sources.
+expect InstanceRender.receipt(receipt_sample("no_changes", Bool.True), InstanceRender.Mode.Plan).is_ok()
+expect InstanceRender.receipt(receipt_sample("failed_plan", Bool.False), InstanceRender.Mode.Plan).is_ok()
+# An ok that disagrees with the statuses, an unknown status or another mode's receipt is refused.
+expect InstanceRender.receipt(receipt_sample("failed_plan", Bool.True), InstanceRender.Mode.Plan).is_err()
+expect InstanceRender.receipt(receipt_sample("no_changes", Bool.False), InstanceRender.Mode.Plan).is_err()
+expect InstanceRender.receipt(receipt_sample("planned", Bool.True), InstanceRender.Mode.Plan).is_err()
+expect InstanceRender.receipt(receipt_sample("no_changes", Bool.True), InstanceRender.Mode.Apply).is_err()
+# A plan never applies or skips; an apply's refusals and failures fail it, and it skips only after one.
+expect InstanceRender.receipt(receipt_sample("applied", Bool.True), InstanceRender.Mode.Plan).is_err()
+expect InstanceRender.receipt(apply_sample("applied", Bool.True), InstanceRender.Mode.Apply).is_ok()
+expect InstanceRender.receipt(apply_sample("refused_destroy", Bool.False), InstanceRender.Mode.Apply).is_ok()
+expect InstanceRender.receipt(apply_sample("refused_destroy", Bool.True), InstanceRender.Mode.Apply).is_err()
+expect InstanceRender.receipt(apply_sample("failed_apply", Bool.True), InstanceRender.Mode.Apply).is_err()
+expect InstanceRender.receipt(apply_sample("skipped", Bool.True), InstanceRender.Mode.Apply).is_err()
+expect InstanceRender.receipt(apply_sample("changes", Bool.True), InstanceRender.Mode.Apply).is_err()
+
+# The request carries its mode and the CLI's own rendering sources.
 expect match InstanceSpec.from_json(sample) {
-	Ok(spec) => InstanceRender.plan_request(spec, { instance: "i", checkout: "p", output: "o" })
-		.contains("\"path\":\"cli/InstanceRender.roc\"")
+	Ok(spec) => {
+		request = InstanceRender.request(spec, InstanceRender.Mode.Apply, { instance: "i", checkout: "p", output: "o" })
+		request.contains("\"path\":\"cli/InstanceRender.roc\"") and request.contains("\"mode\":\"apply\"")
+	}
 	Err(_) => Bool.False
 }

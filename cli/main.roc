@@ -66,21 +66,23 @@ main! = |args| {
 			Ok((path, spec)) => Output.Outcome.Rendered(render, path, spec)
 			Err(problem) => Output.Outcome.Failed(problem, render.parts().format, Cli.Command.InstanceRender)
 		}
-		Cli.Request.Plan(plan) => planned!(plan)
+		Cli.Request.Roots(roots) => ran!(roots)
 	}
 	emit!(Output.new(outcome))
 }
 
-## Validate and render the spec here, then plan its core roots through the platform host, which checks the
+## Validate and render the spec here, then plan or apply its core roots through the platform host, which checks the
 ## request again before it runs OpenTofu.
-planned! : Cli.Plan => Output.Outcome
-planned! = |plan| {
-	parts = plan.parts()
-	failed = |problem| Output.Outcome.Failed(problem, parts.format, Cli.Command.InstancePlan)
+ran! : Cli.Roots => Output.Outcome
+ran! = |roots| {
+	parts = roots.parts()
+	failed = |problem| Output.Outcome.Failed(problem, parts.format, roots.command())
+	broken = |detail| failed(Output.roots_failed(parts.mode, detail))
 	match InstanceSpec.load!(parts.directory) {
 		Ok((path, spec)) => {
-			request = InstanceRender.plan_request(
+			request = InstanceRender.request(
 				spec,
+				parts.mode,
 				{
 					instance: parts.directory.to_str(),
 					checkout: parts.checkout.to_str(),
@@ -91,17 +93,20 @@ planned! = |plan| {
 			ran = Env.with_temp_dir!(
 				|directory| {
 					file = Path.join(directory, "request.json")
-					Path.write_utf8!(file, request).map_err(|_| "cannot write the plan request")?
-					Host.instance_plan!(Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+					Path.write_utf8!(file, request).map_err(|_| "cannot write the ${parts.mode.name()} request")?
+					Host.instance_roots!(
+						parts.mode.name(),
+						Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?,
+					)
 				},
 			)
 			match ran {
-				Ok(raw) => match InstanceRender.receipt(raw) {
-					Ok(receipt) => Output.Outcome.Planned(plan, path, spec, receipt)
-					Err(_) => failed(Problem.PlanFailed("the platform host returned an unreadable receipt"))
+				Ok(raw) => match InstanceRender.receipt(raw, parts.mode) {
+					Ok(receipt) => Output.Outcome.Ran(roots, path, spec, receipt)
+					Err(_) => broken("the platform host returned an unreadable receipt")
 				}
-				Err(CallbackErr(error)) => failed(Problem.PlanFailed(error))
-				Err(_) => failed(Problem.PlanFailed("cannot use a private temporary directory"))
+				Err(CallbackErr(error)) => broken(error)
+				Err(_) => broken("cannot use a private temporary directory")
 			}
 		}
 		Err(problem) => failed(problem)

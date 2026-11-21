@@ -71,7 +71,7 @@ exports_files([
     "ops/GkeRelease.roc",
     "ops/GoogleWorkspaceQualification.roc",
     "ops/Infra.roc",
-    "ops/InstancePlan.roc",
+    "ops/InstanceRoots.roc",
     "ops/Linux.roc",
     "ops/RuntimeImage.roc",
     "ops/LocalDev.roc",

@@ -10,13 +10,14 @@ in their `day2.json` values.
 day2 instance check DIRECTORY [--agent]
 day2 instance render DIRECTORY [--agent]
 day2 instance plan DIRECTORY PLATFORM NEW_DIRECTORY [--agent]
+day2 instance apply DIRECTORY PLATFORM NEW_DIRECTORY [--agent]
 ```
 
 `instance check` reads exactly `DIRECTORY/day2.json` and prints every derived
 name. It reads no other file. `instance render` validates the same file and
 prints the [OpenTofu inputs](#rendered-inputs) the platform renders from it.
 `instance plan` runs a [read-only plan](#plan) of the core roots with those
-inputs. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
+inputs, and `instance apply` [applies](#apply) them. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
 derivation; there is no second schema.
 
 ## The spec
@@ -253,12 +254,43 @@ its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
   - Platform CI pins OpenTofu 1.11.5, while instance plans pin 1.12.3, the
     version that writes instance state.
 
+## Apply
+
+`instance apply DIRECTORY PLATFORM NEW_DIRECTORY` runs the same roots with the
+same platform, engine, inputs, credentials and output rules as `instance plan`,
+and applies them. Only operators apply by hand; app owners never do.
+
+- **Each root, in apply order:** init against its rendered backend, plan with
+  the state lock, show, then apply exactly that saved plan. OpenTofu refuses a
+  saved plan whose state changed after it was made, so what was shown is what
+  is applied.
+- **New roots.** The real backend is always initialized, and the apply creates
+  the root's state. The receipt reports the root as new.
+- **Locks.** Plans and applies wait up to five minutes for a root's state lock.
+- **Destructive plans are refused.** A plan that deletes, replaces or forgets a
+  resource is never applied; the root reports `refused_destroy` and lists those
+  resources. Output removals do not count. Destructive changes need a reviewed
+  operator path outside this command.
+- **Order.** `project`, `cluster` and `tenancy` are shared: every later root
+  reads their state. The host runs no root until each shared root before it has
+  applied, so a failed or refused shared root stops the apply and the roots
+  after it report `skipped`. An `app-edge` root reads only the shared roots, so
+  its failure stops only itself.
+- **Mode.** The host action fixes plan or apply, and the request must name the
+  same mode, so `instance plan` can never apply.
+- **Output.** As for a plan. Root statuses are `no_changes`, `applied`,
+  `refused_destroy`, `skipped` and the plan's failures plus `failed_apply`. The
+  command exits 6 if any root failed or was refused.
+- **Not applied:** `day2-app` and the stacks the spec does not model yet; the
+  instance's own tooling still applies those.
+
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
    `day2 instance check`. Nothing consumes the spec yet.
-2. **Render inputs (started: core-root backends and derived variables, and a
-   read-only `instance plan` of the core roots except `day2-app`).** The platform renders every
+2. **Render inputs (started: core-root backends and derived variables, a
+   read-only `instance plan` and `instance apply` of the core roots except
+   `day2-app`).** The platform renders every
    OpenTofu input (variables and backends) from the spec, and instance
    repositories stop committing them.
    Fields are added only for real choices (size presets, verification cases,
