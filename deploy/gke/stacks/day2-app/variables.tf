@@ -197,42 +197,14 @@ variable "pod_pids_limit" {
 }
 
 variable "admins" {
-  description = "The app's administrators when day2 renders its authority: at activation it renders the operation policy, readers and writers from the exact artifact's declared audiences, owned rows and effects (platform crates/day2/src/authority_render.rs). Lowercase e-mail addresses, at least one of them a person at hosted_domain; a service account such as the instance CI identity may join them. Replaces authority, readers and writers, which stay null. Needs an app runtime built from this platform version or later: an older one refuses the instance."
+  description = "The app's administrators. Day2 renders the rest of its authority: at activation it renders the operation policy, readers and writers from the exact artifact's declared audiences, owned rows and effects (platform crates/day2/src/authority_render.rs). Lowercase e-mail addresses, at least one of them a person at hosted_domain; a service account such as the instance CI identity may join them."
   type        = list(string)
-  default     = null
+  nullable    = false
 
   validation {
-    condition     = var.admins == null ? true : (length(var.admins) > 0 && alltrue([for actor in var.admins : can(regex("^[^\\s@:]+@[^\\s@]+$", actor)) && lower(actor) == actor]) && anytrue([for actor in var.admins : !endswith(actor, ".gserviceaccount.com")]))
+    condition     = length(var.admins) > 0 && alltrue([for actor in var.admins : can(regex("^[^\\s@:]+@[^\\s@]+$", actor)) && lower(actor) == actor]) && anytrue([for actor in var.admins : !endswith(actor, ".gserviceaccount.com")])
     error_message = "admins must be lowercase e-mail addresses, at least one of them a person rather than a service account."
   }
-}
-
-variable "readers" {
-  description = "instance.json readers beside an explicit authority policy: lowercase IAP e-mail addresses, domain:<hosted_domain>, or credential_client:<family-id>. Null with admins, whose rendered authority derives them. Seeded into the app database on first start only."
-  type        = list(string)
-  default     = null
-
-  validation {
-    condition     = var.readers == null ? true : (length(var.readers) > 0 && alltrue([for actor in var.readers : (can(regex("^([^\\s@:]+@[^\\s@]+|domain:[a-z0-9.-]+)$", actor)) && lower(actor) == actor) || can(regex("^credential_client:[A-Za-z0-9][A-Za-z0-9_-]{0,79}$", actor))]))
-    error_message = "readers must be a non-empty list of lowercase e-mail addresses, domain:<hosted_domain>, or credential_client:<family-id> entries."
-  }
-}
-
-variable "writers" {
-  description = "instance.json writers beside an explicit authority policy: lowercase IAP e-mail addresses, domain:<hosted_domain>, or credential_client:<family-id>. Null with admins. Seeded on first start only."
-  type        = list(string)
-  default     = null
-
-  validation {
-    condition     = var.writers == null ? true : alltrue([for actor in var.writers : (can(regex("^([^\\s@:]+@[^\\s@]+|domain:[a-z0-9.-]+)$", actor)) && lower(actor) == actor) || can(regex("^credential_client:[A-Za-z0-9][A-Za-z0-9_-]{0,79}$", actor))])
-    error_message = "writers must be lowercase e-mail addresses, domain:<hosted_domain>, or credential_client:<family-id> entries."
-  }
-}
-
-variable "authority" {
-  description = "An explicit authority policy object (version 1), for an app whose authority is not rendered from its artifact (see admins). It must name every operation of the exact artifact being deployed, or every operation fails missing_authority_policy. Seeded on first start only; later changes need day2's explicit activation."
-  type        = any
-  default     = null
 }
 
 variable "security_requirements" {

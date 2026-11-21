@@ -46,5 +46,6 @@ For a runnable local instance, from the platform root use:
 
 The workflow creates a checked `instance.json` with the example's authority,
 resources and local identity. Generated artifact paths are machine-specific.
-Production configuration is rendered by the workload stack using that artifact's
-complete operation authority; do not copy local development identity into GKE.
+Production configuration is rendered by the workload stack, which names only the
+app's admins; day2 renders the artifact's operation authority at activation. Do
+not copy local development identity or its explicit policy into GKE.

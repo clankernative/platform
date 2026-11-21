@@ -31,6 +31,19 @@ fn select_fixture_epoch(draft: &mut Value, app: &str) -> Result<()> {
     Ok(())
 }
 
+/// The deployment oracle renders its app's authority, which cannot yet grant
+/// OAuth connection observations, so bind an explicit policy in its place.
+fn bind_explicit_authority(draft: &mut Value, app: &str, operations: Value) {
+    let binding = draft["apps"][app].as_object_mut().unwrap();
+    binding.remove("rendered_authority");
+    binding.insert("readers".into(), json!(["qa@example.com"]));
+    binding.insert("writers".into(), json!(["qa@example.com"]));
+    binding.insert(
+        "authority".into(),
+        json!({"version":1,"admins":[],"operations":operations}),
+    );
+}
+
 #[test]
 fn admitted_gitlab_declaration_selects_company_client_and_external_ceiling() -> Result<()> {
     let path = std::env::var_os("DAY2_TEST_OAUTH_GITLAB_ARTIFACT")
@@ -64,9 +77,13 @@ fn admitted_gitlab_declaration_selects_company_client_and_external_ceiling() -> 
             map.insert("oauthgitlab".into(), app);
         }
         draft["apps"]["oauthgitlab"]["artifact"] = json!(artifact.directory());
-        draft["apps"]["oauthgitlab"]["authority"]["operations"] = json!({
-            "oauthgitlab.inspect":{"actors":["qa@example.com"],"mode":{"kind":"read"},"models":{}}
-        });
+        bind_explicit_authority(
+            &mut draft,
+            "oauthgitlab",
+            json!({
+                "oauthgitlab.inspect":{"actors":["qa@example.com"],"mode":{"kind":"read"},"models":{}}
+            }),
+        );
         let connections = draft["apps"]["oauthgitlab"]["oauth_connections"]
             .as_object_mut()
             .unwrap();
@@ -174,11 +191,15 @@ fn admitted_calendar_canary_prepares_reproducible_selection_without_live_authori
     draft["apps"]["oauthcalendar"]["artifact"] = json!(artifact.directory());
     draft["apps"]["oauthcalendar"]["oauth_connections"]["calendar"]["namespace"]["app"] =
         json!("oauthcalendar");
-    draft["apps"]["oauthcalendar"]["authority"]["operations"] = json!({
-        "oauthcalendar.inspect": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{}},
-        "oauthcalendar.list_events": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{},
-            "observations":["connection.resolve.v1","google_calendar.list_events.v1"]}
-    });
+    bind_explicit_authority(
+        &mut draft,
+        "oauthcalendar",
+        json!({
+            "oauthcalendar.inspect": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{}},
+            "oauthcalendar.list_events": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{},
+                "observations":["connection.resolve.v1","google_calendar.list_events.v1"]}
+        }),
+    );
     select_fixture_epoch(&mut draft, "oauthcalendar")?;
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("instance.json");

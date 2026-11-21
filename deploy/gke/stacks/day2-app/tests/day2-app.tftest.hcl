@@ -377,18 +377,6 @@ run "rejects_overlapping_loopback_state_subpaths" {
   expect_failures = [var.loopback_services]
 }
 
-run "preserves_explicit_credential_client_membership" {
-  command = plan
-  variables {
-    readers = ["qa@example.com", "credential_client:client_keys"]
-    writers = ["credential_client:client_keys"]
-  }
-  assert {
-    condition     = contains(jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.readers, "credential_client:client_keys") && jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.writers == ["credential_client:client_keys"]
-    error_message = "Client keys must receive an explicit family selector without being rewritten as human accounts."
-  }
-}
-
 run "wires_private_app_calls_into_the_normal_host" {
   command = plan
   override_data {
@@ -926,19 +914,7 @@ variables {
   }
   pod_pids_limit = 1024
   backup_bucket  = "example-tools-example-backups"
-  readers        = ["qa@example.com"]
-  writers        = ["qa@example.com"]
-  authority = {
-    version = 1
-    admins  = []
-    operations = {
-      "example.list" = {
-        actors = ["qa@example.com"]
-        mode   = { kind = "read" }
-        models = {}
-      }
-    }
-  }
+  admins         = ["qa@example.com"]
 }
 
 run "renders_instance_from_platform_contract" {
@@ -951,10 +927,10 @@ run "renders_instance_from_platform_contract" {
       identity     = { scheme = "google_iap", hosted_domain = "example.com" }
       apps = {
         example_app = {
-          artifact  = "artifacts/9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
-          readers   = ["qa@example.com"]
-          writers   = ["qa@example.com"]
-          authority = { version = 1, admins = [], operations = { "example.list" = { actors = ["qa@example.com"], mode = { kind = "read" }, models = {} } } }
+          artifact           = "artifacts/9ef287e05cb53f593b35c140140e83306e8c487cca417ff9f23f58568340b6bb"
+          readers            = []
+          writers            = []
+          rendered_authority = { admins = ["qa@example.com"] }
           runtime = {
             kind = "linux_sqlite_single_v1"
             resources = {
@@ -1211,31 +1187,11 @@ run "refuses_a_pod_bound_gke_cannot_set" {
   expect_failures = [var.pod_pids_limit]
 }
 
-run "admits_everyone_at_the_hosted_domain" {
-  command = plan
-
-  variables {
-    readers = ["domain:example.com", "qa@example.com"]
-    writers = ["domain:example.com"]
-  }
-
-  assert {
-    condition = (
-      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.readers == ["domain:example.com", "qa@example.com"] &&
-      jsondecode(kubernetes_config_map_v1.instance.data["instance.json"]).apps.example_app.writers == ["domain:example.com"]
-    )
-    error_message = "domain:<hosted_domain> is rendered into readers and writers unchanged"
-  }
-}
-
 run "renders_authority_from_the_artifact_for_admins" {
   command = plan
 
   variables {
-    admins    = ["qa@example.com", "ci@example-tools.iam.gserviceaccount.com", "qa@example.com"]
-    readers   = null
-    writers   = null
-    authority = null
+    admins = ["qa@example.com", "ci@example-tools.iam.gserviceaccount.com", "qa@example.com"]
   }
 
   assert {
@@ -1249,24 +1205,31 @@ run "renders_authority_from_the_artifact_for_admins" {
   }
 }
 
-run "refuses_admins_beside_an_explicit_policy" {
+run "refuses_an_app_without_admins" {
   command = plan
 
   variables {
-    admins = ["qa@example.com"]
+    admins = []
   }
 
-  expect_failures = [kubernetes_config_map_v1.instance]
+  expect_failures = [var.admins]
 }
 
 run "refuses_rendered_authority_without_a_person" {
   command = plan
 
   variables {
-    admins    = ["ci@example-tools.iam.gserviceaccount.com"]
-    readers   = null
-    writers   = null
-    authority = null
+    admins = ["ci@example-tools.iam.gserviceaccount.com"]
+  }
+
+  expect_failures = [var.admins]
+}
+
+run "refuses_an_uppercase_admin" {
+  command = plan
+
+  variables {
+    admins = ["QA@example.com"]
   }
 
   expect_failures = [var.admins]
@@ -1276,66 +1239,7 @@ run "refuses_a_rendered_admin_outside_the_hosted_domain" {
   command = plan
 
   variables {
-    admins    = ["qa@example.com", "ada@other.example"]
-    readers   = null
-    writers   = null
-    authority = null
-  }
-
-  expect_failures = [kubernetes_config_map_v1.instance]
-}
-
-run "refuses_neither_admins_nor_an_explicit_policy" {
-  command = plan
-
-  variables {
-    authority = null
-  }
-
-  expect_failures = [kubernetes_config_map_v1.instance]
-}
-
-run "refuses_neither_admins_nor_membership" {
-  command = plan
-
-  variables {
-    readers   = null
-    writers   = null
-    authority = null
-  }
-
-  expect_failures = [kubernetes_config_map_v1.instance]
-}
-
-run "refuses_a_domain_other_than_the_hosted_domain" {
-  command = plan
-
-  variables {
-    readers = ["domain:example.org"]
-  }
-
-  expect_failures = [kubernetes_config_map_v1.instance]
-}
-
-run "refuses_an_uppercase_domain_entry" {
-  command = plan
-
-  variables {
-    writers = ["domain:Example.com"]
-  }
-
-  expect_failures = [var.writers]
-}
-
-run "refuses_placeholder_authority" {
-  command = plan
-
-  variables {
-    authority = {
-      version    = 1
-      admins     = []
-      operations = {}
-    }
+    admins = ["qa@example.com", "ada@other.example"]
   }
 
   expect_failures = [kubernetes_config_map_v1.instance]

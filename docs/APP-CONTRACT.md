@@ -77,8 +77,9 @@ external effects each operation declares (see
 [rendered authority](AUTHORITY.md#rendered-authority)). A requested public
 command keeps its own audience, so a request it does not cover, such as an
 `Employees` command requesting an `Owners` one, is refused when the application
-is built. An explicit policy is still possible, for local development and
-applications built before audiences.
+is built. The GKE app root binds only a rendered authority, so an application
+deployed there must declare audiences; an explicit policy remains for local
+development and conformance fixtures.
 
 The compiler checks required root fields, callback signatures, exact nested
 description records, typed examples and selectors. Both mandatory final profiles

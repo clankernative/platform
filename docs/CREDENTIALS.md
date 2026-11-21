@@ -162,9 +162,11 @@ It cannot issue credentials or invoke interactive management commands. A root
 must be marked `credential_ready` and covered by the token's frozen grant.
 
 Client keys authenticate as `client/<family-id>/<stable-id>`, never as their
-human creator. An operator may grant the explicit
+human creator. An explicit policy may grant the
 `credential_client:<family-id>` membership selector in readers, writers and
-operation actors. A personal key resolves its canonical subject through the
+operation actors. A rendered authority does not grant it, and the GKE app root
+binds only a rendered authority (see
+[rendered authority](AUTHORITY.md#rendered-authority)). A personal key resolves its canonical subject through the
 current selected human-account mapping and the immutable IAP subject binding;
 it then receives that person's current ordinary permissions.
 

@@ -202,6 +202,12 @@ live workload identity, secret custody, provider readiness or OAuth registration
 
 ### Native OAuth app deployment
 
+The app's authority is rendered, and rendering does not yet grant the OAuth
+connection observations its operations need (see
+[rendered authority](../../docs/AUTHORITY.md#rendered-authority)). Until it
+does, every connection read of an app deployed through this root is refused
+as `capability_forbidden`.
+
 In the private instance's app-edge inputs, opt into `oauth_runtime` with a
 `service_account_id`, `custody_secret_ids` and `attestation_secret_ids`. The
 same root also requires `oauth_instance_json`, the canonical single-app snapshot
@@ -222,6 +228,8 @@ container sets and shell
 contract reference. `day2-app.oauth_instance_json` takes the complete canonical
 **single-app** native instance JSON from the private company repo, including
 `control.secrets`, `oauth_clients`, `oauth_runtime` and `oauth_connections`.
+Its app binding is the rendered one: empty `readers` and `writers`, no
+`authority`, and `rendered_authority` naming exactly the root's `admins`.
 This uses the shared native schema rather than a separate Terraform OAuth
 catalog. Use a deployment module's `file(...)` expression or the existing
 instance tooling to supply its bytes as this string input; tfvars files do not
@@ -391,11 +399,9 @@ existing installations unchanged and does not claim security approval.
 Fill workload tfvars with the image digest, artifact ID, hosted domain and the
 app's `admins`: at activation day2 renders the operation policy, readers and
 writers from the artifact's declared audiences (see
-[rendered authority](../../docs/AUTHORITY.md#rendered-authority)). The admins
-need a runtime built from this platform version or later; an older runtime
-refuses an instance that names them, so an app pinned to an older SDK keeps an
-explicit `authority` policy with `readers` and `writers` until it is rebuilt.
-The root refuses both forms together, and neither. Match the node
+[rendered authority](../../docs/AUTHORITY.md#rendered-authority)). There is no
+hand-written policy here: the root binds only a rendered authority, so the app
+must be built with audiences. Match the node
 pool's actual PID bound; a declared value is not a substitute for checking it.
 Initialize, plan and apply `day2-app` with its separate backend. Confirm rollout,
 readiness, authenticated access, denial for an unauthorized account, app operation
@@ -921,7 +927,7 @@ Every struct denies unknown fields.
   "identity": { "scheme": "google_iap", "hosted_domain": "<hosted_domain>" },
   "apps": { "<app_id>": {
     "artifact": "artifacts/<artifact_id>",
-    "readers": [...], "writers": [...], "authority": {...},
+    "readers": [], "writers": [], "rendered_authority": { "admins": [...] },
     "runtime": { "kind": "linux_sqlite_single_v1", "resources": {
       "memory_mib": M, "cpu_millis": C, "process_limit": P,
       "process_limit_enforced_by": "pod", "http_concurrency": H, "shutdown_seconds": S } },
@@ -933,17 +939,17 @@ Several fields are fixed or seeded once:
 
 - `installation`, `environment` and the app key are fixed after the first
   start.
-- Readers, writers and operation actors are lowercase e-mail addresses, or
-  `domain:<hosted_domain>` for everyone at the domain IAP verifies. The root
-  refuses any other `domain:` entry, as day2 does.
-- Managed client membership is explicit as `credential_client:<family-id>`;
-  these principals do not inherit their creator's human membership.
-- Readers, writers and authority are copied into the app's database
-  on the first start only. Later changes need explicit activation (`day2
-  activate`).
+- `readers` and `writers` are always empty and `authority` is absent: day2
+  renders membership and every operation grant from the artifact, for the
+  sorted, de-duplicated `admins`.
+- Admins are lowercase e-mail addresses. At least one is a person, and every
+  person is at the hosted domain; a service account may join them.
+- The rendered authority is stored in the app's database on the first start.
+  A changed binding applies at the next activation (`day2 activate`) or the
+  maintenance `authority-apply` operation; editing the file alone changes no
+  live grant.
 - Platform audit pages and APIs are available only to the enabled authority
   policy's `admins` (app owners). There is no separate audit-access variable.
-- The root refuses an authority with no operations.
 
 ## How the pod satisfies day2-serve
 
@@ -1144,9 +1150,10 @@ runtime_secret_ids = ["freetool-transport-key", "freetool-executor-config"]
 ```
 
 This production Freetool policy uses `domain:wonderly.com` so employees can
-invoke the app's run and result-page operations. The app's `readers`, `writers`,
-and those operations' `actors` must name the same domain, and the verified
-identity contract must set `hosted_domain = "wonderly.com"`. Platform PR #245 is
+invoke the app's run and result-page operations. Those operations declare
+`audience: Employees`, so day2 renders the same domain into the app's
+membership and their actors, and the verified identity contract must set
+`hosted_domain = "wonderly.com"`. Platform PR #245 is
 required because it admits verified domains in non-delegation resource-grant
 actors; `freetool_executor_resource` is such a grant. Platform revisions before
 #245 must list individual employees in the resource policy.

@@ -161,9 +161,9 @@ runtime_secret_ids = [
 ]
 ```
 
-For the production policy, `domain:wonderly.com` must also appear in the
-Freetool app's `readers`, `writers`, and the `actors` of both `run_app` and
-`run_result_page`; the verified identity contract must set
+For the production policy, `run_app` and `run_result_page` declare
+`audience: Employees`, so day2 renders `domain:wonderly.com` into the Freetool
+app's membership and their actors; the verified identity contract must set
 `hosted_domain = "wonderly.com"`. Platform PR #245 is required for this resource
 policy and is merged to main as `c4047a21`: it admits a verified domain in
 non-delegation resource-grant

@@ -21,9 +21,7 @@ variables {
   runtime_resources       = { memory_mib = 512, cpu_millis = 1000, process_limit = 1024, http_concurrency = 4, shutdown_seconds = 30 }
   pod_pids_limit          = 1024
   backup_bucket           = "example-tools-example-backups"
-  readers                 = ["qa@example.com"]
-  writers                 = ["qa@example.com"]
-  authority               = jsondecode(file("tests/oauth-instance.json")).apps.example_app.authority
+  admins                  = ["qa@example.com"]
   security_shell_contract = { namespace = "day2-security", name = "security-shell-contract" }
   oauth_instance_json     = file("tests/oauth-instance.json")
   node_selector           = { "kubernetes.io/arch" = "amd64", "kubernetes.io/os" = "linux", "iam.gke.io/gke-metadata-server-enabled" = "true" }
@@ -174,6 +172,26 @@ run "refuses_no_shell_contract" {
 run "refuses_metadata_disabled_node" {
   command = plan
   variables { node_selector = { "kubernetes.io/arch" = "amd64" } }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_canonical_authority_for_other_admins" {
+  command = plan
+  variables {
+    admins = ["qa@example.com", "ada@example.com"]
+  }
+  expect_failures = [terraform_data.oauth_admission]
+}
+
+run "refuses_an_explicit_policy_in_the_canonical_instance" {
+  command = plan
+  variables {
+    oauth_instance_json = jsonencode(merge(jsondecode(file("tests/oauth-instance.json")), { apps = { example_app = merge(jsondecode(file("tests/oauth-instance.json")).apps.example_app, {
+      readers   = ["qa@example.com"]
+      writers   = ["qa@example.com"]
+      authority = { version = 1, admins = [], operations = { "example.list" = { actors = ["qa@example.com"], mode = { kind = "read" }, models = {} } } }
+    }) } }))
+  }
   expect_failures = [terraform_data.oauth_admission]
 }
 

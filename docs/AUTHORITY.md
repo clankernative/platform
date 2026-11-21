@@ -71,10 +71,11 @@ its policy in one of two ways:
 - **Rendered.** `rendered_authority` names only the app's administrators, and
   activation renders every other grant and the membership from the declarations
   in the artifact being activated. See [rendered authority](#rendered-authority).
-  This is the intended production path.
+  The GKE app root (`deploy/gke/stacks/day2-app`) binds every app this way and
+  offers no other form.
 - **Explicit.** An `authority` policy beside `readers` and `writers`, which the
-  operator writes in full. Local development, conformance fixtures and
-  applications built before audiences use it.
+  operator writes in full. Local development, conformance fixtures and the
+  platform's own tests use it.
 
 For example, this entry belongs under `authority.operations`:
 
@@ -177,9 +178,12 @@ authority's request fingerprint covers the admins and the schedule and endpoint
 bindings.
 
 Resource catalogs and their attachments stay explicit, and a resource grant for
-an `Owners` operation names `owners` rather than people. Managed client keys
-(`credential_client:`) and delegation rules are not rendered: an app that
-admits them keeps an explicit policy. [`day2 platform owners`](APP-OWNERS.md)
+an `Owners` operation names `owners` rather than people. Three grants are not
+rendered yet: managed client keys (`credential_client:`), delegation rules, and
+the OAuth connection observations (`connection.resolve.v1` and the provider
+reads such as `google_calendar.list_events.v1`), which an operation cannot
+declare. The GKE app root binds no explicit policy, so an app deployed there
+cannot use them until the renderer can. [`day2 platform owners`](APP-OWNERS.md)
 changes the active admins as for any policy. The binding's `admins` apply again
 at the next activation, and until they match the active owners a rollout is
 refused as `rollout_authority_changed`, as with an explicit policy.
