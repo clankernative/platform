@@ -1346,6 +1346,11 @@ mod tests {
             result["operators"],
             json!(["ada@example.com", "grace@example.com"])
         );
+        // The instance's apply identity is <org>-infra in its project; every app's admins add it to the owners.
+        assert_eq!(
+            result["apply_identity"],
+            "tools-infra@exampleco-tools.iam.gserviceaccount.com"
+        );
         assert_eq!(
             result["apps"],
             json!([
@@ -1354,6 +1359,7 @@ mod tests {
                     "delivery": "automatic",
                     "sdk": "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
                     "owners": ["lin@example.com"],
+                    "admins": ["lin@example.com", "tools-infra@exampleco-tools.iam.gserviceaccount.com"],
                     "size": "standard",
                     "verification": 4,
                     "schedules": "enabled",
@@ -1380,6 +1386,7 @@ mod tests {
                     "delivery": "manual",
                     "sdk": "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
                     "owners": ["kay@example.com", "lin@example.com"],
+                    "admins": ["kay@example.com", "lin@example.com", "tools-infra@exampleco-tools.iam.gserviceaccount.com"],
                     "size": "large",
                     "verification": 6,
                     "schedules": "paused",
@@ -1441,6 +1448,9 @@ mod tests {
             ("https://git.example.com", "https://git.example.com:3000"),
             (r#""org":"tools""#, r#""org":"Tools""#),
             (r#""org":"tools""#, r#""org":"-tools""#),
+            // <org>-infra must fit GCP's 30-byte service-account ID.
+            (r#""org":"tools""#, r#""org":"ttttttttttttttttttttttttt""#),
+            (r#""org":"tools""#, r#""org":"1tools""#),
             (r#""people":"example.com""#, r#""people":"example""#),
             (r#""apps":"apps.example.com""#, r#""apps":"localhost""#),
             (
@@ -1783,6 +1793,7 @@ mod tests {
                 "installation": "exampleco",
                 "environment": "production",
                 "hosted_domain": "example.com",
+                "admins": ["kay@example.com", "lin@example.com", "tools-infra@exampleco-tools.iam.gserviceaccount.com"],
                 "edge_origin": "https://home.apps.example.com",
                 "runtime_resources": {"memory_mib": 2048, "cpu_millis": 1000, "process_limit": 1024,
                                       "http_concurrency": 4, "shutdown_seconds": 30},

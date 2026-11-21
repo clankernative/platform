@@ -145,7 +145,7 @@ variable "apply_workflow_path" {
 }
 
 variable "apply_service_account_email" {
-  description = "Existing service account that applies the instance's stacks (the bootstrap apply identity)."
+  description = "Existing service account that applies the instance's stacks: the instance's derived apply identity, <org>-infra@<project_id>.iam.gserviceaccount.com, which the bootstrap creates."
   type        = string
 
   validation {
