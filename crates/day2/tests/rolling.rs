@@ -957,7 +957,7 @@ fn offline_activation_uses_target_configuration_and_requires_exclusive_ownership
         desired["apps"]["reports"]["artifact"].as_str().unwrap(),
     ))?;
     let plan = day2::migration::plan(&world.runtime, &target)?;
-    day2::migration::apply(&world.runtime, &target, &plan)?;
+    day2::migration::apply(&world.runtime, &target, &plan, &operator)?;
     let db = rusqlite::Connection::open(world.runtime.db())?;
     let active = day2::authority_state::current(&db)?;
     let lease = fs::OpenOptions::new()
@@ -1609,8 +1609,8 @@ fn a_rolling_store_drains_every_kind_so_nothing_there_is_an_orphaned_request() -
     );
     // A migration abandons nothing here either: it waits for the scheduler.
     let plan = day2::migration::plan(&world.runtime, world.runtime.artifact())?;
-    let error =
-        day2::migration::apply(&world.runtime, world.runtime.artifact(), &plan).unwrap_err();
+    let error = day2::migration::apply(&world.runtime, world.runtime.artifact(), &plan, &operator)
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("migration_requires_drained_invocations"),
         "{error:#}"

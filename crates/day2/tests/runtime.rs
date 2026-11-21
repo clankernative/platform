@@ -476,7 +476,15 @@ fn typed_additive_migration_preserves_rows_and_fails_closed() -> Result<()> {
     // tests; admitted artifacts cannot be modified to construct such a case.
     let mut forged = plan.clone();
     forged.scope = "other/test/relational".into();
-    assert!(migration::apply(&world.runtime, &next, &forged).is_err());
+    assert!(
+        migration::apply(
+            &world.runtime,
+            &next,
+            &forged,
+            &day2::authority_state::LocalOperator::assert_local("admin")?
+        )
+        .is_err()
+    );
     world.runtime.accept(
         "deals.move",
         "alice",
@@ -485,17 +493,32 @@ fn typed_additive_migration_preserves_rows_and_fails_closed() -> Result<()> {
         200,
     )?;
     assert!(
-        migration::apply(&world.runtime, &next, &plan)
-            .unwrap_err()
-            .to_string()
-            .contains("drained")
+        migration::apply(
+            &world.runtime,
+            &next,
+            &plan,
+            &day2::authority_state::LocalOperator::assert_local("admin")?
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("drained")
     );
     assert_eq!(
         world.runtime.execute("pending", Fault::None)?.status,
         "success"
     );
-    migration::apply(&world.runtime, &next, &plan)?;
-    migration::apply(&world.runtime, &next, &plan)?;
+    migration::apply(
+        &world.runtime,
+        &next,
+        &plan,
+        &day2::authority_state::LocalOperator::assert_local("admin")?,
+    )?;
+    migration::apply(
+        &world.runtime,
+        &next,
+        &plan,
+        &day2::authority_state::LocalOperator::assert_local("admin")?,
+    )?;
     assert!(
         world
             .runtime

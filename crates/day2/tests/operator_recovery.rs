@@ -680,10 +680,15 @@ fn a_list_is_abandoned_all_or_nothing_and_checked_before_any_change() -> Result<
     Ok(())
 }
 
-/// One migration of the store onto its own artifact, as each activation runs.
-fn migrate(world: &World) -> Result<Vec<recovery::Receipt>> {
+/// One migration of the store onto its own artifact, as each activation runs,
+/// under `operator`.
+fn migrate_as(world: &World, operator: &LocalOperator) -> Result<Vec<recovery::Receipt>> {
     let plan = day2::migration::plan(&world.runtime, world.runtime.artifact())?;
-    day2::migration::apply(&world.runtime, world.runtime.artifact(), &plan)
+    day2::migration::apply(&world.runtime, world.runtime.artifact(), &plan, operator)
+}
+
+fn migrate(world: &World) -> Result<Vec<recovery::Receipt>> {
+    migrate_as(world, &operator()?)
 }
 
 fn ids(receipts: &[recovery::Receipt]) -> Vec<(&str, Cause)> {
@@ -722,6 +727,11 @@ fn a_migration_abandons_its_orphaned_requests_once_nothing_else_is_runnable() ->
     let lease = serving_lease(&world)?;
     refused(migrate(&world), "another server owns this SQLite app");
     drop(lease);
+    // Abandoning needs an instance operator or a policy administrator.
+    refused(
+        migrate_as(&world, &LocalOperator::assert_local("bob")?),
+        "recovery_operator_required",
+    );
     assert_eq!((pending(&world)?, abandonments(&world)?), (2, 0));
 
     let receipts = migrate(&world)?;
@@ -746,7 +756,7 @@ fn a_migration_abandons_its_orphaned_requests_once_nothing_else_is_runnable() ->
         (status.status.as_str(), status.error.as_str()),
         ("failure", "invocation_abandoned")
     );
-    // The migration, not an operator, abandoned each one, and says why.
+    // Recorded under the migration's operator, marked as the migration's own.
     let db = rusqlite::Connection::open(world.runtime.db())?;
     assert_eq!(
         db.query_row(
@@ -764,18 +774,19 @@ fn a_migration_abandons_its_orphaned_requests_once_nothing_else_is_runnable() ->
         )?,
         (
             "migration:first-read".into(),
-            recovery::MIGRATION_OPERATOR.into(),
+            "admin".into(),
             "no server held the store when a migration began, so nothing will finish this request"
                 .into(),
             "orphaned_request".into(),
-            recovery::MIGRATION_OPERATOR.into(),
+            "admin".into(),
         )
     );
     assert_eq!(
         db.query_row(
             "SELECT count(*) FROM day2_audit_events
-             WHERE kind='recovery' AND outcome='abandoned' AND actor=?1 AND operation='reports.list'",
-            [recovery::MIGRATION_OPERATOR],
+             WHERE kind='recovery' AND outcome='abandoned' AND actor='admin'
+             AND operation='reports.list'",
+            [],
             |row| row.get::<_, i64>(0)
         )?,
         2
@@ -790,7 +801,8 @@ fn a_migration_abandons_its_orphaned_requests_once_nothing_else_is_runnable() ->
     );
     assert_eq!((pending(&world)?, abandonments(&world)?), (0, 3));
     day2::migration::activate(&world.runtime, world.runtime.artifact())?;
-    // An operator's request for an invocation the migration abandoned is refused.
+    // An operator's request for an invocation the migration abandoned is
+    // refused, and operator requests cannot take the migration's keys.
     refused(
         abandon_one(
             &world.runtime,
@@ -798,6 +810,56 @@ fn a_migration_abandons_its_orphaned_requests_once_nothing_else_is_runnable() ->
             &orphan(&world, "late-read", "too-late"),
         ),
         "recovery_already_resolved",
+    );
+    refused(
+        abandon_one(
+            &world.runtime,
+            &operator()?,
+            &orphan(&world, "late-read", "migration:late-read"),
+        ),
+        "invalid_recovery_request_id",
+    );
+    Ok(())
+}
+
+#[test]
+fn a_migration_abandons_only_direct_requests_and_nothing_when_it_fails() -> Result<()> {
+    let world = World::new()?;
+    // A read another app asked for on the actor's behalf: no direct request
+    // admitted it, so the migration leaves it, and its drain check refuses.
+    interrupted_read(&world, "delegated-read")?;
+    let db = rusqlite::Connection::open(world.runtime.db())?;
+    db.execute(
+        "UPDATE day2_invocations SET trigger='delegated' WHERE id='delegated-read'",
+        [],
+    )?;
+    refused(migrate(&world), "migration_requires_drained_invocations");
+    assert_eq!((pending(&world)?, abandonments(&world)?), (1, 0));
+    db.execute(
+        "UPDATE day2_invocations SET status='success' WHERE id='delegated-read'",
+        [],
+    )?;
+    // A migration that fails after deciding abandons nothing: a stale plan
+    // rolls the abandonment back with it.
+    interrupted_read(&world, "cut-off-read")?;
+    let schema: String = db.query_row(
+        "SELECT value FROM day2_meta WHERE key='schema'",
+        [],
+        |row| row.get(0),
+    )?;
+    db.execute(
+        "UPDATE day2_meta SET value='sha256:elsewhere' WHERE key='schema'",
+        [],
+    )?;
+    refused(migrate(&world), "stale_migration_plan");
+    assert_eq!((pending(&world)?, abandonments(&world)?), (1, 0));
+    db.execute(
+        "UPDATE day2_meta SET value=?1 WHERE key='schema'",
+        [&schema],
+    )?;
+    assert_eq!(
+        ids(&migrate(&world)?),
+        vec![("cut-off-read", Cause::OrphanedRequest)]
     );
     Ok(())
 }

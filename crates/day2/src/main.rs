@@ -325,11 +325,16 @@ fn main() -> Result<()> {
             file.sync_all()?;
             serde_json::json!({"plan":output,"id":plan.id()?})
         }
-        ["migration-apply", instance, app, target, input] => {
+        ["migration-apply", instance, app, target, input, operator] => {
             let runtime = Runtime::load(Path::new(instance), app)?;
             let target = LoadedArtifact::load(Path::new(target))?;
             let plan = serde_json::from_slice(&fs::read(input)?)?;
-            let abandoned = day2::migration::apply(&runtime, &target, &plan)?;
+            let abandoned = day2::migration::apply(
+                &runtime,
+                &target,
+                &plan,
+                &day2::authority_state::LocalOperator::assert_local(operator)?,
+            )?;
             serde_json::json!({"applied":true,"activation_required":target.id(),"abandoned":abandoned})
         }
         [
@@ -376,7 +381,7 @@ fn main() -> Result<()> {
             )?
         }
         _ => bail!(
-            "usage: day2 native-storage-metadata INSTANCE APP | native-profile-manifest REVIEWED_STATIC_PROFILE_DOCUMENT | init INSTANCE APP | admit INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | recovery-abandon INSTANCE APP LOCAL_OPERATOR REQUESTS_JSON | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | replay-verification ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | lab-crash INSTANCE APP ID WRITE_INDEX"
+            "usage: day2 native-storage-metadata INSTANCE APP | native-profile-manifest REVIEWED_STATIC_PROFILE_DOCUMENT | init INSTANCE APP | admit INSTANCE APP | invoke INSTANCE APP OPERATION ACTOR ID JSON | resume INSTANCE APP ID | inspect INSTANCE APP | recovery-abandon INSTANCE APP LOCAL_OPERATOR REQUESTS_JSON | audit-events INSTANCE APP ACTOR BEFORE | describe INSTANCE APP | check-properties INSTANCE APP EVIDENCE_DIR | replay-properties ARTIFACT EVIDENCE | replay-verification ARTIFACT EVIDENCE | trace INSTANCE APP ID | replay ARTIFACT TRACE | migration-plan INSTANCE APP TARGET PLAN_FILE | migration-apply INSTANCE APP TARGET PLAN_FILE LOCAL_OPERATOR | activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID | lab-crash INSTANCE APP ID WRITE_INDEX"
         ),
     };
     println!("{}", serde_json::to_string_pretty(&output)?);

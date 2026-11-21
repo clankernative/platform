@@ -1,6 +1,6 @@
 //! Local-operator resolution of pending invocations that will never finish.
 //!
-//! Two kinds qualify, and the operator states which one they found:
+//! Two kinds qualify. An operator's request states which one they found:
 //! - Blocked by an authority change. A block is permanent: the invocation stays
 //!   pending, never runs a business phase again, and only settles evidence for
 //!   external attempts admitted before the block.
@@ -9,8 +9,8 @@
 //!   maintenance stopped the app mid-request. Only that request was running it:
 //!   the scheduler never resumes it, and its random identity is never repeated.
 //!   A migration ends the ones it finds itself ([`abandon_orphaned_requests`]),
-//!   since it holds the store against every server; an operator may also end
-//!   one explicitly.
+//!   under its operator, since it holds the store against every `day2-serve`;
+//!   an operator may also end one explicitly.
 //!
 //! Abandoning one makes that end explicit. It finishes the invocation as a
 //! failure, refuses any dispatch permit that has not started, and records what
@@ -22,8 +22,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// The most invocations one call abandons: a reviewed handful, never a sweep.
+/// The most invocations one operator request abandons: a reviewed handful,
+/// never a sweep. Only a migration abandons more, and only orphaned requests.
 pub const MAX_REQUESTS: usize = 16;
+
+/// The `request_id` prefix of the abandonments a migration makes. Operator
+/// requests may not use it, so the two never collide.
+pub const MIGRATION_REQUEST_PREFIX: &str = "migration:";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -44,7 +49,9 @@ impl Request {
     /// is stopped for it.
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            !self.request_id.trim().is_empty() && self.request_id.len() <= 128,
+            !self.request_id.trim().is_empty()
+                && self.request_id.len() <= 128
+                && !self.request_id.starts_with(MIGRATION_REQUEST_PREFIX),
             "invalid_recovery_request_id"
         );
         ensure!(
@@ -251,56 +258,81 @@ pub fn abandon(
     })
 }
 
-/// Who abandons the orphaned requests a migration finds: the migration itself,
-/// not an operator.
-pub const MIGRATION_OPERATOR: &str = "day2-migration";
-
 /// Why a migration abandoned an orphaned request, as its row records.
 const MIGRATION_REASON: &str =
     "no server held the store when a migration began, so nothing will finish this request";
 
+/// Whether a pending invocation is an orphaned request: unblocked, admitted by a
+/// direct request, of an operation this store's scheduler never resumes. The
+/// one definition both an operator's request and a migration use.
+fn orphaned_request(
+    runtime: &Runtime,
+    scheduled: &[String],
+    status: &str,
+    trigger: &str,
+    operation: &str,
+    blocked: bool,
+) -> bool {
+    status == "pending"
+        && !blocked
+        && trigger == crate::audit::Trigger::Request.as_str()
+        && !runtime.rolling()
+        && !scheduled.iter().any(|name| name == operation)
+}
+
 /// Abandon, in the migration's own transaction, every orphaned request in a
-/// store the migration holds against every server: each pending, unblocked
-/// invocation that a direct request admitted, of an operation the scheduler
-/// never resumes. They record [`Cause::OrphanedRequest`] under
-/// [`MIGRATION_OPERATOR`], with a `request_id` of `migration:` and the
-/// invocation id. An orphaned request is the one kind of pending work that is
-/// provably over without an operator: nothing runs it again, and the request
-/// that admitted it has ended. Otherwise each one, though harmless, would refuse
-/// every migration until an operator abandoned it.
+/// store the migration holds against every `day2-serve`. Each records
+/// [`Cause::OrphanedRequest`] under the migration's operator, who must be an
+/// instance operator or a policy administrator, with a `request_id` of
+/// [`MIGRATION_REQUEST_PREFIX`] and the invocation id. An orphaned request is
+/// the one kind of pending work that is provably over without an operator's
+/// review: nothing runs it again, and the request that admitted it has ended.
+/// Otherwise each one, though harmless, would refuse every migration until an
+/// operator abandoned it.
 ///
 /// Blocked work stays for an operator to judge. Work the scheduler finishes
 /// must still drain first: the migration's drain check then refuses the store,
 /// and these abandonments roll back with it. A rolling store, which drains
 /// every kind, and native storage, whose serving lock does not exclude
-/// servers, have none.
+/// servers, have none. The store must hold `day2_abandonments`, which every
+/// runtime from `3a29178b` on creates.
 pub(crate) fn abandon_orphaned_requests(
     tx: &Connection,
     runtime: &Runtime,
-    _exclusion: &crate::deployment::MigrationExclusion,
+    exclusion: &crate::deployment::MigrationExclusion,
+    operator: &LocalOperator,
     at_ms: i64,
 ) -> Result<Vec<Receipt>> {
+    exclusion.check(runtime)?;
     if runtime.rolling() || !crate::deployment::ordinary_store(runtime)? {
         return Ok(Vec::new());
     }
     let scheduled = crate::invocations::scheduled_operations(runtime);
-    let requested = {
+    let pending = {
         let mut statement = tx.prepare(
-            "SELECT id,artifact,operation FROM day2_invocations
-             WHERE status='pending' AND trigger=?1 ORDER BY id",
+            "SELECT id,artifact,operation,status,trigger FROM day2_invocations
+             WHERE status='pending' ORDER BY id",
         )?;
         statement
-            .query_map([crate::audit::Trigger::Request.as_str()], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?
-            .collect::<rusqlite::Result<Vec<(String, String, String)>>>()?
+            .collect::<rusqlite::Result<Vec<(String, String, String, String, String)>>>()?
     };
     let mut orphaned = Vec::new();
-    for (invocation, artifact, operation) in requested {
-        if !scheduled.contains(&operation) && !crate::authority_state::is_blocked(tx, &invocation)?
+    for (invocation, artifact, operation, status, trigger) in pending {
+        // Only a direct request's work can be orphaned; check the block last.
+        if orphaned_request(runtime, &scheduled, &status, &trigger, &operation, false)
+            && !crate::authority_state::is_blocked(tx, &invocation)?
         {
             orphaned.push(Request {
-                request_id: format!("migration:{invocation}"),
+                request_id: format!("{MIGRATION_REQUEST_PREFIX}{invocation}"),
                 invocation,
                 expected_artifact: artifact,
                 reason: MIGRATION_REASON.into(),
@@ -311,11 +343,15 @@ pub(crate) fn abandon_orphaned_requests(
     if orphaned.is_empty() {
         return Ok(Vec::new());
     }
-    let operator = LocalOperator::assert_local(MIGRATION_OPERATOR)?;
     let active = crate::authority_state::current(tx)?;
+    ensure!(
+        runtime.operators()?.contains(operator.name())
+            || active.policy()?.admins.contains(operator.name()),
+        "recovery_operator_required"
+    );
     let decision = Decision {
         runtime,
-        operator: &operator,
+        operator,
         active: &active,
         scheduled: &scheduled,
         at_ms,
@@ -343,11 +379,6 @@ struct Decision<'a> {
 }
 
 impl Decision<'_> {
-    /// Whether a pending invocation of `operation` is one only its request ran.
-    fn unscheduled(&self, operation: &str) -> bool {
-        !self.runtime.rolling() && !self.scheduled.iter().any(|name| name == operation)
-    }
-
     fn abandon(&self, tx: &Connection, request: &Request, payload: &str) -> Result<Receipt> {
         let (runtime, operator, active, at_ms) =
             (self.runtime, self.operator, self.active, self.at_ms);
@@ -379,16 +410,18 @@ impl Decision<'_> {
             Failure::ArtifactBindingChanged
         );
         let blocked = crate::authority_state::is_blocked(tx, &request.invocation)?;
-        let qualifies = status == "pending"
-            && match request.cause {
-                Cause::Blocked => blocked,
-                // A blocked request is abandoned as blocked, which keeps the cause exact.
-                Cause::OrphanedRequest => {
-                    !blocked
-                        && trigger == crate::audit::Trigger::Request.as_str()
-                        && self.unscheduled(&operation)
-                }
-            };
+        let qualifies = match request.cause {
+            Cause::Blocked => status == "pending" && blocked,
+            // A blocked request is abandoned as blocked, which keeps the cause exact.
+            Cause::OrphanedRequest => orphaned_request(
+                self.runtime,
+                self.scheduled,
+                &status,
+                &trigger,
+                &operation,
+                blocked,
+            ),
+        };
         ensure!(qualifies, request.cause.refusal());
         let receipt = Receipt {
             invocation: request.invocation.clone(),

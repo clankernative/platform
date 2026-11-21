@@ -143,6 +143,8 @@ struct FakeCluster {
     denied_operator: Option<String>,
     /// An invocation `day2 recovery-abandon` refuses, refusing the whole list.
     refused_invocation: Option<String>,
+    /// An orphaned request `day2 migration-apply` abandons in the rehearsal copy.
+    orphaned_request: Option<String>,
     drop_on_copy_out: Option<String>,
     annotations: Rc<RefCell<BTreeMap<String, String>>>,
     replicas: u64,
@@ -582,7 +584,23 @@ impl Cluster for FakeCluster {
                     .write_all(br#"{"format":1,"add_nullable_text":[]}"#)?;
                 String::new()
             }
-            ["exec", _, "--", DAY2, "migration-apply", ..] => r#"{"applied":true}"#.into(),
+            ["exec", _, "--", DAY2, "migration-apply", instance, "example_app", _, PLAN, operator] => {
+                let abandoned = match (&self.orphaned_request, *instance == ADMISSION_INSTANCE) {
+                    (Some(invocation), true) => vec![day2::recovery::Receipt {
+                        invocation: invocation.clone(),
+                        cause: day2::recovery::Cause::OrphanedRequest,
+                        evidence: day2::recovery::EvidenceSummary::default(),
+                        children: Vec::new(),
+                    }],
+                    _ => Vec::new(),
+                };
+                // Like `day2 migration-apply`: the operator is checked only to abandon.
+                ensure!(
+                    abandoned.is_empty() || self.denied_operator.as_deref() != Some(*operator),
+                    "Error: recovery_operator_required"
+                );
+                serde_json::to_string(&json!({"applied": true, "abandoned": abandoned}))?
+            }
             ["exec", _, "--", DAY2, "operation-claim", ..] => r#"{"claimed":true}"#.into(),
             ["exec", _, "--", DAY2, "recovery-abandon", CURRENT, "example_app", operator, requests] => {
                 ensure!(self.denied_operator.as_deref() != Some(*operator), "Error: recovery_operator_required");
@@ -696,6 +714,7 @@ impl Harness {
             fail_on: None,
             denied_operator: None,
             refused_invocation: None,
+            orphaned_request: None,
             drop_on_copy_out: None,
             annotations: self.annotations.clone(),
             replicas: 1,
@@ -795,6 +814,29 @@ impl Harness {
             .unwrap()
             .iter()
             .map(|event| event["step"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// The details the journal recorded for `step`, in order.
+    fn journal_details(&self, step: &str) -> Vec<Value> {
+        let backups = self.directory.path().join("backups");
+        let file = fs::read_dir(&backups)
+            .unwrap()
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".session.json")
+            })
+            .unwrap();
+        let journal: Value = serde_json::from_slice(&fs::read(file.path()).unwrap()).unwrap();
+        journal["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["step"] == step)
+            .map(|event| event["detail"].clone())
             .collect()
     }
 }
@@ -1940,6 +1982,41 @@ fn after_the_fence_the_old_image_is_never_restarted() -> Result<()> {
 }
 
 #[test]
+fn activation_records_the_requests_its_migration_abandons_before_the_confirmation() -> Result<()> {
+    let harness = Harness::new();
+    let mut session = harness.open(
+        Operation::Activate,
+        |cluster| cluster.orphaned_request = Some("page-cut-off".into()),
+        true,
+    )?;
+    prepare(&mut session)?;
+    session.workflow("backup")?;
+    session.copy_backup()?;
+    session.prepare_rehearsal()?;
+    session.migration("plan")?;
+    session.admission()?;
+    // Once from the copy taken while the source served, then from the copy
+    // taken once it stopped, which the live migration matches.
+    let details = harness.journal_details("rehearsal-abandoned");
+    assert_eq!(
+        details
+            .iter()
+            .map(|detail| detail["online"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(true), json!(false)]
+    );
+    for detail in &details {
+        assert_eq!(detail["abandoned"][0]["invocation"], "page-cut-off");
+        assert_eq!(detail["abandoned"][0]["cause"], "orphaned_request");
+    }
+    let steps = harness.journal();
+    let at = |step: &str| steps.iter().position(|s| s == step).unwrap();
+    assert!(at("rehearsal-abandoned") < at("target-admitted"));
+    assert!(!steps.iter().any(|step| step == "confirmed"));
+    Ok(())
+}
+
+#[test]
 fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
     let harness = Harness::new();
     let mut session = harness.open(Operation::Activate, |_| {}, true)?;
@@ -2018,9 +2095,22 @@ fn activate_leaves_the_app_stopped_for_the_new_image() -> Result<()> {
     assert!(
         at("backup-copied") < at("migration-plan")
             && at("migration-plan") < at("target-admission")
-            && at("target-admission") < at("target-admitted")
+            && at("target-admission") < at("rehearsal-abandoned")
+            && at("rehearsal-abandoned") < at("target-admitted")
             && at("target-admitted") < at("confirmed")
             && at("confirmed") < at("fence")
+    );
+    // Every migration runs under the request's operator: the rehearsals while
+    // the source serves and once it stopped, then the live one.
+    assert_eq!(
+        harness
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| call.iter().any(|arg| arg == "migration-apply"))
+            .map(|call| call.last().cloned().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["ops@example.com", "ops@example.com", "ops@example.com"]
     );
     assert!(
         at("fence") < at("migration-applied")

@@ -74,7 +74,7 @@ Build the new app, then use the artifact directory printed by that build:
 
 ```console
 build-out/bin/day2 migration-plan INSTANCE APP TARGET_ARTIFACT PLAN_FILE
-build-out/bin/day2 migration-apply INSTANCE APP TARGET_ARTIFACT PLAN_FILE
+build-out/bin/day2 migration-apply INSTANCE APP TARGET_ARTIFACT PLAN_FILE LOCAL_OPERATOR
 build-out/bin/day2 activate INSTANCE APP TARGET_ARTIFACT LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID
 ```
 

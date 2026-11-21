@@ -179,14 +179,15 @@ fn plan_contracts(
     })
 }
 
-/// Apply a checked migration plan while no server holds the store. The
-/// migration first abandons any orphaned request it finds
-/// ([`crate::recovery::abandon_orphaned_requests`]) and returns their receipts;
-/// it commits them with the migration, or refuses and changes nothing.
+/// Apply a checked migration plan while no `day2-serve` holds the store. The
+/// migration first abandons any orphaned request it finds, under `operator`
+/// ([`crate::recovery::abandon_orphaned_requests`]), and returns their
+/// receipts; it commits them with the migration, or refuses and changes nothing.
 pub fn apply(
     runtime: &Runtime,
     target: &LoadedArtifact,
     supplied: &Plan,
+    operator: &crate::authority_state::LocalOperator,
 ) -> Result<Vec<crate::recovery::Receipt>> {
     let exclusion = crate::deployment::migration_exclusion(
         runtime.db().parent().context("store directory")?,
@@ -200,7 +201,7 @@ pub fn apply(
         &target.contract().schema,
         supplied,
         &plan(runtime, target)?,
-        |tx| crate::recovery::abandon_orphaned_requests(tx, runtime, &exclusion, at_ms),
+        |tx| crate::recovery::abandon_orphaned_requests(tx, runtime, &exclusion, operator, at_ms),
     )
 }
 
