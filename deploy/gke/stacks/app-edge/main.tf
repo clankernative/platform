@@ -364,6 +364,21 @@ resource "google_artifact_registry_repository" "app" {
     }
   }
 
+  # Apps pin an SDK release's day2-tooling and day2-runtime images by digest.
+  # Each release pushes three versions per package, so the 20 most recent
+  # cover only about six releases, and an app pinned a day or two ago would
+  # lose its CI image. Keeping the tagged index also keeps the image and
+  # attestation manifests it references.
+  cleanup_policies {
+    id     = "keep-sdk-releases"
+    action = "KEEP"
+
+    condition {
+      tag_state    = "TAGGED"
+      tag_prefixes = ["sdk-"]
+    }
+  }
+
   cleanup_policies {
     id     = "delete-everything-else"
     action = "DELETE"
