@@ -68,6 +68,7 @@ Workflow :: [].{
 		["maintain", "rollout", request_file] => Ok(Maintain("rollout", request_file))
 		["maintain", "runtime-rollout", request_file] => Ok(Maintain("runtime-rollout", request_file))
 		["maintain", "mark-activated", request_file] => Ok(Maintain("mark-activated", request_file))
+		["maintain", "recovery-abandon", request_file] => Ok(Maintain("recovery-abandon", request_file))
 		["backup", instance, app_name, output] => Ok(Backup(instance, app_name, output))
 		["restore", "inspect", backup] => Ok(RestoreInspect(backup))
 		["restore", "protected", instance, app_name] => Ok(RestoreProtected(instance, app_name))
@@ -122,7 +123,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | ui-lock SOURCE | extension verify|policy SOURCE | extension pack SOURCE SIGNING_KEY_PEM | extension fleet SOURCE GCP_PROJECT | extension local SOURCE NEW_DIRECTORY | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | restore protected INSTANCE APP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
+			"usage: day2 platform build SOURCE | ui-lock SOURCE | extension verify|policy SOURCE | extension pack SOURCE SIGNING_KEY_PEM | extension fleet SOURCE GCP_PROJECT | extension local SOURCE NEW_DIRECTORY | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | restore protected INSTANCE APP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|recovery-abandon|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
 		)
 	}
 
@@ -154,7 +155,7 @@ Workflow :: [].{
 					"resources save|attach|propose|decide|allocate|recover|resolve-overruns INSTANCE APP LOCAL_OPERATOR INPUT_JSON_FILE",
 					"authority apply INSTANCE APP LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID",
 					"authority activate INSTANCE APP TARGET LOCAL_OPERATOR EXPECTED_STAMP_JSON REQUEST_ID",
-					"maintain inspect|backup|authority-apply|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
+					"maintain inspect|backup|authority-apply|recovery-abandon|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
 				],
 			}),
 		)
@@ -214,6 +215,11 @@ expect match Workflow.parse(["maintain", "activate", "request.json"]) {
 
 expect match Workflow.parse(["maintain", "mark-activated", "request.json"]) {
 	Ok(Maintain("mark-activated", "request.json")) => Bool.True
+	_ => Bool.False
+}
+
+expect match Workflow.parse(["maintain", "recovery-abandon", "request.json"]) {
+	Ok(Maintain("recovery-abandon", "request.json")) => Bool.True
 	_ => Bool.False
 }
 

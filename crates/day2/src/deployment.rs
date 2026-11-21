@@ -634,6 +634,40 @@ fn maintenance_lease(
     runtime: &Runtime,
     operator: &crate::authority_state::LocalOperator,
 ) -> Result<StoreMaintenanceLease> {
+    let (operation, file) = exclusive_store(runtime, operator)?;
+    Ok(StoreMaintenanceLease {
+        database: runtime.db().to_path_buf(),
+        _operation: operation,
+        _file: file,
+    })
+}
+
+/// Proof, for an operator who may act on this ordinary store, that no serving
+/// process holds it. Abandoning an orphaned request needs only this exclusion;
+/// unlike [`StoreMaintenanceLease`] it grants no maintenance initialization.
+pub(crate) struct RecoveryExclusion {
+    _operation: operation::OperationLease,
+    _serving: File,
+}
+
+pub(crate) fn recovery_exclusion(
+    runtime: &Runtime,
+    operator: &crate::authority_state::LocalOperator,
+) -> Result<RecoveryExclusion> {
+    let (operation, serving) = exclusive_store(runtime, operator)?;
+    Ok(RecoveryExclusion {
+        _operation: operation,
+        _serving: serving,
+    })
+}
+
+/// The operation lease and the exclusive serving lock of an ordinary store, for
+/// an instance operator or a policy administrator. A shared serving lease, held
+/// by every `day2-serve`, makes this fail.
+fn exclusive_store(
+    runtime: &Runtime,
+    operator: &crate::authority_state::LocalOperator,
+) -> Result<(operation::OperationLease, File)> {
     let operation = operation::OperationLease::acquire(
         runtime.db().parent().context("store directory")?,
         runtime.app(),
@@ -656,15 +690,12 @@ fn maintenance_lease(
                 .contains(operator.name())))?,
         "maintenance_operator_required"
     );
-    Ok(StoreMaintenanceLease {
-        database: runtime.db().to_path_buf(),
-        _operation: operation,
-        _file: serving_lock(
-            runtime.db().parent().context("store directory")?,
-            runtime.app(),
-            false,
-        )?,
-    })
+    let serving = serving_lock(
+        runtime.db().parent().context("store directory")?,
+        runtime.app(),
+        false,
+    )?;
+    Ok((operation, serving))
 }
 
 pub fn admit_maintenance_store(

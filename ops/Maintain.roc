@@ -62,6 +62,14 @@ Maintain :: [].{
 				_ = Capability.call!("maintenance-confirm", "{}", host!)?
 				workflow!("authority-apply", host!)?
 			}
+			"recovery-abandon" => {
+				# The app is stopped, so no server holds its store: an orphaned
+				# request qualifies only now. Each listed invocation is abandoned
+				# after a verified backup and a confirmation.
+				_ = backup!(host!)?
+				_ = Capability.call!("maintenance-confirm", "{}", host!)?
+				workflow!("recovery-abandon", host!)?
+			}
 			"activate" => {
 				_ = backup!(host!)?
 				_ = Capability.call!("maintenance-rehearsal-copy", "{}", host!)?
@@ -86,7 +94,7 @@ Maintain :: [].{
 				Capability.call!("maintenance-mark-activated", "{}", host!)?
 			}
 			_ => return Err(
-				"maintain operation must be inspect, backup, authority-apply, activate, mark-activated, rollout or runtime-rollout",
+				"maintain operation must be inspect, backup, authority-apply, recovery-abandon, activate, mark-activated, rollout or runtime-rollout",
 			)
 		}
 		Capability.call!("maintenance-finish", "{}", host!)

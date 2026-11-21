@@ -1,15 +1,27 @@
-//! Local-operator resolution of invocations blocked by an authority change.
+//! Local-operator resolution of pending invocations that will never finish.
 //!
-//! A block is permanent: the invocation stays pending, never runs a business
-//! phase again, and only settles evidence for external attempts admitted before
-//! the block. Abandoning one makes that end explicit. It finishes the invocation
-//! as a failure, refuses any dispatch permit that has not started, and records
-//! what is known about its external effects. Nothing is retried or rolled back,
-//! and business rows are never edited.
+//! Two kinds qualify, and the operator states which one they found:
+//! - Blocked by an authority change. A block is permanent: the invocation stays
+//!   pending, never runs a business phase again, and only settles evidence for
+//!   external attempts admitted before the block.
+//! - An orphaned request. A direct request admitted a query or a page load, and
+//!   the serving process stopped before finishing it, for example when
+//!   maintenance stopped the app mid-request. Only that request was running it:
+//!   the scheduler never resumes it, and its random identity is never repeated.
+//!   It stays pending, and a migration refuses the store until it is gone.
+//!
+//! Abandoning one makes that end explicit. It finishes the invocation as a
+//! failure, refuses any dispatch permit that has not started, and records what
+//! is known about its external effects. Nothing is retried or rolled back, and
+//! business rows are never edited.
 use crate::{authority_state::LocalOperator, error::Failure, protocol::Outcome, store::Runtime};
 use anyhow::{Context as _, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+/// The most invocations one call abandons: a reviewed handful, never a sweep.
+pub const MAX_REQUESTS: usize = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -21,12 +33,86 @@ pub struct Request {
     /// The artifact that admitted the invocation, as the operator inspected it.
     pub expected_artifact: String,
     pub reason: String,
+    /// Why the operator says it will never finish.
+    pub cause: Cause,
+}
+
+impl Request {
+    /// The checks that need no store, so a list can be refused before an app
+    /// is stopped for it.
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.request_id.trim().is_empty() && self.request_id.len() <= 128,
+            "invalid_recovery_request_id"
+        );
+        ensure!(
+            !self.invocation.trim().is_empty() && self.invocation.len() <= 512,
+            "invalid_recovery_invocation"
+        );
+        ensure!(
+            !self.reason.trim().is_empty()
+                && self.reason.len() <= 200
+                && !self.reason.chars().any(char::is_control),
+            "invalid_recovery_reason"
+        );
+        Ok(())
+    }
+}
+
+/// A list one call abandons: 1 to [`MAX_REQUESTS`] valid requests, each
+/// `request_id` and each invocation once.
+pub fn validate(requests: &[Request]) -> Result<()> {
+    ensure!(
+        (1..=MAX_REQUESTS).contains(&requests.len()),
+        "recovery_requests_count"
+    );
+    let mut keys = BTreeSet::new();
+    let mut invocations = BTreeSet::new();
+    for request in requests {
+        request.validate()?;
+        ensure!(
+            keys.insert(request.request_id.as_str())
+                && invocations.insert(request.invocation.as_str()),
+            "recovery_request_duplicate"
+        );
+    }
+    Ok(())
+}
+
+/// Why a pending invocation will never finish.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Cause {
+    /// An authority change blocked it.
+    Blocked,
+    /// A direct request for work the scheduler never resumes, whose serving
+    /// process stopped before finishing it.
+    OrphanedRequest,
+}
+
+impl Cause {
+    /// The wire name, as requests and receipts carry it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::OrphanedRequest => "orphaned_request",
+        }
+    }
+
+    /// The refusal when the invocation is not what the operator said.
+    fn refusal(self) -> &'static str {
+        match self {
+            Self::Blocked => "recovery_requires_blocked_invocation",
+            Self::OrphanedRequest => "recovery_requires_orphaned_request",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
     pub invocation: String,
+    pub cause: Cause,
     pub evidence: EvidenceSummary,
     /// Command requests the invocation made. Abandoning never cascades to them.
     pub children: Vec<String>,
@@ -84,24 +170,61 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Finish a blocked invocation as a failure (`invocation_abandoned`).
+/// Finish each listed invocation as a failure (`invocation_abandoned`), all or
+/// nothing: one refusal leaves every listed invocation as it was.
 ///
-/// The invocation may belong to an earlier artifact. Its block row stays, and
-/// every later read, execution or duplicate request reports the abandonment. A
+/// An invocation may belong to an earlier artifact. A block row stays, and every
+/// later read, execution or duplicate request reports the abandonment. A
 /// provider result that arrives late is still recorded as evidence and never
 /// runs completion.
-pub fn abandon(runtime: &Runtime, operator: &LocalOperator, request: &Request) -> Result<Receipt> {
-    ensure!(
-        !request.request_id.trim().is_empty() && request.request_id.len() <= 128,
-        "invalid_recovery_request_id"
-    );
-    ensure!(
-        !request.reason.trim().is_empty()
-            && request.reason.len() <= 200
-            && !request.reason.chars().any(char::is_control),
-        "invalid_recovery_reason"
-    );
-    let payload = serde_json::to_string(&(request, operator.name()))?;
+///
+/// An orphaned request must be pending, unblocked, admitted by a direct request
+/// (`trigger` `request`), and of an operation the scheduler never resumes in
+/// this store ([`crate::invocations::scheduled_operations`]): a query or a page
+/// load in an ordinary non-rolling store. A rolling store drains every kind, so
+/// nothing there is orphaned. The decision holds the store's recovery
+/// exclusion, which no `day2-serve` can hold beside it: no runtime holds the
+/// invocation, and the request that admitted it has ended.
+pub fn abandon(
+    runtime: &Runtime,
+    operator: &LocalOperator,
+    requests: &[Request],
+) -> Result<Vec<Receipt>> {
+    validate(requests)?;
+    let payloads = requests
+        .iter()
+        .map(|request| serde_json::to_string(&(request, operator.name())))
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    // A recorded request returns its receipt without a new decision, so
+    // repeating one needs no exclusion.
+    let recorded = runtime.sql_read(|db| {
+        let mut recorded = BTreeSet::new();
+        for request in requests {
+            if db
+                .query_row(
+                    "SELECT 1 FROM day2_abandonments WHERE request_id=?1",
+                    [&request.request_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                recorded.insert(request.request_id.clone());
+            }
+        }
+        Ok(recorded)
+    })?;
+    let _exclusion = if requests.iter().any(|request| {
+        request.cause == Cause::OrphanedRequest && !recorded.contains(&request.request_id)
+    }) {
+        Some(
+            crate::deployment::recovery_exclusion(runtime, operator)
+                .context("recovery_requires_exclusive_store")?,
+        )
+    } else {
+        None
+    };
+    let scheduled = crate::invocations::scheduled_operations(runtime);
     let at_ms = runtime.host().now_ms()?;
     runtime.sql_write(|tx| {
         runtime.check_binding(tx)?;
@@ -111,6 +234,40 @@ pub fn abandon(runtime: &Runtime, operator: &LocalOperator, request: &Request) -
                 || active.policy()?.admins.contains(operator.name()),
             "recovery_operator_required"
         );
+        let decision = Decision {
+            runtime,
+            operator,
+            active: &active,
+            scheduled: &scheduled,
+            at_ms,
+        };
+        let mut receipts = Vec::with_capacity(requests.len());
+        for (request, payload) in requests.iter().zip(&payloads) {
+            receipts.push(decision.abandon(tx, request, payload)?);
+        }
+        Ok(receipts)
+    })
+}
+
+/// What every item of one call is decided under.
+struct Decision<'a> {
+    runtime: &'a Runtime,
+    operator: &'a LocalOperator,
+    active: &'a crate::authority_state::ActiveAuthority,
+    /// The operations this store's scheduler resumes.
+    scheduled: &'a [String],
+    at_ms: i64,
+}
+
+impl Decision<'_> {
+    /// Whether a pending invocation of `operation` is one only its request ran.
+    fn unscheduled(&self, operation: &str) -> bool {
+        !self.runtime.rolling() && !self.scheduled.iter().any(|name| name == operation)
+    }
+
+    fn abandon(&self, tx: &Connection, request: &Request, payload: &str) -> Result<Receipt> {
+        let (runtime, operator, active, at_ms) =
+            (self.runtime, self.operator, self.active, self.at_ms);
         if let Some((stored, receipt)) = tx
             .query_row(
                 "SELECT payload,receipt FROM day2_abandonments WHERE request_id=?1",
@@ -122,37 +279,52 @@ pub fn abandon(runtime: &Runtime, operator: &LocalOperator, request: &Request) -
             ensure!(stored == payload, "recovery_request_conflict");
             return crate::json::decode(receipt.as_bytes());
         }
-        ensure!(!abandoned(tx, &request.invocation)?, "recovery_already_resolved");
-        let (artifact, operation, status): (String, String, String) = tx
+        ensure!(
+            !abandoned(tx, &request.invocation)?,
+            "recovery_already_resolved"
+        );
+        let (artifact, operation, status, trigger): (String, String, String, String) = tx
             .query_row(
-                "SELECT artifact,operation,status FROM day2_invocations WHERE id=?1",
+                "SELECT artifact,operation,status,trigger FROM day2_invocations WHERE id=?1",
                 [&request.invocation],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?
             .context(Failure::NotFound)?;
-        ensure!(artifact == request.expected_artifact, Failure::ArtifactBindingChanged);
         ensure!(
-            status == "pending" && crate::authority_state::is_blocked(tx, &request.invocation)?,
-            "recovery_requires_blocked_invocation"
+            artifact == request.expected_artifact,
+            Failure::ArtifactBindingChanged
         );
+        let blocked = crate::authority_state::is_blocked(tx, &request.invocation)?;
+        let qualifies = status == "pending"
+            && match request.cause {
+                Cause::Blocked => blocked,
+                // A blocked request is abandoned as blocked, which keeps the cause exact.
+                Cause::OrphanedRequest => {
+                    !blocked
+                        && trigger == crate::audit::Trigger::Request.as_str()
+                        && self.unscheduled(&operation)
+                }
+            };
+        ensure!(qualifies, request.cause.refusal());
         let receipt = Receipt {
             invocation: request.invocation.clone(),
+            cause: request.cause,
             evidence: classify_effects(tx, &request.invocation)?,
             children: children_in(tx, &request.invocation)?,
         };
         ensure!(
-            tx.execute(
-                "UPDATE day2_invocations SET status='failure',outcome=?1 WHERE id=?2 AND status='pending'",
-                params![serde_json::to_string(&abandoned_outcome())?, request.invocation],
-            )? == 1,
-            "recovery_requires_blocked_invocation"
-        );
+        tx.execute(
+            "UPDATE day2_invocations SET status='failure',outcome=?1 WHERE id=?2 AND status='pending'",
+            params![serde_json::to_string(&abandoned_outcome())?, request.invocation],
+        )? == 1,
+        request.cause.refusal()
+    );
         // The operator acts under the active authority; record it with its policy.
         tx.execute(
             "INSERT INTO day2_abandonments(request_id,invocation,operator,reason,evidence,
-             authority_epoch,authority_revision,policy,payload,at_ms,receipt)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+         authority_epoch,authority_revision,policy,payload,at_ms,receipt)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 request.request_id,
                 request.invocation,
@@ -179,7 +351,7 @@ pub fn abandon(runtime: &Runtime, operator: &LocalOperator, request: &Request) -
             },
         )?;
         Ok(receipt)
-    })
+    }
 }
 
 /// The outcome an abandoned invocation finishes with, and that every read,

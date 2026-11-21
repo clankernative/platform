@@ -418,12 +418,13 @@ fn an_abandoned_occurrence_is_no_longer_reported_as_blocked() -> Result<()> {
     day2::recovery::abandon(
         &world.runtime,
         &day2::authority_state::LocalOperator::assert_local("admin")?,
-        &day2::recovery::Request {
+        &[day2::recovery::Request {
             request_id: "abandon-blocked-sweep".into(),
             invocation: blocked.clone(),
             expected_artifact: world.runtime.artifact().id().into(),
             reason: "occurrence blocked by a policy change".into(),
-        },
+            cause: day2::recovery::Cause::Blocked,
+        }],
     )?;
     assert_eq!(status(&world, &blocked)?, "failure");
     // Finished work is neither in flight nor blocked, and the schedule goes on.

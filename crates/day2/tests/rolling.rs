@@ -1262,17 +1262,18 @@ fn blocked_source_work_can_be_abandoned_from_the_replacement() -> Result<()> {
     world.change_policy(|policy| {
         policy.operations.get_mut("reports.submit").unwrap().actors = actors;
     })?;
-    let receipt = day2::recovery::abandon(
+    let receipts = day2::recovery::abandon(
         &replacement,
         &operator,
-        &day2::recovery::Request {
+        &[day2::recovery::Request {
             request_id: "abandon-source-work".into(),
             invocation: "source-work".into(),
             expected_artifact: world.runtime.artifact().id().into(),
             reason: "source work blocked during the rollout".into(),
-        },
+            cause: day2::recovery::Cause::Blocked,
+        }],
     )?;
-    assert_eq!(receipt.invocation, "source-work");
+    assert_eq!(receipts[0].invocation, "source-work");
     assert!(invocations::drain(&replacement, 16)?.is_empty());
     rollout::transition(
         &replacement,
@@ -1576,4 +1577,42 @@ fn await_probe(runtime: &Runtime) -> Result<rollout::ProbeStatus> {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+}
+
+#[test]
+fn a_rolling_store_drains_every_kind_so_nothing_there_is_an_orphaned_request() -> Result<()> {
+    // The fixture's profile, linux_sqlite_rwo_v1, is rolling.
+    let (world, _candidate, operator) = fixture()?;
+    // A read cut off before it ran: the rolling scheduler drains it.
+    world.runtime.accept(
+        "reports.list",
+        "alice",
+        "interrupted-read",
+        &json!({"after":"","limit":2}),
+        100,
+    )?;
+    let error = day2::recovery::abandon(
+        &world.runtime,
+        &operator,
+        &[day2::recovery::Request {
+            request_id: "read-as-orphan".into(),
+            invocation: "interrupted-read".into(),
+            expected_artifact: world.runtime.artifact().id().into(),
+            reason: "read cut off when the app stopped".into(),
+            cause: day2::recovery::Cause::OrphanedRequest,
+        }],
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("recovery_requires_orphaned_request"),
+        "{error:#}"
+    );
+    assert_eq!(
+        invocations::drain(&world.runtime, 16)?
+            .iter()
+            .map(|invocation| invocation.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["interrupted-read"]
+    );
+    Ok(())
 }
