@@ -729,32 +729,48 @@ pub fn backend_override(state: &Path) -> Result<String> {
 }
 
 /// An apply reads the instance only as committed: a clean git checkout whose
-/// day2.json and every root's committed inputs equal their bytes at HEAD.
-fn committed_at_head(instance: &Path, commit: &str, clean: bool, roots: &[Root]) -> Result<()> {
+/// day2.json and every root's committed inputs, as already read into `committed`,
+/// equal their bytes at HEAD.
+fn committed_at_head(
+    instance: &Path,
+    commit: &str,
+    clean: bool,
+    roots: &[Root],
+    committed: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
     ensure!(
         !commit.is_empty() && clean,
         "instance apply needs a clean git checkout of the instance"
     );
     let prefix = String::from_utf8(git(instance, &["rev-parse", "--show-prefix"], 4096)?)?;
     let prefix = prefix.trim();
-    for path in std::iter::once("day2.json").chain(roots.iter().map(|root| root.inputs.as_str())) {
-        let at_head = git(
+    let at_head = |path: &str| {
+        git(
             instance,
             &["cat-file", "blob", &format!("{commit}:{prefix}{path}")],
             BLOB_LIMIT,
         )
-        .with_context(|| format!("{path} is not committed at the instance's HEAD"))?;
+        .with_context(|| format!("{path} is not committed at the instance's HEAD"))
+    };
+    ensure!(
+        fs::read(instance.join("day2.json"))? == at_head("day2.json")?,
+        "day2.json differs from the instance's HEAD"
+    );
+    for root in roots {
         ensure!(
-            fs::read(instance.join(path))? == at_head,
-            "{path} differs from the instance's HEAD"
+            committed[&root.label] == at_head(&root.inputs)?,
+            "{} differs from the instance's HEAD",
+            root.inputs
         );
     }
     Ok(())
 }
 
-/// The reviewed changes of each root, from a prior `instance plan` output. The
-/// plan must have succeeded for the same platform commit and stacks, the same
-/// roots in the same order, and the same committed inputs and rendered variables.
+/// The reviewed changes of each root, from a prior `instance plan` output for the
+/// same platform commit and stacks, the same roots in the same order and the same
+/// backends, committed inputs and rendered variables. A root that plan could not
+/// plan (before its cluster existed, say) has no reviewed changes, so an apply
+/// refuses it if it has any; plan and review again after the roots before it apply.
 fn reviewed_changes(
     directory: &Path,
     request: &Request,
@@ -770,8 +786,8 @@ fn reviewed_changes(
     ensure!(bytes.len() as u64 <= SHOW_LIMIT, "reviewed receipt budget");
     let receipt: Value = serde_json::from_slice(&bytes).context("reviewed receipt")?;
     ensure!(
-        receipt["format"] == 1 && receipt["mode"] == "plan" && receipt["ok"] == true,
-        "the reviewed directory must hold a successful instance plan"
+        receipt["format"] == 1 && receipt["mode"] == "plan" && receipt["audit_error"].is_null(),
+        "the reviewed directory must hold an instance plan"
     );
     ensure!(
         receipt["commit"] == request.commit.as_str() && receipt["stacks_tree"] == stacks_tree,
@@ -792,20 +808,23 @@ fn reviewed_changes(
             "the reviewed plan has other roots; plan and review again"
         );
         ensure!(
-            planned["inputs"]["path"] == root.inputs.as_str()
+            planned["backend"] == json!({"bucket": root.bucket, "prefix": root.prefix})
+                && planned["inputs"]["path"] == root.inputs.as_str()
                 && planned["inputs"]["digest"] == inputs[label].as_str()
                 && planned["variables"] == rendered[label].as_str(),
-            "{label}'s inputs changed since the reviewed plan; plan and review again"
+            "{label}'s backend or inputs changed since the reviewed plan; plan and review again"
         );
-        ensure!(
-            matches!(planned["status"].as_str(), Some("no_changes" | "changes")),
-            "the reviewed plan did not plan {label}"
-        );
-        let review = planned["review"]
-            .as_str()
-            .filter(|review| review.starts_with("sha256:"))
-            .context("reviewed receipt review digest")?;
-        reviewed.insert(label.clone(), review.to_owned());
+        match planned["status"].as_str() {
+            Some("no_changes" | "changes") => {
+                let review = planned["review"]
+                    .as_str()
+                    .filter(|review| review.starts_with("sha256:"))
+                    .context("reviewed receipt review digest")?;
+                reviewed.insert(label.clone(), review.to_owned());
+            }
+            Some("failed_credentials" | "failed_init" | "failed_plan" | "failed_show") => {}
+            _ => bail!("the reviewed receipt has an unknown status for {label}"),
+        }
     }
     Ok(reviewed)
 }
@@ -835,6 +854,8 @@ pub struct Session {
     /// False once an apply changed the cluster root: the kubeconfig (or its
     /// absence) must be fetched again before the next root that needs it.
     kubeconfig_current: bool,
+    /// Whether this apply already read the cluster's credentials again.
+    kubeconfig_refreshed: bool,
     dns_token: Option<String>,
     credentials_read: bool,
     /// An apply's reviewed changes digest per root label.
@@ -978,7 +999,13 @@ impl Session {
             None => BTreeMap::new(),
             Some(directory) => {
                 // An apply runs only what was reviewed, from what is committed.
-                committed_at_head(&instance, &instance_commit, instance_clean, &request.roots)?;
+                committed_at_head(
+                    &instance,
+                    &instance_commit,
+                    instance_clean,
+                    &request.roots,
+                    &committed,
+                )?;
                 reviewed_changes(directory, &request, &stacks_tree, &inputs, &rendered)?
             }
         };
@@ -1052,6 +1079,7 @@ impl Session {
                 .tempdir()?,
             kubeconfig: None,
             kubeconfig_current: true,
+            kubeconfig_refreshed: false,
             dns_token: None,
             credentials_read: false,
             reviewed,
@@ -1217,27 +1245,40 @@ impl Session {
             },
         );
         let mut command = self.engine(&[])?;
-        command.args(args).envs(env);
+        command.args(args.clone()).envs(env.clone());
         if stage == Stage::Show {
-            return Ok(Some(capture(
-                command,
-                Some(&log),
+            let shown = capture(command, Some(&log), Duration::from_secs(300), SHOW_LIMIT)?;
+            // The same plan as text, which is what an operator reviews before an
+            // apply; OpenTofu masks sensitive values in it.
+            let mut text = self.engine(&[])?;
+            text.args(args.iter().filter(|arg| arg.as_os_str() != "-json"))
+                .envs(env);
+            let readable = capture(
+                text,
+                Some(&directory.join("plan-text.log")),
                 Duration::from_secs(300),
                 SHOW_LIMIT,
-            )?));
+            )?;
+            fs::write(directory.join("plan.txt"), readable)?;
+            return Ok(Some(shown));
         }
-        if stage == Stage::Apply {
-            // Creating a cluster can take most of an hour. An apply that overruns is
-            // interrupted, so OpenTofu saves state and releases its lock, before any kill.
+        // A step that holds the state lock (an apply session's plan and apply) is
+        // interrupted when it overruns, so OpenTofu saves state and releases the
+        // lock, and is killed only after a grace period. Creating a cluster can
+        // take most of an hour.
+        let locked =
+            self.request.mode == Mode::Apply && matches!(stage, Stage::Plan | Stage::Apply);
+        let deadline = Duration::from_secs(if stage == Stage::Apply { 7200 } else { 900 });
+        if locked {
             crate::process::run_interruptible(
                 &mut command,
                 &directory,
                 &log,
-                Duration::from_secs(7200),
-                Duration::from_secs(600),
+                deadline,
+                Duration::from_secs(1800),
             )?;
         } else {
-            crate::process::run(&mut command, &directory, &log, Duration::from_secs(900))?;
+            crate::process::run(&mut command, &directory, &log, deadline)?;
         }
         Ok(None)
     }
@@ -1262,42 +1303,42 @@ impl Session {
             .find(|root| root.label == label)
             .context("unknown root")?
             .clone();
-        if stage == Stage::Init && needs_cluster(&root.stack) && !self.kubeconfig_current {
-            // This apply changed the cluster: read its credentials again.
-            self.fetch_kubeconfig("credentials-refresh.log")?;
+        if self.request.mode == Mode::Apply
+            && stage == Stage::Init
+            && needs_cluster(&root.stack)
+            && !self.kubeconfig_refreshed
+        {
+            // The first root that needs the cluster runs only after the cluster root
+            // has applied. Read the credentials again if that apply changed the
+            // cluster (it may have created it) or if the first read failed.
+            self.kubeconfig_refreshed = true;
+            if !self.kubeconfig_current || self.kubeconfig.is_none() {
+                self.fetch_kubeconfig("credentials-refresh.log")?;
+            }
         }
         let progress = self.progress.get(label).context("unknown root")?;
         let mut new_root = progress.new_root;
-        let unchanged = progress.changes.is_empty();
-        let destroys = progress.destroys.clone();
-        let (review, plan_digest) = (progress.review.clone(), progress.plan_digest.clone());
+        let plan_digest = progress.plan_digest.clone();
+        let gate = apply_gate(
+            &progress.changes,
+            &progress.destroys,
+            &progress.review,
+            self.reviewed.get(label),
+        );
         let directory = self.output.join(label.replace('/', "-"));
-        let refuse = |message: String, failure: Failure| {
-            let _ = fs::write(directory.join("apply.error"), message);
-            Err(failure)
-        };
+        let plan_file = self.layouts[label].plan.clone();
         let missing = (needs_cluster(&root.stack) && self.kubeconfig.is_none())
             || (needs_dns(&root.stack) && self.dns_token.is_none());
         let outcome = if stage == Stage::Init && missing {
             Err(Failure::Credentials)
-        } else if stage == Stage::Apply && unchanged {
-            // Nothing to change: the root is complete without running the engine.
-            Ok(None)
-        } else if stage == Stage::Apply && !destroys.is_empty() {
-            refuse(
-                format!(
-                    "the plan deletes, replaces or forgets {}; instance apply never does",
-                    destroys.join(", ")
-                ),
-                Failure::Destroys,
-            )
-        } else if stage == Stage::Apply && self.reviewed.get(label) != Some(&review) {
-            refuse(
-                "the plan's changes differ from the reviewed plan's; plan and review again".into(),
-                Failure::Unreviewed,
-            )
+        } else if stage == Stage::Apply && gate != Ok(true) {
+            // Nothing to change completes the root without the engine; a refusal fails it.
+            gate.clone().map(|_| None).map_err(|(failure, message)| {
+                let _ = fs::write(directory.join("apply.error"), message);
+                failure
+            })
         } else {
-            (|| -> Result<Option<Vec<u8>>> {
+            (|| -> Result<Option<(Vec<u8>, String)>> {
                 match stage {
                     Stage::Init => {
                         new_root = !self.state_exists(&root, &directory)?;
@@ -1312,12 +1353,20 @@ impl Session {
                         }
                     }
                     Stage::Apply => ensure!(
-                        day2::digest(&fs::read(&self.layouts[label].plan)?) == plan_digest,
+                        day2::digest(&fs::read(&plan_file)?) == plan_digest,
                         "the saved plan changed after it was shown"
                     ),
                     Stage::Plan | Stage::Show => {}
                 }
-                self.run_stage(stage, &root, self.request.mode == Mode::Plan && new_root)
+                // Show reads the plan file; its digest must be the same before and after.
+                let before = if stage == Stage::Show {
+                    day2::digest(&fs::read(&plan_file)?)
+                } else {
+                    String::new()
+                };
+                let shown =
+                    self.run_stage(stage, &root, self.request.mode == Mode::Plan && new_root)?;
+                Ok(shown.map(|shown| (shown, before)))
             })()
             .map_err(|error| {
                 let _ = fs::write(
@@ -1328,11 +1377,14 @@ impl Session {
             })
         };
         let outcome = outcome.and_then(|shown| match shown {
-            Some(shown) => {
+            Some((shown, plan)) => {
                 fs::write(directory.join("show.json"), &shown)
                     .map_err(|_| Failure::Stage(stage))?;
                 (|| -> Result<_> {
-                    let plan = day2::digest(&fs::read(&self.layouts[label].plan)?);
+                    ensure!(
+                        day2::digest(&fs::read(&plan_file)?) == plan,
+                        "the saved plan changed while it was shown"
+                    );
                     Ok((
                         changes(&shown)?,
                         destructive(&shown)?,
@@ -1348,7 +1400,7 @@ impl Session {
             }
             None => Ok(None),
         });
-        if stage == Stage::Apply && root.stack == "cluster" && !unchanged && outcome.is_ok() {
+        if stage == Stage::Apply && root.stack == "cluster" && gate == Ok(true) && outcome.is_ok() {
             self.kubeconfig_current = false;
         }
         let progress = self.progress.get_mut(label).context("unknown root")?;
@@ -1454,6 +1506,37 @@ impl Session {
         )?;
         audited?;
         Ok(receipt)
+    }
+}
+
+/// What an apply does at a root's apply stage, from its shown plan: complete the
+/// root without the engine when nothing changes (`Ok(false)`), refuse a plan that
+/// destroys or differs from the reviewed one, and otherwise run it (`Ok(true)`).
+fn apply_gate(
+    changes: &[Value],
+    destroys: &[String],
+    review: &str,
+    reviewed: Option<&String>,
+) -> Result<bool, (Failure, String)> {
+    if changes.is_empty() {
+        Ok(false)
+    } else if !destroys.is_empty() {
+        Err((
+            Failure::Destroys,
+            format!(
+                "the plan deletes, replaces or forgets {}; instance apply never does",
+                destroys.join(", ")
+            ),
+        ))
+    } else if reviewed.map(String::as_str) != Some(review) {
+        Err((
+            Failure::Unreviewed,
+            "the plan's changes differ from the reviewed plan's, or the reviewed plan could \
+             not plan this root; plan and review again"
+                .into(),
+        ))
+    } else {
+        Ok(true)
     }
 }
 
@@ -1619,6 +1702,9 @@ pub fn review_digest(shown: &[u8]) -> Result<String> {
             "before": detail["before"],
             "after": detail["after"],
             "after_unknown": detail["after_unknown"],
+            "before_sensitive": detail["before_sensitive"],
+            "after_sensitive": detail["after_sensitive"],
+            "replace_paths": detail["replace_paths"],
             "importing": detail["importing"],
         }));
     }
@@ -1632,6 +1718,8 @@ pub fn review_digest(shown: &[u8]) -> Result<String> {
                     "before": change["before"],
                     "after": change["after"],
                     "after_unknown": change["after_unknown"],
+                    "before_sensitive": change["before_sensitive"],
+                    "after_sensitive": change["after_sensitive"],
                 }));
             }
         }
@@ -2450,6 +2538,7 @@ mod tests {
             json!({"format": 1, "mode": "plan", "ok": true, "commit": request.commit,
                 "stacks_tree": "tree", "roots": request.roots.iter().map(|root| json!({
                     "label": root.label,
+                    "backend": {"bucket": root.bucket, "prefix": root.prefix},
                     "inputs": {"path": root.inputs, "digest": inputs[&root.label]},
                     "variables": rendered[&root.label],
                     "status": "changes",
@@ -2468,8 +2557,11 @@ mod tests {
         assert_eq!(reviewed["app-edge/home"], "sha256:r-app-edge/home");
         type Refusal = (fn(&mut Value), &'static str);
         let refusals: [Refusal; 7] = [
-            (|r| r["ok"] = json!(false), "successful instance plan"),
-            (|r| r["mode"] = json!("apply"), "successful instance plan"),
+            (|r| r["mode"] = json!("apply"), "must hold an instance plan"),
+            (
+                |r| r["audit_error"] = json!("unexpected file"),
+                "must hold an instance plan",
+            ),
             (
                 |r| r["stacks_tree"] = json!("other"),
                 "another platform commit",
@@ -2483,12 +2575,12 @@ mod tests {
                 "inputs changed",
             ),
             (
-                |r| r["roots"][0]["inputs"]["digest"] = json!("sha256:other"),
-                "inputs changed",
+                |r| r["roots"][1]["backend"]["prefix"] = json!("platform/other"),
+                "backend or inputs changed",
             ),
             (
-                |r| r["roots"][2]["status"] = json!("failed_plan"),
-                "did not plan tenancy",
+                |r| r["roots"][2]["status"] = json!("planned"),
+                "unknown status for tenancy",
             ),
         ];
         for (edit, message) in refusals {
@@ -2497,6 +2589,13 @@ mod tests {
             let error = format!("{:#}", check(&changed).unwrap_err());
             assert!(error.contains(message), "{error}");
         }
+        // A plan where a root could not plan is accepted; that root has no reviewed
+        // changes, so an apply refuses it unless it has nothing to change.
+        let mut partial = receipt();
+        partial["ok"] = json!(false);
+        partial["roots"][2]["status"] = json!("failed_credentials");
+        let reviewed = check(&partial).unwrap();
+        assert!(reviewed.contains_key("cluster") && !reviewed.contains_key("tenancy"));
     }
 
     #[test]
@@ -2514,14 +2613,59 @@ mod tests {
             .collect();
         let (instance, commit) = repository(scratch.path(), &borrowed);
         let roots = request().roots;
-        committed_at_head(&instance, &commit, true, &roots).unwrap();
-        assert!(committed_at_head(&instance, &commit, false, &roots).is_err());
-        assert!(committed_at_head(&instance, "", true, &roots).is_err());
-        fs::write(instance.join("gcp/config/tenancy.tfvars"), "x = 2\n").unwrap();
+        let read = |roots: &[Root]| -> BTreeMap<String, Vec<u8>> {
+            roots
+                .iter()
+                .map(|root| {
+                    (
+                        root.label.clone(),
+                        fs::read(instance.join(&root.inputs)).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let committed = read(&roots);
+        committed_at_head(&instance, &commit, true, &roots, &committed).unwrap();
+        assert!(committed_at_head(&instance, &commit, false, &roots, &committed).is_err());
+        assert!(committed_at_head(&instance, "", true, &roots, &committed).is_err());
+        // The bytes actually read are compared, not a later read of the file.
+        let mut edited = committed.clone();
+        edited.insert("tenancy".into(), b"x = 2\n".to_vec());
         let error = format!(
             "{:#}",
-            committed_at_head(&instance, &commit, true, &roots).unwrap_err()
+            committed_at_head(&instance, &commit, true, &roots, &edited).unwrap_err()
         );
         assert!(error.contains("tenancy.tfvars differs"), "{error}");
+        fs::write(instance.join("day2.json"), "{}").unwrap();
+        let error = format!(
+            "{:#}",
+            committed_at_head(&instance, &commit, true, &roots, &committed).unwrap_err()
+        );
+        assert!(error.contains("day2.json differs"), "{error}");
+    }
+
+    #[test]
+    fn an_apply_runs_only_an_unrefused_plan_with_changes() {
+        let reviewed = "sha256:r".to_owned();
+        let change = [json!({"address": "google_sa.new", "actions": ["create"]})];
+        assert_eq!(apply_gate(&[], &[], "sha256:other", None), Ok(false));
+        assert_eq!(
+            apply_gate(&change, &[], "sha256:r", Some(&reviewed)),
+            Ok(true)
+        );
+        let refused = |destroys: &[String], review, reviewed| {
+            apply_gate(&change, destroys, review, reviewed)
+                .unwrap_err()
+                .0
+        };
+        assert_eq!(
+            refused(&["google_sa.old".into()], "sha256:r", Some(&reviewed)),
+            Failure::Destroys
+        );
+        assert_eq!(
+            refused(&[], "sha256:other", Some(&reviewed)),
+            Failure::Unreviewed
+        );
+        assert_eq!(refused(&[], "sha256:r", None), Failure::Unreviewed);
     }
 }

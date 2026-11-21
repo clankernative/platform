@@ -234,6 +234,8 @@ its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
     `NEW_DIRECTORY`, with `receipt.json`, which records the stacks tree, the
     engine digest and each root's input, plan and show digests, and the
     digest of its changes that a later `instance apply` must match.
+  - Each root's `plan.txt` is the plan as OpenTofu prints it, with sensitive
+    values masked: what an operator reviews before an apply.
   - Plans hold state values in plain text, so treat the directory like state.
   - Providers are cached once for all roots.
   - Credential material is refused there.
@@ -250,7 +252,8 @@ its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
     which fail closed.
 - **Known limits:**
   - Interrupting the command does not yet stop OpenTofu or remove the
-    temporary kubeconfig directory.
+    temporary kubeconfig directory; an interrupted apply runs its current root
+    to completion without a receipt.
   - Any file in `NEW_DIRECTORY` that the plan did not write fails the receipt.
   - Platform CI pins OpenTofu 1.11.5, while instance plans pin 1.12.3, the
     version that writes instance state.
@@ -262,13 +265,20 @@ roots with the same platform, engine, inputs, credentials and output rules as
 `instance plan`, and applies them as reviewed. Only operators apply by hand; app
 owners never do.
 
-- **Reviewed.** `PLAN_DIRECTORY` is a prior `instance plan` output, whose
-  receipt records a digest of each root's changes: every resource and output
-  change with its actions and its values before, after and known only after
-  apply. That plan must have succeeded for the same platform commit and stacks,
-  the same roots, and the same committed inputs and rendered variables. A root
-  whose new plan has other changes is refused (`refused_unreviewed`); plan and
-  review again.
+- **Reviewed.** `PLAN_DIRECTORY` is a prior `instance plan` output whose
+  `plan.txt` files an operator has read. Its receipt records a digest of each
+  root's changes: every resource and output change with its actions, its values
+  before, after and known only after apply, and their sensitivity. That plan
+  must be for the same platform commit and stacks, the same roots, and the same
+  backends, committed inputs and rendered variables. A root whose new plan has
+  other changes, or that the reviewed plan could not plan, is refused
+  (`refused_unreviewed`) unless it has nothing to change; plan and review again.
+  The receipt is not signed: this binds the apply to a reviewed plan as a
+  process step, not as a security boundary against whoever can write the files.
+- **One cycle per dependency.** Each root plans again in the apply, after the
+  roots before it. A root whose plan depends on what an earlier root just
+  applied, such as tenancy right after the cluster is created, differs from the
+  reviewed plan and is refused; plan, review and apply again for the next step.
 - **Committed.** The instance must be a clean git checkout whose `day2.json` and
   every committed input equal their bytes at `HEAD`.
 - **Each root, in apply order:** init against its rendered backend, plan with
@@ -278,8 +288,9 @@ owners never do.
 - **New roots.** The real backend is always initialized, and the apply creates
   the root's state. The receipt reports the root as new.
 - **Locks and time.** Plans and applies wait up to five minutes for a root's
-  state lock. An apply that runs past two hours is interrupted so OpenTofu can
-  save state and release the lock, and is killed only ten minutes later.
+  state lock. A step that holds the lock (the plan and the apply) and overruns
+  (15 minutes for a plan, two hours for an apply) is interrupted so OpenTofu can
+  save state and release the lock, and is killed only 30 minutes later.
 - **Destructive plans are refused.** A plan that deletes, replaces or forgets a
   resource is never applied; the root reports `refused_destroy` and lists those
   resources. Output removals do not count. Destructive changes need a reviewed
@@ -290,9 +301,9 @@ owners never do.
   after it report `skipped`. An `app-edge` root reads only the shared roots, so
   its failure stops only itself. The host also requires the roots in that order,
   all on one state bucket with distinct prefixes.
-- **Cluster credentials.** When an apply changes the cluster root, for example
-  by creating the cluster, the kubeconfig is fetched again before the next root
-  that needs it.
+- **Cluster credentials.** If the apply changed the cluster root, or the first
+  read failed, the kubeconfig is read again once, before the first root that
+  needs it.
 - **Mode.** The host action fixes plan or apply, and the request must name the
   same mode, so `instance plan` can never apply.
 - **Output.** As for a plan. Root statuses are `no_changes`, `applied`,

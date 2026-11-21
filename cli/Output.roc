@@ -342,6 +342,15 @@ ran_text = |request, path, spec, receipt| {
 		InstanceRender.Mode.Plan => []
 		InstanceRender.Mode.Apply(directory) => ["REVIEWED PLAN", "  ${Output.safe(directory)}/receipt.json", ""]
 	}
+	review = match mode {
+		InstanceRender.Mode.Plan => [
+			"",
+			"REVIEW",
+			"  Each root's plan.txt shows what it would change. instance apply applies a root only if its new",
+			"  plan makes exactly the changes this plan shows.",
+		]
+		InstanceRender.Mode.Apply(_) => []
+	}
 	not_run =
 		if skipped.is_empty() [] else [
 			"",
@@ -362,6 +371,7 @@ ran_text = |request, path, spec, receipt| {
 		]
 			.concat(reviewed)
 			.concat(["CORE ROOTS  /  ${receipt.roots.len().to_str()}, in apply order", planned])
+			.concat(review)
 			.concat(not_run)
 			.concat(["", "RECEIPT", "  ${Output.safe(receipt.directory)}/receipt.json", "", "NEXT", next]),
 		"\n",
