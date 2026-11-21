@@ -16,6 +16,15 @@ use std::{
 
 const MAX_LAYER: u64 = 512 << 20;
 const MAX_ARCHIVE: u64 = 3 << 30;
+const ARTIFACT_PARENTS: [&str; 3] = ["srv", "srv/day2", "srv/day2/artifacts"];
+const PARENT_WHITEOUTS: [&str; 6] = [
+    ".wh.srv",
+    ".wh..wh..opq",
+    "srv/.wh.day2",
+    "srv/.wh..wh..opq",
+    "srv/day2/.wh.artifacts",
+    "srv/day2/.wh..wh..opq",
+];
 const ACTIONS: &[&str] = &[
     "runtime-image-capture",
     "runtime-image-layers",
@@ -27,6 +36,66 @@ struct FileIdentity {
     digest: String,
     bytes: u64,
     mode: u32,
+}
+
+#[derive(PartialEq, Eq)]
+struct DirectoryMetadata {
+    uid: u64,
+    gid: u64,
+    mode: u32,
+}
+
+fn directory_metadata(entry: &tar::Entry<'_, impl Read>) -> Result<DirectoryMetadata> {
+    let header = entry.header();
+    ensure!(
+        header.entry_type().is_dir() && entry.size() == 0,
+        "artifact parent must be a real directory"
+    );
+    Ok(DirectoryMetadata {
+        uid: header.uid()?,
+        gid: header.gid()?,
+        mode: header.mode()?,
+    })
+}
+
+fn plain_metadata(entry: &mut tar::Entry<'_, impl Read>) -> Result<()> {
+    if let Some(extensions) = entry.pax_extensions()? {
+        for extension in extensions {
+            let extension = extension?;
+            ensure!(
+                [b"path".as_slice(), b"size", b"mtime", b"atime", b"ctime"]
+                    .contains(&extension.key_bytes()),
+                "artifact layer extended permissions or attributes"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn base_directories(
+    input: &mut dyn Read,
+    parents: &mut BTreeMap<String, DirectoryMetadata>,
+) -> Result<()> {
+    let mut archive = tar::Archive::new(input.take(MAX_LAYER + 1));
+    let mut seen = BTreeSet::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path_bytes();
+        let path = Path::new(std::str::from_utf8(&path)?.trim_start_matches("./"));
+        ensure!(
+            !PARENT_WHITEOUTS.iter().any(|name| path == Path::new(name)),
+            "base artifact parent has ambiguous overlay metadata"
+        );
+        if let Some(&name) = ARTIFACT_PARENTS.iter().find(|name| path == Path::new(name)) {
+            ensure!(seen.insert(name), "duplicate base artifact parent");
+            plain_metadata(&mut entry)?;
+            parents.insert(name.into(), directory_metadata(&entry)?);
+        }
+    }
+    let mut remainder = archive.into_inner();
+    zero_padding(&mut remainder)?;
+    ensure!(remainder.limit() > 0, "base layer exceeds byte budget");
+    Ok(())
 }
 
 fn hash_reader(input: &mut dyn Read, limit: u64) -> Result<(String, u64)> {
@@ -438,6 +507,7 @@ fn artifact_layer(
     input: &mut dyn Read,
     artifact: &str,
     expected: &BTreeMap<String, FileIdentity>,
+    parents: &BTreeMap<String, DirectoryMetadata>,
 ) -> Result<()> {
     let prefix = format!("srv/day2/artifacts/{}", day2_assets::hash_part(artifact)?);
     let mut seen = BTreeSet::new();
@@ -445,16 +515,7 @@ fn artifact_layer(
     let mut archive = tar::Archive::new(input.take(MAX_LAYER + 1));
     for entry in archive.entries()? {
         let mut entry = entry?;
-        if let Some(extensions) = entry.pax_extensions()? {
-            for extension in extensions {
-                let extension = extension?;
-                ensure!(
-                    [b"path".as_slice(), b"size", b"mtime", b"atime", b"ctime"]
-                        .contains(&extension.key_bytes()),
-                    "artifact layer extended permissions or attributes"
-                );
-            }
-        }
+        plain_metadata(&mut entry)?;
         let path = entry.path_bytes();
         let path = relative(std::str::from_utf8(&path)?)?.to_owned();
         ensure!(
@@ -462,6 +523,13 @@ fn artifact_layer(
             "duplicate or excessive artifact layer paths"
         );
         let header = entry.header();
+        if let Some(inherited) = parents.get(&path) {
+            ensure!(
+                directory_metadata(&entry)? == *inherited,
+                "artifact layer changed an inherited directory"
+            );
+            continue;
+        }
         ensure!(
             header.uid()? == 0 && header.gid()? == 0 && header.mode()? & 0o7000 == 0,
             "artifact layer owner or special mode changed"
@@ -470,7 +538,7 @@ fn artifact_layer(
         let mode = header.mode()?;
         if kind.is_dir() {
             ensure!(
-                mode & 0o777 == 0o755 || mode & 0o777 == 0o555,
+                entry.size() == 0 && matches!(mode, 0o755 | 0o555),
                 "artifact directory permissions changed"
             );
             ensure!(
@@ -507,7 +575,10 @@ fn artifact_layer(
     ensure!(found == *expected, "artifact layer omitted a file");
     // Some unpackers accept concatenated archives. Never approve a good first
     // archive while ignoring a second archive or nonzero trailing payload.
-    let mut remainder = archive.into_inner();
+    zero_padding(&mut archive.into_inner())
+}
+
+fn zero_padding(remainder: &mut dyn Read) -> Result<()> {
     let mut buffer = [0; 65_536];
     loop {
         let size = remainder.read(&mut buffer)?;
@@ -516,7 +587,7 @@ fn artifact_layer(
         }
         ensure!(
             buffer[..size].iter().all(|byte| *byte == 0),
-            "artifact layer has trailing data"
+            "image layer has trailing data"
         );
     }
     Ok(())
@@ -537,6 +608,7 @@ struct Session {
     artifact_id: Option<String>,
     tree: Option<BTreeMap<String, FileIdentity>>,
     app_layer: Option<(String, String)>,
+    base_parents: BTreeMap<String, DirectoryMetadata>,
     completed: BTreeSet<String>,
 }
 
@@ -639,23 +711,25 @@ impl Session {
                             == app_manifest.layers[..app_manifest.layers.len() - 1],
                     "saved image layers changed"
                 );
-                // A native witness at an OCI root/manifest binds its exact blob
-                // descriptors. A configuration witness binds uncompressed DiffIDs;
-                // prove those base bytes too rather than trusting asserted DiffIDs.
-                if self.qualified == base_manifest.config.digest {
-                    for (descriptor, diff_id) in base_manifest.layers.iter().zip(ids.iter()) {
-                        let path = blob_path(&descriptor.digest)?;
-                        ensure!(
-                            member(&archive, &path, |input| hash_reader(input, MAX_LAYER))?
-                                == (descriptor.digest.clone(), descriptor.size),
-                            "base OCI layer changed"
-                        );
+                // Verify each blob before reading its directory metadata. A
+                // configuration witness also binds the uncompressed DiffIDs.
+                for (descriptor, diff_id) in base_manifest.layers.iter().zip(ids.iter()) {
+                    let path = blob_path(&descriptor.digest)?;
+                    ensure!(
+                        member(&archive, &path, |input| hash_reader(input, MAX_LAYER))?
+                            == (descriptor.digest.clone(), descriptor.size),
+                        "base OCI layer changed"
+                    );
+                    if self.qualified == base_manifest.config.digest {
                         ensure!(
                             layer(&archive, &path, |input| hash_reader(input, MAX_LAYER))?.0
                                 == *diff_id,
                             "base OCI diff id changed"
                         );
                     }
+                    layer(&archive, &path, |input| {
+                        base_directories(input, &mut self.base_parents)
+                    })?;
                 }
                 ensure!(
                     base_manifest.layers.len() + 1 == app_manifest.layers.len(),
@@ -688,6 +762,7 @@ impl Session {
                             input,
                             self.artifact_id.as_ref().context("artifact capture")?,
                             self.tree.as_ref().context("artifact capture")?,
+                            &self.base_parents,
                         )
                     },
                 )?;
@@ -777,6 +852,7 @@ pub(super) fn execute(
         artifact_id: None,
         tree: None,
         app_layer: None,
+        base_parents: BTreeMap::new(),
         completed: BTreeSet::new(),
     };
     // Consumer operation: missing/stale compiled tooling refuses without a
@@ -892,7 +968,8 @@ mod tests {
             day2_assets::hash_part(&artifact)?
         );
         let good = tar_file(&path, b"worker", 0o555, 0, tar::EntryType::Regular);
-        artifact_layer(&mut good.as_slice(), &artifact, &expected())?;
+        let parents = BTreeMap::new();
+        artifact_layer(&mut good.as_slice(), &artifact, &expected(), &parents)?;
         let mut concatenated = good.clone();
         concatenated.extend(tar_file(
             "usr/local/bin/day2-serve",
@@ -901,7 +978,15 @@ mod tests {
             0,
             tar::EntryType::Regular,
         ));
-        assert!(artifact_layer(&mut concatenated.as_slice(), &artifact, &expected()).is_err());
+        assert!(
+            artifact_layer(
+                &mut concatenated.as_slice(),
+                &artifact,
+                &expected(),
+                &parents
+            )
+            .is_err()
+        );
         let mut extended = tar::Builder::new(Vec::new());
         extended.append_pax_extensions([(
             "SCHILY.xattr.security.capability",
@@ -916,7 +1001,8 @@ mod tests {
             artifact_layer(
                 &mut extended.into_inner()?.as_slice(),
                 &artifact,
-                &expected()
+                &expected(),
+                &parents,
             )
             .is_err()
         );
@@ -980,12 +1066,12 @@ mod tests {
         ] {
             let bad = tar_file(path, bytes, mode, uid, kind);
             assert!(
-                artifact_layer(&mut bad.as_slice(), &artifact, &expected()).is_err(),
+                artifact_layer(&mut bad.as_slice(), &artifact, &expected(), &parents).is_err(),
                 "{path} {mode:o}"
             );
         }
         let empty = tar::Builder::new(Vec::new()).into_inner()?;
-        assert!(artifact_layer(&mut empty.as_slice(), &artifact, &expected()).is_err());
+        assert!(artifact_layer(&mut empty.as_slice(), &artifact, &expected(), &parents).is_err());
         let mut extra = expected();
         extra.insert(
             "missing".into(),
@@ -995,7 +1081,56 @@ mod tests {
                 mode: 0o444,
             },
         );
-        assert!(artifact_layer(&mut good.as_slice(), &artifact, &extra).is_err());
+        assert!(artifact_layer(&mut good.as_slice(), &artifact, &extra, &parents).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_layer_can_repeat_but_cannot_change_an_inherited_directory() -> Result<()> {
+        let artifact = digest(b"artifact");
+        let worker_path = format!(
+            "srv/day2/artifacts/{}/worker",
+            day2_assets::hash_part(&artifact)?
+        );
+        let build = |uid, gid, mode, include_worker| -> Result<Vec<u8>> {
+            let mut archive = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_uid(uid);
+            header.set_gid(gid);
+            header.set_mode(mode);
+            header.set_size(0);
+            archive.append_data(&mut header, "srv/day2", std::io::empty())?;
+            if include_worker {
+                let mut header = tar::Header::new_ustar();
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_uid(0);
+                header.set_gid(0);
+                header.set_mode(0o555);
+                header.set_size(6);
+                archive.append_data(&mut header, &worker_path, b"worker".as_slice())?;
+            }
+            Ok(archive.into_inner()?)
+        };
+        let mut parents = BTreeMap::new();
+        base_directories(
+            &mut build(10001, 10001, 0o755, false)?.as_slice(),
+            &mut parents,
+        )?;
+        for (uid, gid, mode, permitted) in [
+            (10001, 10001, 0o755, true),
+            (0, 10001, 0o755, false),
+            (10001, 0, 0o755, false),
+            (10001, 10001, 0o555, false),
+        ] {
+            let layer = build(uid, gid, mode, true)?;
+            assert_eq!(
+                artifact_layer(&mut layer.as_slice(), &artifact, &expected(), &parents).is_ok(),
+                permitted
+            );
+        }
+        let whiteout = tar_file("srv/.wh.day2", b"", 0o644, 0, tar::EntryType::Regular);
+        assert!(base_directories(&mut whiteout.as_slice(), &mut parents).is_err());
         Ok(())
     }
 
@@ -1124,7 +1259,9 @@ mod tests {
 
     #[test]
     fn actual_roc_recipe_has_exact_closed_obligations() -> Result<()> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()?;
         let runner = workflows::build(&root)?;
         let mut actions = Vec::new();
         day2::automation::run(&runner, &["verify-runtime-image"], |request| {
