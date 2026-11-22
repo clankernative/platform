@@ -1118,10 +1118,10 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                     .iter()
                     .copied()
                     // Directory and Google Workspace fixtures require a declared
-                    // read dependency, as does the application's own audit
-                    // history, so verification fails where a rendered policy
-                    // would deny. The other pre-existing local read defaults
-                    // are unchanged.
+                    // read dependency, as do the application's own audit
+                    // history and its connection reads, so verification fails
+                    // where a rendered policy would deny. The other
+                    // pre-existing local read defaults are unchanged.
                     .filter(|name| {
                         !day2_capabilities::resources::Action::ALL
                             .iter()
@@ -1144,10 +1144,6 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                                 definition.observations.iter().map(String::as_str)
                             }),
                     )
-                    .chain([
-                        crate::connection_codegen::RESOLVE,
-                        crate::connection_codegen::LIST_EVENTS,
-                    ])
                     .map(Into::into)
                     .collect(),
                 effects: if operation.kind == "command" {

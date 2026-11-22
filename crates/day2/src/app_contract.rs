@@ -158,16 +158,23 @@ impl Operation {
         Ok(())
     }
 
-    fn validate_observations(&self) -> Result<()> {
+    /// `connections` are the application's declared connection requirements.
+    fn validate_observations(
+        &self,
+        connections: &[day2_capabilities::oauth::ConnectionDeclaration],
+    ) -> Result<()> {
+        use crate::{
+            connection_codegen::{LIST_EVENTS, RESOLVE, lists_events},
+            oauth::usage::{OBSERVATIONS, resolvable},
+        };
         ensure!(
-            self.observations.len() <= crate::capabilities::READS.len() + 1,
+            self.observations.len() <= crate::capabilities::READS.len() + 1 + OBSERVATIONS.len(),
             "observation requirement budget"
         );
         let mut seen = BTreeSet::new();
         for capability in &self.observations {
             ensure!(
-                crate::capabilities::READS.contains(&capability.as_str())
-                    || capability == crate::audit::HISTORY,
+                crate::capabilities::observation(capability),
                 "unknown observation requirement: {capability}"
             );
             ensure!(
@@ -188,6 +195,25 @@ impl Operation {
                     .iter()
                     .any(|capability| capability == named),
             "{named} is only for an internal command"
+        );
+        // A connection read reaches only the application's own declared
+        // connections that the host serves, the current human's, and a Calendar
+        // read needs the Use that resolving such a connection returns, so
+        // neither may be declared where it could never succeed.
+        let declares = |capability: &str| self.observations.iter().any(|name| name == capability);
+        let served = |reads: fn(&day2_capabilities::oauth::ConnectionRequirement) -> bool| {
+            connections.iter().any(|declaration| {
+                resolvable(&declaration.requirement) && reads(&declaration.requirement)
+            })
+        };
+        ensure!(
+            !declares(RESOLVE) || served(|_| true),
+            "{RESOLVE} needs a declared connection of the current human"
+        );
+        ensure!(
+            !declares(LIST_EVENTS) || (declares(RESOLVE) && served(lists_events)),
+            "{LIST_EVENTS} needs {RESOLVE} and a declared connection of the current human \
+             that reads Calendar events"
         );
         Ok(())
     }
@@ -784,7 +810,7 @@ impl Definition {
             definition.validate_audience(name)?;
             definition.validate_owned_rows(name, &artifact.schema)?;
             definition.validate_required_all_rows(&artifact.schema)?;
-            definition.validate_observations()?;
+            definition.validate_observations(&artifact.connection_declarations)?;
             definition.validate_verification_delegation()?;
             validate_verification_setup(artifact, name, operation, definition)?;
         }
@@ -2022,14 +2048,14 @@ mod selector_tests {
             "workspace_directory.hierarchy.v2".into(),
             "workspace_directory.page.v2".into(),
         ];
-        operation.validate_observations()?;
+        operation.validate_observations(&[])?;
         for requirements in [
             vec!["unknown.read.v1".into()],
             vec![crate::capabilities::WRITES[0].into()],
             vec!["workspace_directory.hierarchy.v2".into(); 2],
         ] {
             operation.observations = requirements;
-            assert!(operation.validate_observations().is_err());
+            assert!(operation.validate_observations(&[]).is_err());
         }
         Ok(())
     }
@@ -2440,15 +2466,18 @@ mod selector_tests {
         operation.audience = Some(Audience::Employees);
         operation.execution.internal = false;
         assert_eq!(
-            operation.validate_observations().unwrap_err().to_string(),
+            operation
+                .validate_observations(&[])
+                .unwrap_err()
+                .to_string(),
             "workspace_directory.named_user_path.v1 is only for an internal command"
         );
         let mut query = contracts["preview"].clone();
         query.observations = vec![named.into()];
-        assert!(query.validate_observations().is_err());
+        assert!(query.validate_observations(&[]).is_err());
         operation.audience = None;
         operation.execution.internal = true;
-        operation.validate_observations()?;
+        operation.validate_observations(&[])?;
         Ok(())
     }
 
@@ -2460,11 +2489,88 @@ mod selector_tests {
             crate::audit::HISTORY.into(),
             "workspace_directory.user_path.v1".into(),
         ];
-        operation.validate_observations()?;
+        operation.validate_observations(&[])?;
         operation.observations = vec![crate::audit::HISTORY.into(), crate::audit::HISTORY.into()];
-        assert!(operation.validate_observations().is_err());
+        assert!(operation.validate_observations(&[]).is_err());
         operation.observations = vec!["audit.history.v2".into()];
-        assert!(operation.validate_observations().is_err());
+        assert!(operation.validate_observations(&[]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn connection_observations_need_a_declared_connection_that_serves_them() -> Result<()> {
+        use crate::connection_codegen::{LIST_EVENTS, RESOLVE};
+        use day2_capabilities::oauth::{
+            AccountBindingPolicy, ConnectionDeclaration, ConnectionOwner, ConnectionRequirement,
+        };
+        let declaration =
+            |registration: &str, capability: &str, action: &str, owner: ConnectionOwner| {
+                Ok::<_, anyhow::Error>(ConnectionDeclaration {
+                    registration: registration.to_owned().try_into()?,
+                    requirement: ConnectionRequirement {
+                        logical_id: registration.into(),
+                        revision: 1,
+                        capability: capability.into(),
+                        actions: BTreeSet::from([action.into()]),
+                        owner,
+                        account_policy: AccountBindingPolicy::MappedHuman,
+                        usage: "Read work data.".into(),
+                    },
+                })
+            };
+        let calendar =
+            |owner| declaration("calendar", "google_calendar_events", "list_events", owner);
+        let projects = |owner| declaration("projects", "gitlab_projects", "list_projects", owner);
+        let human = [calendar(ConnectionOwner::CurrentHuman)?];
+        let human_projects = [projects(ConnectionOwner::CurrentHuman)?];
+        let installation = [calendar(ConnectionOwner::Installation)?];
+        // Resolution of the human's projects and a Calendar list through the
+        // installation's connection: no one connection serves both.
+        let split = [
+            projects(ConnectionOwner::CurrentHuman)?,
+            calendar(ConnectionOwner::Installation)?,
+        ];
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let mut operation = contracts["preview"].clone();
+        operation.observations = vec![RESOLVE.into(), LIST_EVENTS.into()];
+        operation.validate_observations(&human)?;
+        operation.observations = vec![RESOLVE.into()];
+        operation.validate_observations(&human_projects)?;
+        for (observations, connections, refused) in [
+            (
+                vec![RESOLVE],
+                &[][..],
+                "needs a declared connection of the current human",
+            ),
+            (
+                vec![RESOLVE],
+                &installation[..],
+                "needs a declared connection of the current human",
+            ),
+            (
+                vec![RESOLVE, LIST_EVENTS],
+                &human_projects[..],
+                "reads Calendar events",
+            ),
+            (
+                vec![RESOLVE, LIST_EVENTS],
+                &split[..],
+                "reads Calendar events",
+            ),
+            (vec![LIST_EVENTS], &human[..], "needs connection.resolve.v1"),
+            (
+                vec![RESOLVE, RESOLVE],
+                &human[..],
+                "duplicate observation requirement",
+            ),
+        ] {
+            operation.observations = observations.into_iter().map(Into::into).collect();
+            let error = operation
+                .validate_observations(connections)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(refused), "{refused}: {error}");
+        }
         Ok(())
     }
 

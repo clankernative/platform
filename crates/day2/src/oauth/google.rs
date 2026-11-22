@@ -11,7 +11,7 @@ pub(super) const ISSUER: &str = "https://accounts.google.com";
 pub(super) const AUTHORIZATION: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub(super) const TOKEN: &str = "https://oauth2.googleapis.com/token";
 pub(super) const USERINFO: &str = "https://openidconnect.googleapis.com/v1/userinfo";
-pub(super) const CAPABILITY: &str = "google_calendar_events";
+pub(crate) const CAPABILITY: &str = "google_calendar_events";
 const EMAIL: &str = "https://www.googleapis.com/auth/userinfo.email";
 
 fn pin(id: &str, contract: impl serde::Serialize) -> Result<BindingRef> {

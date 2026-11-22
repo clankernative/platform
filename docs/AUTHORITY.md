@@ -177,13 +177,19 @@ as is a binding that names an undeclared schedule or endpoint. The desired
 authority's request fingerprint covers the admins and the schedule and endpoint
 bindings.
 
+An operation that reads an OAuth connection declares the read like any other:
+`.observes("connection.resolve.v1")` to resolve one of the app's declared
+connections, and also `.observes("google_calendar.list_events.v1")` to list
+events through it (see [OAuth connections](OAUTH-INSTANCE.md)). Admission
+refuses a connection read the app cannot serve. Only the current human's
+connections resolve, so resolution needs one declared, and a Calendar read also
+needs resolution and a current-human connection that reads Calendar events.
+
 Resource catalogs and their attachments stay explicit, and a resource grant for
-an `Owners` operation names `owners` rather than people. Three grants are not
-rendered yet: managed client keys (`credential_client:`), delegation rules, and
-the OAuth connection observations (`connection.resolve.v1` and the provider
-reads such as `google_calendar.list_events.v1`), which an operation cannot
-declare. The GKE app root binds no explicit policy, so an app deployed there
-cannot use them until the renderer can. [`day2 platform owners`](APP-OWNERS.md)
+an `Owners` operation names `owners` rather than people. Two grants are not
+rendered yet: managed client keys (`credential_client:`) and delegation rules.
+The GKE app root binds no explicit policy, so an app deployed there cannot use
+them until the renderer can. [`day2 platform owners`](APP-OWNERS.md)
 changes the active admins as for any policy. The binding's `admins` apply again
 at the next activation, and until they match the active owners a rollout is
 refused as `rollout_authority_changed`, as with an explicit policy.

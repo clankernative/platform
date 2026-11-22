@@ -202,11 +202,10 @@ live workload identity, secret custody, provider readiness or OAuth registration
 
 ### Native OAuth app deployment
 
-The app's authority is rendered, and rendering does not yet grant the OAuth
-connection observations its operations need (see
-[rendered authority](../../docs/AUTHORITY.md#rendered-authority)). Until it
-does, every connection read of an app deployed through this root is refused
-as `capability_forbidden`.
+The app's authority is rendered, so an operation reads a connection only when
+it declares the read with `.observes` (see
+[rendered authority](../../docs/AUTHORITY.md#rendered-authority)); any other
+connection read is refused as `capability_forbidden`.
 
 In the private instance's app-edge inputs, opt into `oauth_runtime` with a
 `service_account_id`, `custody_secret_ids` and `attestation_secret_ids`. The
