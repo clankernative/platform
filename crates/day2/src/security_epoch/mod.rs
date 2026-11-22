@@ -67,6 +67,7 @@ pub(crate) fn restore_prompt_fixture_data(
 }
 
 mod runtime_profile;
+mod scheduled_backup;
 mod seed_core;
 mod self_check_profile;
 pub(crate) mod serving;
