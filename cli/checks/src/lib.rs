@@ -418,6 +418,11 @@ mod tests {
             scratch.0.join("fixtures/source-receipt.json"),
         )
         .unwrap();
+        fs::copy(
+            root().join("fixtures/candidate-receipt.json"),
+            scratch.0.join("fixtures/candidate-receipt.json"),
+        )
+        .unwrap();
         let check = || {
             compiler()
                 .args(["check", "--no-cache", "main.roc"])
@@ -1041,7 +1046,12 @@ mod tests {
                     "instance.source.archive",
                     "instance.source.controls",
                     "instance.source.verify-controls",
-                    "instance.source.checked-artifact"
+                    "instance.source.checked-artifact",
+                    "instance.candidate.build",
+                    "instance.candidate.preflight",
+                    "instance.candidate.check",
+                    "instance.candidate.native-build",
+                    "instance.candidate.native-probe"
                 ])
             );
             assert_eq!(value["result"]["supports_authentication"], false);
@@ -1367,6 +1377,10 @@ mod tests {
         assert_eq!(
             result["cluster"],
             json!({"name": "day2", "kube_context": "gke_exampleco-tools_us-central1-a_day2"})
+        );
+        assert_eq!(
+            result["build_host"],
+            json!({"name": "day2-x86-qualify", "zone": "us-central1-a"})
         );
         assert_eq!(result["app_namespace_prefix"], "app-");
         assert_eq!(
@@ -2316,6 +2330,193 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(cached, [format!("{}.lock", "ab".repeat(32))]);
+    }
+
+    /// A synthetic candidate record for the spec's `go` app, as the instance's
+    /// deploy controller wrote one; its build log names the binding's digest.
+    const CANDIDATE: &str = r#"{"artifact_id": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef", "binding": {"app": "go", "ci_artifact": {"digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "job": "roc", "version": 1, "workflow": "roc.yml"}, "directory": ".", "image_repository": "us-central1-docker.pkg.dev/exampleco-tools/go/go", "qualified_release": {"bytes": 1236, "digest": "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848"}, "repository": "tools/shortlinks", "runtime_image": "us-central1-docker.pkg.dev/exampleco-tools/go/day2-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111", "source": {"branch": "main", "forge": "gitea", "repository": "tools/shortlinks", "repository_id": 7, "server": "https://git.example.com"}, "tooling_image": "us-central1-docker.pkg.dev/exampleco-tools/go/day2-tooling@sha256:2222222222222222222222222222222222222222222222222222222222222222", "verification": {"cases": 4, "seed": 42, "version": 1}}, "build_log": "gs://exampleco-tools-tofu-state/day2/app-releases/go/builds/63501e22cb75e847b5c360d59f734a2e1fcb308cb41e65d0fd3c0e02d95066a1/abababababababababababababababababababab.log", "checked_commit": "abababababababababababababababababababab", "ci_artifact": {"attempt": 1, "job": 2, "receipt": {"archive": {"bytes": 100, "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}, "artifact_id": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef", "artifact_name": "day2-checked-app-abababababababababababababababababababab-55555555555555555555555555555555", "examples": 1, "generated": 2, "repository": "tools/shortlinks", "sdk_release": {"bytes": 1236, "digest": "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848"}, "source_commit": "abababababababababababababababababababab", "source_inputs": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "upload_id": 9, "verification": {"cases": 4, "seed": 42, "version": 1}, "version": 1}, "run": 1, "version": 1}, "image": "us-central1-docker.pkg.dev/exampleco-tools/go/go@sha256:6666666666666666666666666666666666666666666666666666666666666666", "security_requirements": {"artifact": "sha256:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef", "containment": {"evidence": {"receipt_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"}, "kind": "linux_qualified_v1"}, "version": 1}, "source_commit": "abababababababababababababababababababab", "source_inputs": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "version": 1}"#;
+
+    #[test]
+    fn instance_candidate_validates_before_it_reads_and_checks_records_offline() {
+        let scratch = Scratch::new();
+        let instance = scratch.0.join("instance");
+        fs::create_dir(&instance).unwrap();
+        let candidate = scratch.0.join("candidate.json");
+        let binding = scratch.0.join("binding.json");
+        let output = scratch.0.join("new.json");
+        // Neither gcloud nor docker: anything that reached them fails at once.
+        let tools = scratch.0.join("no-tools");
+        fs::create_dir(&tools).unwrap();
+        let commit = "ab".repeat(20);
+        let (directory, file, bound, new) = (
+            instance.to_str().unwrap(),
+            candidate.to_str().unwrap(),
+            binding.to_str().unwrap(),
+            output.to_str().unwrap(),
+        );
+        let candidate_run = |args: &[&str], code: i32| {
+            envelope(&run_with(args, None, &[("PATH", tools.as_path())]), code)
+        };
+        let failure = |value: &Value| {
+            (
+                value["command"].as_str().unwrap().to_owned(),
+                value["error"]["code"].as_str().unwrap().to_owned(),
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        };
+        for (args, command) in [
+            (
+                vec!["instance", "candidate", "--agent"],
+                "instance.candidate.check",
+            ),
+            (
+                vec![
+                    "instance",
+                    "candidate",
+                    "build",
+                    directory,
+                    bound,
+                    "--agent",
+                ],
+                "instance.candidate.build",
+            ),
+            (
+                vec!["instance", "candidate", "preflight", directory, "--agent"],
+                "instance.candidate.preflight",
+            ),
+            (
+                vec!["instance", "candidate", "native-build", "--agent"],
+                "instance.candidate.native-build",
+            ),
+            (
+                vec!["instance", "candidate", "native-probe", "--agent"],
+                "instance.candidate.native-probe",
+            ),
+        ] {
+            let (reported, code, _) = failure(&candidate_run(&args, 2));
+            assert_eq!(
+                (reported.as_str(), code.as_str()),
+                (command, "missing_argument"),
+                "{args:?}"
+            );
+        }
+        let check = [
+            "instance",
+            "candidate",
+            "check",
+            directory,
+            "go",
+            file,
+            "--agent",
+        ];
+        let build = [
+            "instance",
+            "candidate",
+            "build",
+            directory,
+            bound,
+            commit.as_str(),
+            new,
+            "--agent",
+        ];
+        // Only an exact commit and a deployment app ID reach the host.
+        let mut args = build.to_vec();
+        args[5] = "main";
+        assert_eq!(failure(&candidate_run(&args, 2)).1, "invalid_arguments");
+        let mut args = check.to_vec();
+        args[4] = "Go";
+        assert_eq!(failure(&candidate_run(&args, 2)).1, "invalid_arguments");
+        let mut demo = check.to_vec();
+        demo.push("--demo");
+        assert_eq!(failure(&candidate_run(&demo, 2)).1, "conflicting_options");
+        // The spec is validated before anything runs.
+        assert_eq!(failure(&candidate_run(&check, 3)).1, "metadata_unreadable");
+        fs::write(instance.join("day2.json"), SPEC).unwrap();
+        // check reads only the spec and the record.
+        fs::write(&candidate, CANDIDATE).unwrap();
+        let value = candidate_run(&check, 0);
+        assert_eq!(value["command"], "instance.candidate.check");
+        let receipt = &value["result"]["receipt"];
+        assert_eq!(receipt["app_id"], "go");
+        assert_eq!(receipt["commit"], commit);
+        assert_eq!(
+            receipt["image"],
+            format!(
+                "us-central1-docker.pkg.dev/exampleco-tools/go/go@sha256:{}",
+                "6".repeat(64)
+            )
+        );
+        assert!(receipt["outcome"].is_null() && receipt["transfer"].is_null());
+        let text = run(&check[..6], None);
+        assert_eq!(text.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&text.stdout).contains("candidate record valid"));
+        // A record that is not the controller's is refused with its message.
+        fs::write(
+            &candidate,
+            CANDIDATE.replace("go/go@sha256", "go/other@sha256"),
+        )
+        .unwrap();
+        let (command, code, message) = failure(&candidate_run(&check, 6));
+        assert_eq!(
+            (command.as_str(), code.as_str(), message.as_str()),
+            (
+                "instance.candidate.check",
+                "candidate_failed",
+                "release image mismatch"
+            )
+        );
+        let mut other = check.to_vec();
+        other[4] = "home";
+        fs::write(&candidate, CANDIDATE).unwrap();
+        assert_eq!(
+            failure(&candidate_run(&other, 6)).2,
+            "release belongs to another app"
+        );
+        fs::write(&candidate, "{\"version\": 1, \"version\": 1}").unwrap();
+        assert_eq!(failure(&candidate_run(&check, 6)).2, "duplicate JSON field");
+        // build validates the binding against day2.json before any read.
+        fs::write(&binding, "{}").unwrap();
+        let (command, code, message) = failure(&candidate_run(&build, 6));
+        assert_eq!(
+            (command.as_str(), code.as_str()),
+            ("instance.candidate.build", "candidate_failed")
+        );
+        assert_eq!(message, "invalid candidate build binding");
+        let value: Value = serde_json::from_str(CANDIDATE).unwrap();
+        let mut unported = value["binding"].clone();
+        unported.as_object_mut().unwrap().remove("ci_artifact");
+        fs::write(&binding, unported.to_string()).unwrap();
+        assert!(
+            failure(&candidate_run(&build, 6))
+                .2
+                .starts_with("builds without a qualified SDK release and a checked main artifact")
+        );
+        // With a valid binding, the first read is the state bucket's: no gcloud here.
+        fs::write(&binding, value["binding"].to_string()).unwrap();
+        assert!(failure(&candidate_run(&build, 6)).2.contains("gcloud"));
+        assert!(!output.exists());
+        // The build host's commands read no spec, and run only there.
+        let (command, code, message) = failure(&candidate_run(
+            &[
+                "instance",
+                "candidate",
+                "native-build",
+                directory,
+                "--agent",
+            ],
+            6,
+        ));
+        assert_eq!(
+            (command.as_str(), code.as_str()),
+            ("instance.candidate.native-build", "candidate_failed")
+        );
+        assert!(
+            message.starts_with("native candidate commands run"),
+            "{message}"
+        );
     }
 
     /// CRC-32 (IEEE), as gzip's trailer needs it.

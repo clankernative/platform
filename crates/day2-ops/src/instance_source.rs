@@ -77,8 +77,8 @@ const WORKFLOW: &str = "roc.yml";
 const JOB: &str = "roc";
 const ARTIFACT_FILE: &[u8] = b"app.tar.gz";
 const REQUEST_LIMIT: u64 = 65_536;
-const ENTRY_LIMIT: usize = 8192;
-const MEMBER_LIMIT: u64 = 16 << 20;
+pub(crate) const ENTRY_LIMIT: usize = 8192;
+pub(crate) const MEMBER_LIMIT: u64 = 16 << 20;
 const CONTROL_LIMIT: u64 = 2 << 20;
 const PROOF_LIMIT: u64 = 1 << 63;
 
@@ -358,7 +358,7 @@ pub struct Request {
     pub output: Option<PathBuf>,
 }
 
-fn lower_hex(value: &str, length: usize) -> bool {
+pub(crate) fn lower_hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
             .bytes()
@@ -394,7 +394,7 @@ fn host(value: &str) -> bool {
         })
 }
 
-fn validate_instance(instance: &Instance) -> Result<()> {
+pub(crate) fn validate_instance(instance: &Instance) -> Result<()> {
     ensure!(
         instance.server.strip_prefix("https://").is_some_and(host),
         "the instance forge must be https://<host>"
@@ -473,7 +473,7 @@ pub fn validate(request: &Request) -> Result<()> {
 }
 
 /// A JSON integer, never a boolean or a float: Python's `type(x) is int`.
-fn int(value: &Value) -> Option<i128> {
+pub(crate) fn int(value: &Value) -> Option<i128> {
     match value {
         Value::Number(number) => number
             .as_u64()
@@ -490,7 +490,7 @@ fn proof_id(value: &Value) -> Option<u64> {
         .and_then(|id| u64::try_from(id).ok())
 }
 
-fn object_with(value: &Value, fields: &[&str]) -> bool {
+pub(crate) fn object_with(value: &Value, fields: &[&str]) -> bool {
     value.as_object().is_some_and(|object| {
         object.len() == fields.len() && fields.iter().all(|field| object.contains_key(*field))
     })
@@ -521,7 +521,7 @@ pub fn decode(bytes: &[u8]) -> Result<Value> {
 }
 
 /// qualified_release.blob.
-fn blob(value: &Value, limit: u64) -> Result<BlobIdentity> {
+pub(crate) fn blob(value: &Value, limit: u64) -> Result<BlobIdentity> {
     let valid = object_with(value, &["digest", "bytes"])
         && value["digest"].as_str().is_some_and(hash)
         && int(&value["bytes"]).is_some_and(|bytes| bytes > 0 && bytes <= i128::from(limit));
@@ -554,7 +554,7 @@ pub fn contract(value: &Value) -> Result<()> {
 }
 
 /// deploy.IDENTIFIER.
-fn identifier(value: &str) -> bool {
+pub(crate) fn identifier(value: &str) -> bool {
     value.len() <= 40
         && value.starts_with(|c: char| c.is_ascii_lowercase())
         && value
@@ -573,7 +573,7 @@ fn repository(value: &str) -> bool {
 }
 
 /// `.` or `[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*`.
-fn directory(value: &str) -> bool {
+pub(crate) fn directory(value: &str) -> bool {
     value == "."
         || value
             .split('/')
@@ -598,7 +598,7 @@ fn forge(value: &str) -> bool {
 
 /// deploy.image: `<registry>/<app>/<name>@sha256:<hex>`, or, without a
 /// digest, the image repository.
-fn app_image(value: &str, registry: &str, app: &str, pinned: bool) -> bool {
+pub(crate) fn app_image(value: &str, registry: &str, app: &str, pinned: bool) -> bool {
     let Some(rest) = value.strip_prefix(&format!("{registry}/{app}/")) else {
         return false;
     };
@@ -711,7 +711,7 @@ pub struct Binding {
     pub controls: String,
 }
 
-const BINDING_FIELDS: [&str; 10] = [
+pub(crate) const BINDING_FIELDS: [&str; 10] = [
     "app",
     "repository",
     "directory",
@@ -724,8 +724,22 @@ const BINDING_FIELDS: [&str; 10] = [
     "ci_artifact",
 ];
 
+/// A binding in one of the earlier controller's shapes without a qualified SDK
+/// release and a checked main artifact: those builds compiled the app on the
+/// build host, a path the platform does not provide.
+pub(crate) fn unported_binding(value: &Value) -> Result<()> {
+    let base = &BINDING_FIELDS[..7];
+    let qualified = &BINDING_FIELDS[..9];
+    ensure!(
+        !object_with(value, base) && !object_with(value, qualified),
+        "builds without a qualified SDK release and a checked main artifact are not supported: \
+         the binding must name qualified_release, verification and ci_artifact"
+    );
+    Ok(())
+}
+
 /// deployment_events.identity.
-fn identity(value: &Value) -> Result<()> {
+pub(crate) fn identity(value: &Value) -> Result<()> {
     ensure!(
         object_with(
             value,
@@ -770,6 +784,7 @@ impl Binding {
     /// and verification cases are the app's sdk and verification. The
     /// repository name itself is not derived; it may differ from `<org>/<app>`.
     pub fn check(value: Value, instance: &Instance) -> Result<Self> {
+        unported_binding(&value)?;
         ensure!(
             object_with(&value, &BINDING_FIELDS),
             "invalid candidate build binding"
@@ -854,7 +869,7 @@ impl Binding {
 /// A tar member's name as Python's tarfile decodes it: UTF-8, each byte that
 /// is not part of a valid sequence escaped to U+DC80..U+DCFF
 /// (surrogateescape). Code points compare as Python's str does.
-fn python_name(bytes: &[u8]) -> Vec<u32> {
+pub(crate) fn python_name(bytes: &[u8]) -> Vec<u32> {
     let mut name = Vec::new();
     for chunk in bytes.utf8_chunks() {
         name.extend(chunk.valid().chars().map(u32::from));
@@ -866,7 +881,7 @@ fn python_name(bytes: &[u8]) -> Vec<u32> {
 /// PurePosixPath(name).parts: an absolute path's root first ("//" for exactly
 /// two leading slashes, else "/"), then its components without empty and "."
 /// ones; ".." stays.
-fn posix_parts(name: &[u32]) -> Vec<Vec<u32>> {
+pub(crate) fn posix_parts(name: &[u32]) -> Vec<Vec<u32>> {
     let slash = u32::from(b'/');
     let leading = name.iter().take_while(|c| **c == slash).count();
     let mut parts = Vec::new();
@@ -883,7 +898,7 @@ fn posix_parts(name: &[u32]) -> Vec<Vec<u32>> {
     parts
 }
 
-fn ascii(name: &[u32], text: &str) -> bool {
+pub(crate) fn ascii(name: &[u32], text: &str) -> bool {
     name.len() == text.len()
         && name
             .iter()
@@ -901,7 +916,7 @@ fn ends_with(name: &[u32], text: &str) -> bool {
 
 /// A JSON string as Python's json.dumps writes it with ensure_ascii, from
 /// code points that may include lone surrogates.
-fn python_json_string(name: &[u32], out: &mut Vec<u8>) {
+pub(crate) fn python_json_string(name: &[u32], out: &mut Vec<u8>) {
     out.push(b'"');
     for code in name {
         match *code {
@@ -932,7 +947,7 @@ pub struct Controls {
 
 /// The decompressed tar bytes read at most: the 128 MiB member budget plus
 /// room for every member's header and padding and for its extension headers.
-const STREAM_LIMIT: u64 = ARTIFACT_LIMIT + (32 << 20);
+pub(crate) const STREAM_LIMIT: u64 = ARTIFACT_LIMIT + (32 << 20);
 /// The most a pax header or GNU long name may hold, checked before it is read.
 const EXTENSION_LIMIT: u64 = 1 << 20;
 const BUDGET: &str = "CI source archive exceeds budget";
@@ -972,151 +987,231 @@ fn decimal(bytes: &[u8]) -> Option<u64> {
 
 /// pax records, `<length> <key>=<value>\n`, each length the record's own in
 /// decimal. Anything else is refused.
-fn pax_records(mut data: &[u8]) -> Result<Vec<(&[u8], &[u8])>> {
+fn pax_records<'a>(mut data: &'a [u8], text: &TarText) -> Result<Vec<(&'a [u8], &'a [u8])>> {
     let mut records = Vec::new();
     while !data.is_empty() {
-        let space = data.iter().position(|b| *b == b' ').context(UNSUPPORTED)?;
+        let space = data
+            .iter()
+            .position(|b| *b == b' ')
+            .context(text.unsupported)?;
         let length = decimal(&data[..space])
             .and_then(|length| usize::try_from(length).ok())
             .filter(|length| *length > space + 2 && *length <= data.len())
-            .context(UNSUPPORTED)?;
-        ensure!(data[length - 1] == b'\n', UNSUPPORTED);
+            .context(text.unsupported)?;
+        ensure!(data[length - 1] == b'\n', text.unsupported);
         let record = &data[space + 1..length - 1];
         let equals = record
             .iter()
             .position(|b| *b == b'=')
-            .context(UNSUPPORTED)?;
-        ensure!(equals > 0, UNSUPPORTED);
+            .context(text.unsupported)?;
+        ensure!(equals > 0, text.unsupported);
         records.push((&record[..equals], &record[equals + 1..]));
         data = &data[length..];
     }
     Ok(records)
 }
 
+/// What a tar reading reports when the archive itself is unusable, in its
+/// reader's words.
+pub(crate) struct TarText {
+    pub unreadable: &'static str,
+    pub unsupported: &'static str,
+    pub global: &'static str,
+    pub budget: &'static str,
+}
+
+const CI_TEXT: TarText = TarText {
+    unreadable: UNREADABLE,
+    unsupported: UNSUPPORTED,
+    global: GLOBAL,
+    budget: BUDGET,
+};
+
+/// A member's type, as Python's tarfile classifies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// `isfile()`: a regular or contiguous file, or an old-style file whose
+    /// header name does not end in a slash.
+    Regular,
+    /// `isdir()`, including an old-style file whose header name ends in a slash.
+    Directory,
+    /// `issym()`.
+    Symlink,
+    /// A hard link, device, FIFO or unknown type.
+    Other,
+}
+
+/// One tar member, after any pax and GNU extension headers.
+pub(crate) struct Member {
+    /// The name as tarfile decodes it (surrogateescape).
+    pub name: Vec<u32>,
+    /// `PurePosixPath(name).parts`.
+    pub parts: Vec<Vec<u32>>,
+    pub kind: Kind,
+    pub size: u64,
+    /// The header's mode field.
+    pub mode: u32,
+}
+
+/// Read a gzip tar archive's members in order, as Python's tarfile reads them,
+/// decompressing at most `limit` bytes. `visit` gets each member and a reader
+/// of its data.
+///
+/// The tar crate reads blocks; extension headers are read here: pax `path` and
+/// `size` and GNU long names apply to the next member whatever its header's
+/// magic, and a pax global header carries only `comment`. An extension
+/// header's declared size is checked before its data is read. The few shapes
+/// tarfile reads differently are refused, not guessed:
+/// - a pax global header with another record or after a pending extension,
+///   and an extension with no member after it;
+/// - a GNU long name beside a different pax path, two pax headers for one
+///   member, a duplicate `path` or `size` record, a `GNU.sparse.*` record,
+///   and a pax `size` that is not canonical decimal or not the header's;
+/// - a name with a NUL byte, and a non-ustar header whose prefix field is not
+///   empty;
+/// - sparse and Solaris entries;
+/// - data on a link, device, FIFO or directory entry, which tarfile would not
+///   skip.
+pub(crate) fn read_tar(
+    archive: &[u8],
+    limit: u64,
+    text: &TarText,
+    mut visit: impl FnMut(&Member, &mut dyn Read) -> Result<()>,
+) -> Result<()> {
+    let mut stream = flate2::read::MultiGzDecoder::new(archive).take(limit);
+    let read = members(&mut stream, text, &mut visit);
+    // A stream cut off at its limit may otherwise look like an archive's end.
+    ensure!(stream.limit() > 0, text.budget);
+    read
+}
+
+fn members(
+    stream: impl Read,
+    text: &TarText,
+    visit: &mut dyn FnMut(&Member, &mut dyn Read) -> Result<()>,
+) -> Result<()> {
+    let mut source = tar::Archive::new(stream);
+    let mut pending = Extensions::default();
+    for entry in source
+        .entries()
+        .map_err(|_| anyhow!(text.unreadable))?
+        .raw(true)
+    {
+        let mut entry = entry.map_err(|_| anyhow!(text.unreadable))?;
+        let header: [u8; 512] = *entry.header().as_bytes();
+        let kind = header[156];
+        // Raw entries carry the header's own size.
+        let size = entry.size();
+        if matches!(kind, b'x' | b'g' | b'L' | b'K') {
+            ensure!(size <= EXTENSION_LIMIT, text.budget);
+            let mut data = Vec::new();
+            (&mut entry)
+                .take(size)
+                .read_to_end(&mut data)
+                .map_err(|_| anyhow!(text.unreadable))?;
+            ensure!(data.len() as u64 == size, text.unreadable);
+            match kind {
+                b'x' => {
+                    ensure!(!pending.pax, text.unsupported);
+                    pending.pax = true;
+                    for (key, value) in pax_records(&data, text)? {
+                        match key {
+                            b"path" => {
+                                ensure!(pending.path.is_none(), text.unsupported);
+                                pending.path = Some(value.to_vec());
+                            }
+                            b"size" => {
+                                ensure!(pending.size.is_none(), text.unsupported);
+                                pending.size = Some(decimal(value).context(text.unsupported)?);
+                            }
+                            key => ensure!(!key.starts_with(b"GNU.sparse."), text.unsupported),
+                        }
+                    }
+                }
+                b'g' => ensure!(
+                    pending.is_empty()
+                        && pax_records(&data, text)
+                            .is_ok_and(|records| records.iter().all(|(key, _)| *key == b"comment")),
+                    text.global
+                ),
+                b'L' => {
+                    ensure!(pending.long_name.is_none(), text.unsupported);
+                    pending.long_name = Some(terminated(&data).to_vec());
+                }
+                _ => {
+                    ensure!(!pending.long_link, text.unsupported);
+                    pending.long_link = true;
+                }
+            }
+            continue;
+        }
+        let extensions = std::mem::take(&mut pending);
+        let header_name = terminated(&header[..100]);
+        let ustar = entry.header().as_ustar().is_some();
+        let prefix_empty = header[345..500].iter().all(|b| *b == 0);
+        let names_agree = match (&extensions.path, &extensions.long_name) {
+            (Some(path), Some(long_name)) => path == long_name,
+            _ => true,
+        };
+        // tarfile reads an old-style regular entry named with a final slash
+        // as a directory, and skips data only after regular and unknown
+        // entries.
+        let regular = matches!(kind, b'0' | b'7') || (kind == 0 && !header_name.ends_with(b"/"));
+        let directory = kind == b'5' || (kind == 0 && header_name.ends_with(b"/"));
+        let skipped = regular || !(directory || matches!(kind, b'1'..=b'6'));
+        ensure!(
+            !matches!(kind, b'S' | b'X')
+                && names_agree
+                && extensions.size.is_none_or(|declared| declared == size)
+                && (ustar || prefix_empty)
+                && (skipped || size == 0),
+            text.unsupported
+        );
+        let path = match extensions.path.or(extensions.long_name) {
+            Some(path) => path,
+            None => entry.header().path_bytes().into_owned(),
+        };
+        ensure!(!path.contains(&0), text.unsupported);
+        let mode = entry
+            .header()
+            .mode()
+            .map_err(|_| anyhow!(text.unreadable))?;
+        let name = python_name(&path);
+        let member = Member {
+            parts: posix_parts(&name),
+            name,
+            kind: if regular {
+                Kind::Regular
+            } else if directory {
+                Kind::Directory
+            } else if kind == b'2' {
+                Kind::Symlink
+            } else {
+                Kind::Other
+            },
+            size,
+            mode,
+        };
+        visit(&member, &mut entry)?;
+    }
+    // An extension describes a member that must follow it.
+    ensure!(pending.is_empty(), text.unsupported);
+    Ok(())
+}
+
 impl Controls {
     /// Inventory executable CI inputs: every non-Markdown file under `.ci/` and
     /// `.gitea/workflows/roc.yml`, by their names below the archive's one root
-    /// directory. The archive is bounded to 8192 entries, 16 MiB per member and
-    /// 128 MiB in all; each control is a regular file of at most 2 MiB, unique
-    /// by name; the required controls must be present.
-    ///
-    /// The tar crate reads blocks; extension headers are read here, as Python's
-    /// tarfile reads them: pax `path` and `size` and GNU long names apply to the
-    /// next member whatever its header's magic, and a pax global header carries
-    /// only `comment`. Decompression stops at `STREAM_LIMIT`, and an extension
-    /// header's declared size is checked before its data is read. The few shapes
-    /// tarfile reads differently are refused, not guessed:
-    /// - a pax global header with another record or after a pending extension,
-    ///   and an extension with no member after it;
-    /// - a GNU long name beside a different pax path, two pax headers for one
-    ///   member, a duplicate `path` or `size` record, a `GNU.sparse.*` record,
-    ///   and a pax `size` that is not canonical decimal or not the header's;
-    /// - a name with a NUL byte, and a non-ustar header whose prefix field is not
-    ///   empty;
-    /// - sparse and Solaris entries;
-    /// - data on a link, device, FIFO or directory entry, which tarfile would
-    ///   not skip.
+    /// directory, read as `read_tar` reads an archive. The archive is bounded to
+    /// 8192 entries, 16 MiB per member and 128 MiB in all, and decompression
+    /// stops at `STREAM_LIMIT`; each control is a regular file of at most 2 MiB,
+    /// unique by name; the required controls must be present.
     pub fn read(archive: &[u8]) -> Result<Self> {
-        let mut stream = flate2::read::MultiGzDecoder::new(archive).take(STREAM_LIMIT);
-        let inventory = Self::inventory(&mut stream);
-        // A stream cut off at its limit may otherwise look like an archive's end.
-        ensure!(stream.limit() > 0, BUDGET);
-        let files = inventory?;
-        ensure!(
-            CONTROLS
-                .iter()
-                .all(|name| files.keys().any(|key| ascii(key, name))),
-            "checked-artifact CI controls missing"
-        );
-        Ok(Self { files })
-    }
-
-    fn inventory(stream: impl Read) -> Result<BTreeMap<Vec<u32>, Vec<u8>>> {
-        let mut source = tar::Archive::new(stream);
         let mut files = BTreeMap::new();
         let mut root: Option<Vec<u32>> = None;
         let (mut entries, mut total) = (0_usize, 0_u64);
-        let mut pending = Extensions::default();
-        for entry in source.entries().map_err(|_| anyhow!(UNREADABLE))?.raw(true) {
-            let mut entry = entry.map_err(|_| anyhow!(UNREADABLE))?;
-            let header: [u8; 512] = *entry.header().as_bytes();
-            let kind = header[156];
-            // Raw entries carry the header's own size.
-            let size = entry.size();
-            if matches!(kind, b'x' | b'g' | b'L' | b'K') {
-                ensure!(size <= EXTENSION_LIMIT, BUDGET);
-                let mut data = Vec::new();
-                (&mut entry)
-                    .take(size)
-                    .read_to_end(&mut data)
-                    .map_err(|_| anyhow!(UNREADABLE))?;
-                ensure!(data.len() as u64 == size, UNREADABLE);
-                match kind {
-                    b'x' => {
-                        ensure!(!pending.pax, UNSUPPORTED);
-                        pending.pax = true;
-                        for (key, value) in pax_records(&data)? {
-                            match key {
-                                b"path" => {
-                                    ensure!(pending.path.is_none(), UNSUPPORTED);
-                                    pending.path = Some(value.to_vec());
-                                }
-                                b"size" => {
-                                    ensure!(pending.size.is_none(), UNSUPPORTED);
-                                    pending.size = Some(decimal(value).context(UNSUPPORTED)?);
-                                }
-                                key => ensure!(!key.starts_with(b"GNU.sparse."), UNSUPPORTED),
-                            }
-                        }
-                    }
-                    b'g' => ensure!(
-                        pending.is_empty()
-                            && pax_records(&data).is_ok_and(|records| records
-                                .iter()
-                                .all(|(key, _)| *key == b"comment")),
-                        GLOBAL
-                    ),
-                    b'L' => {
-                        ensure!(pending.long_name.is_none(), UNSUPPORTED);
-                        pending.long_name = Some(terminated(&data).to_vec());
-                    }
-                    _ => {
-                        ensure!(!pending.long_link, UNSUPPORTED);
-                        pending.long_link = true;
-                    }
-                }
-                continue;
-            }
-            let extensions = std::mem::take(&mut pending);
-            let header_name = terminated(&header[..100]);
-            let ustar = entry.header().as_ustar().is_some();
-            let prefix_empty = header[345..500].iter().all(|b| *b == 0);
-            let names_agree = match (&extensions.path, &extensions.long_name) {
-                (Some(path), Some(long_name)) => path == long_name,
-                _ => true,
-            };
-            // tarfile reads an old-style regular entry named with a final slash
-            // as a directory, and skips data only after regular and unknown
-            // entries.
-            let regular =
-                matches!(kind, b'0' | b'7') || (kind == 0 && !header_name.ends_with(b"/"));
-            let directory = kind == b'5' || (kind == 0 && header_name.ends_with(b"/"));
-            let skipped = regular || !(directory || matches!(kind, b'1'..=b'6'));
-            ensure!(
-                !matches!(kind, b'S' | b'X')
-                    && names_agree
-                    && extensions.size.is_none_or(|declared| declared == size)
-                    && (ustar || prefix_empty)
-                    && (skipped || size == 0),
-                UNSUPPORTED
-            );
-            let path = match extensions.path.or(extensions.long_name) {
-                Some(path) => path,
-                None => entry.header().path_bytes().into_owned(),
-            };
-            ensure!(!path.contains(&0), UNSUPPORTED);
-            let name = python_name(&path);
-            let parts = posix_parts(&name);
+        read_tar(archive, STREAM_LIMIT, &CI_TEXT, |member, data| {
+            let parts = &member.parts;
             ensure!(
                 !parts.is_empty()
                     && parts[0][0] != u32::from(b'/')
@@ -1126,9 +1221,9 @@ impl Controls {
             let first = root.get_or_insert_with(|| parts[0].clone());
             ensure!(*first == parts[0], "CI source archive has multiple roots");
             entries += 1;
-            total = total.saturating_add(size);
+            total = total.saturating_add(member.size);
             ensure!(
-                entries <= ENTRY_LIMIT && size <= MEMBER_LIMIT && total <= ARTIFACT_LIMIT,
+                entries <= ENTRY_LIMIT && member.size <= MEMBER_LIMIT && total <= ARTIFACT_LIMIT,
                 BUDGET
             );
             let mut relative = Vec::new();
@@ -1143,24 +1238,30 @@ impl Controls {
             }
             let selected = (starts_with(&relative, ".ci/") && !ends_with(&relative, ".md"))
                 || ascii(&relative, ".gitea/workflows/roc.yml");
-            if !selected || directory {
-                continue;
+            if !selected || member.kind == Kind::Directory {
+                return Ok(());
             }
             ensure!(
-                regular && size <= CONTROL_LIMIT && !files.contains_key(&relative),
+                member.kind == Kind::Regular
+                    && member.size <= CONTROL_LIMIT
+                    && !files.contains_key(&relative),
                 "CI controls must be bounded unique regular files"
             );
             let mut bytes = Vec::new();
-            (&mut entry)
-                .take(size)
+            data.take(member.size)
                 .read_to_end(&mut bytes)
                 .map_err(|_| anyhow!(UNREADABLE))?;
-            ensure!(bytes.len() as u64 == size, UNREADABLE);
+            ensure!(bytes.len() as u64 == member.size, UNREADABLE);
             files.insert(relative, bytes);
-        }
-        // An extension describes a member that must follow it.
-        ensure!(pending.is_empty(), UNSUPPORTED);
-        Ok(files)
+            Ok(())
+        })?;
+        ensure!(
+            CONTROLS
+                .iter()
+                .all(|name| files.keys().any(|key| ascii(key, name))),
+            "checked-artifact CI controls missing"
+        );
+        Ok(Self { files })
     }
 
     /// One control's bytes, by its ASCII name.
@@ -1268,7 +1369,7 @@ pub fn validate_controls(controls: &Controls, binding: &Binding, release: &Relea
 }
 
 /// ci_artifact.receipt.
-pub fn receipt(value: &Value, binding: &Binding, source_commit: &str, inputs: &str) -> Result<()> {
+pub fn receipt(value: &Value, binding: &Value, source_commit: &str, inputs: &str) -> Result<()> {
     ensure!(
         object_with(
             value,
@@ -1291,13 +1392,13 @@ pub fn receipt(value: &Value, binding: &Binding, source_commit: &str, inputs: &s
     );
     ensure!(
         int(&value["version"]) == Some(1)
-            && value["repository"] == binding.value["repository"]
+            && value["repository"] == binding["repository"]
             && value["source_commit"] == source_commit
             && commit(source_commit)
             && value["source_inputs"] == inputs
             && hash(inputs)
-            && value["sdk_release"] == binding.value["qualified_release"]
-            && value["verification"] == binding.verification,
+            && value["sdk_release"] == binding["qualified_release"]
+            && value["verification"] == binding["verification"],
         "checked artifact belongs to another source/SDK/profile"
     );
     let name = value["artifact_name"].as_str().and_then(|name| {
@@ -1319,10 +1420,10 @@ pub fn receipt(value: &Value, binding: &Binding, source_commit: &str, inputs: &s
     Ok(())
 }
 
-/// ci_artifact.proof.
-pub fn proof(value: &Value, binding: &Binding, source_commit: &str, inputs: &str) -> Result<()> {
+/// ci_artifact.proof, for `binding`'s JSON.
+pub fn proof(value: &Value, binding: &Value, source_commit: &str, inputs: &str) -> Result<()> {
     ensure!(
-        binding.forge == "gitea" && binding.branch == "main",
+        binding["source"]["forge"] == "gitea" && binding["source"]["branch"] == "main",
         "checked-artifact provenance requires Gitea main"
     );
     ensure!(
@@ -1731,6 +1832,15 @@ fn create_new(path: &Path, write: impl FnOnce(&mut fs::File) -> std::io::Result<
     })
 }
 
+/// What an embedded session is asked for: its commit and source inputs, the
+/// archive it reads and the new file it writes.
+pub struct Embedded {
+    pub commit: Option<String>,
+    pub inputs: Option<String>,
+    pub archive: Option<PathBuf>,
+    pub output: Option<PathBuf>,
+}
+
 pub struct Session {
     mode: Mode,
     effects: Effects,
@@ -1817,6 +1927,39 @@ impl Session {
             checked: None,
             data: None,
         })
+    }
+
+    /// A session another host session runs in-process on files it owns: the
+    /// instance and the binding are already validated, `output` is a new file
+    /// in a private directory and `archive` a file that session wrote.
+    pub fn embedded(
+        mode: Mode,
+        effects: Effects,
+        instance: Instance,
+        binding: Binding,
+        given: Embedded,
+    ) -> Self {
+        Self {
+            mode,
+            effects,
+            instance: Some(instance),
+            binding: Some(binding),
+            commit: given.commit,
+            inputs: given.inputs,
+            archive: given.archive,
+            output: given.output,
+            done: 0,
+            controls: None,
+            run: None,
+            job: None,
+            checked: None,
+            data: None,
+        }
+    }
+
+    /// The effects back, once an embedded session is done.
+    pub fn into_effects(self) -> Effects {
+        self.effects
     }
 
     /// Run the mode's next step, which must be `name`.
@@ -2118,7 +2261,7 @@ impl Session {
             "one uploaded-artifact receipt required from the native job log"
         );
         let checked = decode(lines[0].as_bytes())?;
-        receipt(&checked, binding, &commit, &inputs)?;
+        receipt(&checked, &binding.value, &commit, &inputs)?;
         let upload = checked["upload_id"].clone();
         self.job = Some(id);
         self.checked = Some(checked);
@@ -2183,7 +2326,7 @@ impl Session {
         );
         let evidence = json!({"version": 1, "run": run.id, "attempt": run.attempt,
             "job": job, "receipt": checked});
-        proof(&evidence, binding, &commit, &inputs)?;
+        proof(&evidence, &binding.value, &commit, &inputs)?;
         let expected = blob(&checked["archive"], ARTIFACT_LIMIT)?;
         let output = self.output.clone().context("new archive")?;
         write_new(&output, self.data.as_ref().context("downloaded archive")?)?;
@@ -2277,4 +2420,4 @@ impl Forge<'_> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

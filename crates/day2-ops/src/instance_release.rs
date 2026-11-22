@@ -925,6 +925,42 @@ impl Publish {
     }
 }
 
+/// A release's manifest and its native evidence in the cache, verified and
+/// bound with its distribution and strict evidence exactly as a fetch binds
+/// them, without installing its operator.
+pub struct Verified {
+    pub release: Release,
+    pub manifest: PathBuf,
+    pub native: PathBuf,
+}
+
+/// Read `reference`'s manifest, distribution and evidence through `cache` as a
+/// fetch does, the manifest pinned under `registry`.
+pub fn verified(
+    cache: Cache,
+    registry: &str,
+    reference: &BlobIdentity,
+    tools: &mut dyn Tools,
+) -> Result<Verified> {
+    let mut fetch = Fetch {
+        cache,
+        registry: registry.to_owned(),
+        reference: reference.clone(),
+        release: None,
+        distribution: None,
+        native: None,
+        files: BTreeMap::new(),
+    };
+    for name in FETCHED {
+        fetch.blob(name, tools)?;
+    }
+    Ok(Verified {
+        release: fetch.release.context("manifest")?,
+        manifest: fetch.files.remove("manifest").context("manifest")?,
+        native: fetch.files.remove("native").context("native evidence")?,
+    })
+}
+
 impl Fetch {
     /// Each blob in `FETCHED` order: the manifest (pinned in the instance's
     /// registry), then the distribution it names, then its evidence.

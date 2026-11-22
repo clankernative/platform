@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use day2_ops::{
-    backup, chrome_extension, infra, instance_release, instance_roots, instance_source, local_dev,
-    maintenance, process, projection,
+    backup, chrome_extension, infra, instance_candidate, instance_release, instance_roots,
+    instance_source, local_dev, maintenance, process, projection,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -40,6 +40,9 @@ struct Operations {
     /// The mode the host action fixed for `day2 instance source`, and its session.
     source_mode: Option<instance_source::Mode>,
     source_session: Option<instance_source::Session>,
+    /// The mode the host action fixed for `day2 instance candidate`, and its session.
+    candidate_mode: Option<instance_candidate::Mode>,
+    candidate_session: Option<instance_candidate::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
     maintenance_recovery: Option<maintenance::Recovery>,
@@ -800,6 +803,40 @@ impl Operations {
                     .step(&name)
                     .map_err(instance_source::reported)
             }
+            "instance-candidate-prepare" => {
+                ensure!(
+                    self.candidate_session.is_none(),
+                    "one candidate session per workflow"
+                );
+                let mode = self
+                    .candidate_mode
+                    .context("only day2 instance candidate starts a candidate session")?;
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                self.candidate_session = Some(instance_candidate::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    mode,
+                    instance_candidate::Effects::native(mode)?,
+                )?);
+                Ok(json!({}))
+            }
+            "instance-candidate-step" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    name: String,
+                }
+                let name = input::<Input>(&request)?.name;
+                // A retryable forge read reaches the CLI as exactly `retryable: <code>`.
+                self.candidate_session
+                    .as_mut()
+                    .context("candidate session required")?
+                    .step(&name)
+                    .map_err(instance_source::reported)
+            }
             "infra-receipt" => self
                 .infrastructure
                 .as_ref()
@@ -926,6 +963,13 @@ impl Operations {
     }
 }
 
+/// The candidate command a host action starts: `instance-candidate-<mode>`.
+fn candidate_mode(action: &str) -> Option<instance_candidate::Mode> {
+    action
+        .strip_prefix("instance-candidate-")
+        .and_then(instance_candidate::Mode::from_name)
+}
+
 /// The source command a host action starts: `instance-source-<mode>`.
 fn source_mode(action: &str) -> Option<instance_source::Mode> {
     action
@@ -947,6 +991,8 @@ fn run(request: Request) -> Result<Value> {
         release_session: None,
         source_mode: None,
         source_session: None,
+        candidate_mode: None,
+        candidate_session: None,
         local: None,
         maintenance: None,
         maintenance_recovery: None,
@@ -961,6 +1007,7 @@ fn run(request: Request) -> Result<Value> {
     ]
     .contains(&request.action.as_str())
         && source_mode(&request.action).is_none()
+        && candidate_mode(&request.action).is_none()
     {
         ensure!(
             ["instance-project", "artifact-project", "artifact-version"]
@@ -1031,6 +1078,24 @@ fn run(request: Request) -> Result<Value> {
                 .request
                 .to_str()
                 .context("source request path must be UTF-8")?
+                .to_owned(),
+        ]
+    } else if let Some(mode) = candidate_mode(&request.action) {
+        // `day2 instance candidate <mode>` only, as for source: the action fixes
+        // the session's mode and the adapter validates the request.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: PathBuf,
+        }
+        let input: Input = input(&request)?;
+        operations.candidate_mode = Some(mode);
+        vec![
+            format!("instance-candidate-{}-session", mode.name()),
+            input
+                .request
+                .to_str()
+                .context("candidate request path must be UTF-8")?
                 .to_owned(),
         ]
     } else if request.action == "local-session" {

@@ -683,22 +683,122 @@ pub(crate) fn bounded(
     timeout: Duration,
     interrupted: Option<&AtomicBool>,
 ) -> Result<String> {
-    let interrupted = || interrupted.is_some_and(|flag| flag.load(Ordering::SeqCst));
-    let mut child = command
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    if let Some(bytes) = stdin {
-        child
+    let finished = supervise(
+        command,
+        Supervision {
+            stdin,
+            timeout,
+            interrupted,
+            sink: Sink::Capture,
+            group: false,
+        },
+    )?;
+    if !finished.status.success() {
+        let tail = String::from_utf8_lossy(&finished.stderr);
+        let tail: String = tail
+            .chars()
+            .rev()
+            .take(2_000)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        bail!("{} ({})", tail.trim(), finished.status);
+    }
+    Ok(String::from_utf8(finished.stdout)?)
+}
+
+/// A trusted tool's command: `name` found on `PATH`, or the executable `at`
+/// names (tests substitute stubs).
+pub(crate) fn tool(name: &str, at: Option<&Path>) -> Result<Command> {
+    let executable = match at {
+        Some(path) => path.to_owned(),
+        None => on_path(name)?,
+    };
+    Ok(Command::new(executable))
+}
+
+/// Where a supervised tool's output goes.
+pub(crate) enum Sink<'a> {
+    /// stdout and stderr captured, each bounded to `OUTPUT_LIMIT`.
+    Capture,
+    /// stdout and stderr appended to a log.
+    Log(&'a fs::File),
+    /// stdout captured, stderr appended to a log.
+    Split(&'a fs::File),
+}
+
+/// How a supervised tool runs.
+pub(crate) struct Supervision<'a> {
+    pub stdin: Option<&'a [u8]>,
+    pub timeout: Duration,
+    pub interrupted: Option<&'a AtomicBool>,
+    pub sink: Sink<'a>,
+    /// Run in its own process group, which is killed whole at the deadline and
+    /// once the tool exits, so no helper it started outlives it. A tool in its
+    /// own group does not receive the terminal's Ctrl-C.
+    pub group: bool,
+}
+
+/// What a supervised tool returned: its status and its captured, bounded
+/// output (empty when it went to a log).
+pub(crate) struct Finished {
+    pub status: std::process::ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Run a trusted tool with a deadline, optional stdin, bounded captured output
+/// or a log, and interrupt checks. A failed stdin write, the deadline or an
+/// interrupt kills the tool (its group, when it has one) before the error.
+pub(crate) fn supervise(command: &mut Command, supervision: Supervision<'_>) -> Result<Finished> {
+    use std::os::unix::process::CommandExt;
+    let interrupted = || {
+        supervision
+            .interrupted
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    };
+    command.stdin(if supervision.stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    match &supervision.sink {
+        Sink::Capture => {
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+        Sink::Log(log) => {
+            command.stdout(log.try_clone()?).stderr(log.try_clone()?);
+        }
+        Sink::Split(log) => {
+            command.stdout(Stdio::piped()).stderr(log.try_clone()?);
+        }
+    }
+    if supervision.group {
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
+    let group = supervision
+        .group
+        .then(|| rustix::process::Pid::from_raw(child.id() as i32))
+        .flatten();
+    let stop = |child: &mut std::process::Child| {
+        if let Some(group) = group {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    if let Some(bytes) = supervision.stdin {
+        let written = child
             .stdin
             .take()
-            .context("child stdin")?
-            .write_all(bytes)?;
+            .context("child stdin")
+            .and_then(|mut input| Ok(input.write_all(bytes)?));
+        if let Err(error) = written {
+            stop(&mut child);
+            return Err(error.context("write the tool's stdin"));
+        }
     }
     let reader = |stream: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || -> Vec<u8> {
@@ -726,9 +826,8 @@ pub(crate) fn bounded(
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if interrupted() || started.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+        if interrupted() || started.elapsed() > supervision.timeout {
+            stop(&mut child);
             bail!(if interrupted() {
                 "interrupted"
             } else {
@@ -737,6 +836,10 @@ pub(crate) fn bounded(
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+    if let Some(group) = group {
+        // Reap any helper the tool left behind in its group.
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
     let stdout = stdout
         .join()
         .map_err(|_| anyhow::anyhow!("stdout reader"))?;
@@ -747,19 +850,11 @@ pub(crate) fn bounded(
         stdout.len() <= OUTPUT_LIMIT,
         "tool output exceeds its bound"
     );
-    if !status.success() {
-        let tail = String::from_utf8_lossy(&stderr);
-        let tail: String = tail
-            .chars()
-            .rev()
-            .take(2_000)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        bail!("{} ({status})", tail.trim());
-    }
-    Ok(String::from_utf8(stdout)?)
+    Ok(Finished {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 struct Kubectl {

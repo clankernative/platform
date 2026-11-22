@@ -2,6 +2,7 @@
 pub mod backup;
 pub mod chrome_extension;
 pub mod infra;
+pub mod instance_candidate;
 pub mod instance_release;
 pub mod instance_roots;
 pub mod instance_source;

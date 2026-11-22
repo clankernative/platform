@@ -214,8 +214,10 @@ impl Release {
     /// only and a final newline, byte for byte as the instance's Python
     /// publisher wrote them (`json.dumps(release, sort_keys=True, indent=2)`).
     pub fn encode(&self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        python_json(&serde_json::to_value(self)?, 0, &mut bytes);
+        let mut bytes = crate::python_json::dumps(
+            &serde_json::to_value(self)?,
+            crate::python_json::Layout::Indented,
+        )?;
         bytes.push(b'\n');
         Ok(bytes)
     }
@@ -375,77 +377,6 @@ pub fn lock(path: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
-/// Python's `json.dumps(value, sort_keys=True, indent=2)` without the final newline.
-fn python_json(value: &Value, depth: usize, out: &mut Vec<u8>) {
-    let indent = |out: &mut Vec<u8>, depth: usize| {
-        out.push(b'\n');
-        out.extend(std::iter::repeat_n(b' ', depth * 2));
-    };
-    match value {
-        Value::Null => out.extend_from_slice(b"null"),
-        Value::Bool(true) => out.extend_from_slice(b"true"),
-        Value::Bool(false) => out.extend_from_slice(b"false"),
-        Value::Number(number) => out.extend_from_slice(number.to_string().as_bytes()),
-        Value::String(text) => python_string(text, out),
-        Value::Array(items) if items.is_empty() => out.extend_from_slice(b"[]"),
-        Value::Array(items) => {
-            out.push(b'[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                indent(out, depth + 1);
-                python_json(item, depth + 1, out);
-            }
-            indent(out, depth);
-            out.push(b']');
-        }
-        Value::Object(fields) if fields.is_empty() => out.extend_from_slice(b"{}"),
-        Value::Object(fields) => {
-            // UTF-8 byte order is code point order, which is how Python sorts keys.
-            let mut sorted: Vec<_> = fields.iter().collect();
-            sorted.sort_by(|left, right| left.0.cmp(right.0));
-            out.push(b'{');
-            for (index, (key, item)) in sorted.into_iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                indent(out, depth + 1);
-                python_string(key, out);
-                out.extend_from_slice(b": ");
-                python_json(item, depth + 1, out);
-            }
-            indent(out, depth);
-            out.push(b'}');
-        }
-    }
-}
-
-/// A JSON string as Python's `ensure_ascii` writes it: anything outside space
-/// to `~` is escaped, and code points beyond the BMP become surrogate pairs.
-fn python_string(text: &str, out: &mut Vec<u8>) {
-    out.push(b'"');
-    for character in text.chars() {
-        match character {
-            '"' => out.extend_from_slice(b"\\\""),
-            '\\' => out.extend_from_slice(b"\\\\"),
-            '\n' => out.extend_from_slice(b"\\n"),
-            '\r' => out.extend_from_slice(b"\\r"),
-            '\t' => out.extend_from_slice(b"\\t"),
-            '\u{8}' => out.extend_from_slice(b"\\b"),
-            '\u{c}' => out.extend_from_slice(b"\\f"),
-            ' '..='~' => out.push(character as u8),
-            _ => {
-                let mut units = [0u16; 2];
-                for unit in character.encode_utf16(&mut units) {
-                    out.extend_from_slice(format!("\\u{unit:04x}").as_bytes());
-                }
-            }
-        }
-    }
-    out.push(b'"');
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,23 +483,6 @@ mod tests {
         // xtask writes a distribution in field order with two-space indentation.
         assert_eq!(serde_json::to_vec_pretty(&distribution)?, DISTRIBUTION);
         Ok(())
-    }
-
-    #[test]
-    fn python_strings_escape_everything_outside_printable_ascii() {
-        let mut out = Vec::new();
-        python_string("a\"\\\n\u{7f}\u{e9}\u{1f600}\u{1}", &mut out);
-        assert_eq!(out, br#""a\"\\\n\u007f\u00e9\ud83d\ude00\u0001""#);
-        let mut out = Vec::new();
-        python_json(
-            &json!({"b": [], "a": {}, "c": [1, true, null]}),
-            0,
-            &mut out,
-        );
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "{\n  \"a\": {},\n  \"b\": [],\n  \"c\": [\n    1,\n    true,\n    null\n  ]\n}"
-        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ Problem := [
 	ReleaseFailed(Str),
 	SourceFailed(Str),
 	SourceUnavailable(Str),
+	CandidateFailed(Str),
 ].{
 	Dto : { code : Str, message : Str, hint : Str, exit_code : I32, retryable : Bool }
 
@@ -50,7 +51,7 @@ Problem := [
 		| InvalidCatalog(_)
 		| UnsupportedArtifact(_)
 		| MetadataTooLarge => 5
-		PlanFailed(_) | ApplyFailed(_) | ReleaseFailed(_) | SourceFailed(_) => 6
+		PlanFailed(_) | ApplyFailed(_) | ReleaseFailed(_) | SourceFailed(_) | CandidateFailed(_) => 6
 		SourceUnavailable(_) => 7
 	}
 
@@ -83,11 +84,12 @@ Problem := [
 		ReleaseFailed(_) => "release_failed"
 		SourceFailed(_) => "source_failed"
 		SourceUnavailable(_) => "source_unavailable"
+		CandidateFailed(_) => "candidate_failed"
 	}
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan|apply|release|source <directory>."
+		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan|apply|release|source|candidate <directory>."
 		MissingCommand => "Describe options require the command app describe <app>."
 		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
@@ -113,7 +115,7 @@ Problem := [
 		ApplyFailed(detail) => "The instance apply failed: ${detail}"
 		ReleaseFailed(detail) => "The instance release failed: ${detail}"
 		# The host's own message, exactly, which the deploy controller records.
-		SourceFailed(detail) | SourceUnavailable(detail) => detail
+		SourceFailed(detail) | SourceUnavailable(detail) | CandidateFailed(detail) => detail
 	}
 
 	hint : Problem -> Str
@@ -147,6 +149,9 @@ Problem := [
 		SourceUnavailable(
 			_,
 		) => "A forge read failed transiently or the exact main commit's CI run did not finish in time. Nothing was written; retry later."
+		CandidateFailed(
+			_,
+		) => "Run from the instance's CI job image with the apply identity's credentials and the forge token. This refusal is permanent for these inputs: a build's private evidence is in the instance's release state; fix the cause, then run again."
 		InvalidAppName(_) => "Use a lowercase identifier up to 48 bytes; day2_ and sqlite_ prefixes are reserved."
 		InvalidOperationName(_) => "Use dot-separated lowercase identifiers, at most 80 bytes in total."
 		_ => "Run day2 --help for usage and examples."

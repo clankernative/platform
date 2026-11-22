@@ -7,6 +7,7 @@ import InstanceSpec
 import InstanceRender
 import InstanceRelease
 import InstanceSource
+import InstanceCandidate
 
 ## Status, error, stream, and exit code are projections of one closed outcome.
 Output :: { outcome : Outcome }.{
@@ -19,6 +20,7 @@ Output :: { outcome : Outcome }.{
 		Ran(Cli.Roots, Names.LocalPath, InstanceSpec, InstanceRender.Receipt),
 		Released(Cli.Release, Names.LocalPath, InstanceSpec, InstanceRelease.Report),
 		Sourced(Cli.SourceRequest, Try(Names.LocalPath, [Null]), InstanceSource.Report),
+		Candidated(Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report),
 		Failed(Problem, Cli.Format, Cli.Command),
 	]
 
@@ -53,6 +55,7 @@ Output :: { outcome : Outcome }.{
 			Outcome.Ran(request, path, spec, receipt) => ran_text(request, path, spec, receipt)
 			Outcome.Released(request, path, spec, receipt) => released_text(request, path, spec, receipt)
 			Outcome.Sourced(request, path, report) => sourced_text(request, path, report)
+			Outcome.Candidated(request, path, report) => candidated_text(request, path, report)
 			Outcome.Failed(problem, _, _) => error_text(problem)
 		}
 	}
@@ -87,6 +90,7 @@ format = |outcome| match outcome {
 	Output.Outcome.Ran(request, _, _, _) => request.parts().format
 	Output.Outcome.Released(request, _, _, _) => request.parts().format
 	Output.Outcome.Sourced(request, _, _) => request.parts().format
+	Output.Outcome.Candidated(request, _, _) => request.parts().format
 }
 
 next_actions : Source -> List(Cli.Action)
@@ -144,6 +148,7 @@ json = |outcome| match outcome {
 	Output.Outcome.Ran(request, path, spec, receipt) => ran_json(request, path, spec, receipt)
 	Output.Outcome.Released(request, path, spec, receipt) => released_json(request, path, spec, receipt)
 	Output.Outcome.Sourced(request, path, report) => sourced_json(request, path, report)
+	Output.Outcome.Candidated(request, path, report) => candidated_json(request, path, report)
 	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
 	Output.Outcome.Help(_) => info_json(Bool.True)
 	Output.Outcome.Version(_) => info_json(Bool.False)
@@ -575,6 +580,103 @@ sourced_text = |request, path, report| {
 	)
 }
 
+## After a candidate command, validate the spec it read; the build host's commands read none.
+candidate_actions : Cli.CandidateRequest -> List(Cli.Action)
+candidate_actions = |request| match request.instance() {
+	Ok(instance) => [Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(instance))]
+	Err(Null) => [help_action({})]
+}
+
+candidated_json : Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report -> Str
+# As sourced_json: the envelope is encoded with `"receipt":null`, which only that key can spell, and the host's text
+# replaces it verbatim.
+candidated_json = |request, path, report| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	spec_path : Try(Str, [Null])
+	spec_path = path.map_ok(|value| value.to_str())
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: request.command().name(),
+		exit_code: 0.I32,
+		context: {
+			spec_path,
+			spec_validation: match path {
+				Ok(_) => "checked"
+				Err(Null) => "not_read"
+			},
+		},
+		result: { receipt: null },
+		error: null,
+		next_actions: candidate_actions(request).map(|action| action.dto()),
+	})
+		.replace_first("\"receipt\":null", "\"receipt\":${report.text}")
+}
+
+candidated_text : Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report -> Str
+candidated_text = |request, path, report| {
+	receipt = report.receipt
+	row = |label, value| ["  ${label}${Str.repeat(" ", 10 - label.count_utf8_bytes())}${Output.safe(value)}"]
+	optional = |label, value| match value {
+		Ok(text) => row(label, text)
+		Err(Null) => []
+	}
+	file = |label, value| match value {
+		Ok(written) => row(label, "${written.path} (${written.digest}, ${written.bytes.to_str()} bytes)")
+		Err(Null) => []
+	}
+	transfer = match receipt.transfer {
+		Ok(copied) => row(
+			"Transfer",
+			"${copied.bytes.to_str()} bytes in ${copied.milliseconds.to_str()} ms",
+		)
+		Err(Null) => []
+	}
+	slot = match receipt.slot {
+		Ok(index) => row("Slot", index.to_str())
+		Err(Null) => []
+	}
+	title = match request.parts().action {
+		Cli.CandidateAction.Build(_) => "deployment candidate"
+		Cli.CandidateAction.Preflight(_) => "maintenance protocol verified on the build host"
+		Cli.CandidateAction.Check(_) => "candidate record valid"
+		Cli.CandidateAction.NativeBuild(_) => "native build"
+		Cli.CandidateAction.NativeProbe(_) => "native maintenance protocol verified"
+	}
+	spec = match path {
+		Ok(value) => ["SPEC", "  ${Output.safe(value.to_str())}", ""]
+		Err(Null) => []
+	}
+	next =
+		Str.join_with(
+			candidate_actions(request)
+				.map(|action| action.dto())
+				.map(|action| "  ${Output.safe(action.description)}\n    ${Output.safe(action.command)}"),
+			"\n\n",
+		)
+	Str.join_with(
+		["DAY2  /  instance candidate  /  ${title}", ""]
+			.concat(spec)
+			.concat(["CANDIDATE"])
+			.concat(optional("App", receipt.app_id))
+			.concat(optional("Commit", receipt.commit))
+			.concat(optional("Outcome", receipt.outcome))
+			.concat(optional("Image", receipt.image))
+			.concat(optional("Artifact", receipt.artifact_id))
+			.concat(optional("Tooling", receipt.tooling_image))
+			.concat(optional("Record", receipt.record))
+			.concat(optional("Log", receipt.build_log))
+			.concat(file("Candidate", receipt.candidate))
+			.concat(file("Result", receipt.result))
+			.concat(file("Build log", receipt.log))
+			.concat(slot)
+			.concat(transfer)
+			.concat(["", "NEXT", next]),
+		"\n",
+	)
+}
+
 toggled : Cli.Instance -> Cli.Instance
 toggled = |request| request.with_format(
 	match request.parts().format {
@@ -611,6 +713,7 @@ checked_json = |request, path, spec| {
 			tofu_state_bucket: names.tofu_state_bucket,
 			platform_state_prefixes: names.platform_state_prefixes,
 			cluster: names.cluster,
+			build_host: names.build_host,
 			app_namespace_prefix: names.app_namespace_prefix,
 			apps: names
 				.apps
@@ -741,6 +844,7 @@ checked_text = |request, path, spec| {
 				}/<id> / opt-in roots ${names.platform_state_prefixes.day2}/<root>",
 			),
 			row("Cluster", "${names.cluster.name} / ${names.cluster.kube_context}"),
+			row("Build host", "${names.build_host.name} / ${names.build_host.zone}"),
 			row("App namespaces", "${names.app_namespace_prefix}<id>"),
 			"",
 			"APPS  /  ${names.apps.len().to_str()}",
@@ -889,6 +993,11 @@ info_json = |is_help| {
 				"instance.source.controls",
 				"instance.source.verify-controls",
 				"instance.source.checked-artifact",
+				"instance.candidate.build",
+				"instance.candidate.preflight",
+				"instance.candidate.check",
+				"instance.candidate.native-build",
+				"instance.candidate.native-probe",
 			],
 			platform_commands: [
 				"platform.build",

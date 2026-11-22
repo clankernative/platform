@@ -18,6 +18,11 @@ day2 instance source archive DIRECTORY BINDING COMMIT NEW_ARCHIVE [--agent]
 day2 instance source controls ARCHIVE [--agent]
 day2 instance source verify-controls DIRECTORY BINDING ARCHIVE [--agent]
 day2 instance source checked-artifact DIRECTORY BINDING COMMIT INPUTS NEW_ARCHIVE [--agent]
+day2 instance candidate build DIRECTORY BINDING COMMIT NEW_CANDIDATE [--agent]
+day2 instance candidate preflight DIRECTORY CANDIDATE [--agent]
+day2 instance candidate check DIRECTORY APP CANDIDATE [--agent]
+day2 instance candidate native-build JOB [--agent]
+day2 instance candidate native-probe JOB [--agent]
 ```
 
 `instance check` reads exactly `DIRECTORY/day2.json` and prints every derived
@@ -27,7 +32,8 @@ prints the [OpenTofu inputs](#rendered-inputs) the platform renders from it.
 inputs, and `instance apply` [applies](#apply) them. `instance release`
 [publishes and fetches](#release) the qualified SDK releases apps pin, and
 `instance source` [reads an app's source and checked artifact](#source) from the
-forge. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
+forge, and `instance candidate` [builds, probes and checks](#candidate) an app's
+deployment candidate. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
 derivation; there is no second schema.
 
 ## The spec
@@ -111,6 +117,7 @@ Nothing below can be configured, restated or overridden.
 | Shared OpenTofu state bucket | `<project>-tofu-state` |
 | Platform root state | bucket `<project>-tofu-state`, prefixes `foundation` (project), `platform/cluster`, `platform/tenancy`, `platform/app` (app edges) and `day2` (roots an instance opts into, such as its CI integration); the security shell's prefix is not derived yet |
 | Cluster | `day2`, kube context `gke_<project>_<zone>_day2` |
+| Build host | VM `day2-x86-qualify` in `<zone>`, the qualification runner stack's, reached through IAP as the apply identity |
 | App admins | the app's `owners` and the apply identity, sorted |
 | App repository | `<org>/<id>` |
 | App hostname | `<id>.<domains.apps>` |
@@ -505,6 +512,152 @@ writes is valid to the other.
   - A `.ci/roc.json` with a UTF-8 byte-order mark, or in UTF-16, is refused; the
     earlier controller accepted it.
 
+## Candidate
+
+`instance candidate` is the instance deploy controller's candidate build, value
+for value: a record either one writes serves the other. It runs in the
+instance's CI job, from the job image's linux-x86_64 CLI, with the apply
+identity's credentials and the forge token of [`instance source`](#source).
+
+- **Binding.** `build` takes the same transitional binding file as `instance
+  source`, checked the same way against `day2.json`. A binding without
+  `qualified_release`, `verification` and `ci_artifact`, one of the earlier
+  controller's shapes that compiled the app on the build host, is refused:
+  candidates are only ever built from the exact main commit's checked artifact.
+- **Records.** In the state bucket, under
+  `gs://<project>-tofu-state/day2/app-releases/<app>/`:
+  - `candidates/<binding digest>/<commit>.json`: the candidate for a binding and
+    a source commit;
+  - `checked-inputs/<binding digest>/<inputs hex>.json`: the same shape, for the
+    binding and the app's checked source inputs;
+  - `builds/<binding digest>/<commit>.log`: the native build's log, or a reuse
+    proof.
+
+  A record's bytes are its fields with sorted keys, `", "` and `": "`
+  separators, ASCII escapes and a final newline (Python's `json.dumps(value,
+  sort_keys=True)`); the binding digest is the sha256 hex of the binding encoded
+  the same way, without the newline. A record is read at its exact generation
+  and created only while absent (`--if-generation-match=0`); an object that
+  cannot be read for any reason other than absence is a refusal. Logs and reuse
+  proofs replace what is there.
+- **build.**
+  - The stored candidate record for the binding and `COMMIT`, validated as
+    `check` does and required to be this binding's and commit's, is the answer.
+  - Otherwise: the commit's archive and its source inputs (below); its CI
+    controls, verified as `verify-controls` verifies them, before any cached
+    result can be used; then the checked-inputs record. A cached result must be
+    for this binding and inputs and checked at its own commit. For its own
+    commit it is the answer as it is; for another commit the answer is the same
+    record with this commit and this commit's build log, which receives the
+    reuse proof (`kind: checked-input-reuse`, the binding digest, both commits,
+    the inputs, the checked log, the image and the artifact).
+  - Otherwise: the checked artifact, as `checked-artifact` fetches it; the
+    binding's release manifest, distribution and evidence through the [release
+    cache](#release), bound as a fetch binds them (the operator is not
+    installed); then a native build on the build host (below). Its result must
+    be this binding's, commit's, inputs' and checked artifact's; its log is
+    archived and the checked-inputs record is created.
+  - Last, the candidate record is created if it is new, and its exact bytes are
+    written to `NEW_CANDIDATE`. The receipt names the outcome (`stored`,
+    `reused` or `built`), the record, the build log, the image and the artifact,
+    and, for a native build, the bytes and milliseconds the copy to the build
+    host took.
+- **Source inputs.** The sha256 of `{"files":[[name,size,hex],...],"version":1}`
+  (compact, sorted keys) over the app's files below its directory, in path-part
+  order, with tarfile's (surrogateescape) names. The archive is read as
+  `instance source` reads one; a member is in the app when the directory is `.`
+  or the member is the directory or below it, and a top-level `.ci/` or
+  `.gitea/` member never is. Every member counts against 16 MiB each, 128 MiB in
+  all and 8192 entries; only directories, regular files and links outside the
+  app are allowed; a duplicate file, a file where a directory is or a file below
+  a file is refused; at least one file and `<directory>/App.roc` must exist.
+- **Build host.** The derived build host, through `gcloud compute ssh` and `scp`
+  over IAP as the apply identity. A private job directory
+  `/tmp/day2-build-<32 hex>` (`/tmp/day2-sdk-probe-<32 hex>` for `preflight`)
+  is created mode 0700 and filled with the request, its inputs and the running
+  CLI's four `cli/` files, compressed in transit over the authenticated SSH
+  channel; the CLI runs there as root. Each gcloud command runs in its own
+  process group, killed whole at its deadline. A failed command's stderr (the
+  remote run's included) goes to the job's stderr, the job log, never to an
+  error, a receipt or a record. Once the directory exists, a build's failure
+  copies its build log back to the build log path as private evidence (`build
+  failed; private evidence: <uri>` on stderr). The directory is then removed,
+  unless the session there may still be running (this job's deadline passed, or
+  ssh lost the connection): it is left in place, said so, and that session ends
+  by its own budget.
+- **Budgets.** The deploy job allows the remote build 5400 s and gives the build
+  host's session a budget of 4800 s, from its start: the slot wait (at most
+  900 s) and every Docker command (each at most its own deadline, 60 s to
+  3600 s) fit in what is left, and no step starts after it. The 600 s margin
+  covers SSH and IAP setup, starting the CLI and the cleanup after a failure (at
+  most 120 s of operation logs, then two Docker removals of at most 120 s
+  each). A probe has 300 s and a budget of 180 s (a probe lock wait of at most
+  60 s, the login and the probe).
+- **native-build.** On the build host, as root, in the job directory (which must
+  be private):
+  - every other job file is checked against the request's identity first
+    (which catches a short or corrupt copy; the running CLI cannot vouch for
+    itself, and logs its own files' digests), then the binding's release, images
+    and native evidence; each file read later is checked again on the bytes
+    read;
+  - one of two build slots is taken: an exclusive lock on
+    `/var/lock/day2-app-builds/<slot>` within 900 s, container
+    `day2-app-slot-<slot>`, reaped first;
+  - the source inputs are computed again and the checked artifact's provenance
+    is validated; the artifact is extracted for transport only (one directory,
+    regular files of mode 0444 or 0555, at most 4096 entries and 128 MiB);
+  - the binding's tooling image runs with the native profile (no network,
+    6 GiB, 4 CPUs, 512 processes, private cgroup namespace, bounded tmpfs), its
+    own ABI seed restored when it has one; its maintenance protocol is proven.
+    Files copied out of the image (the ABI seed and the Dockerfile) land in the
+    slot's root-only staging directory and are used only when each is a single
+    regular file within its bound, checked and made read-only on its opened
+    descriptor; anything else, a link included, is refused;
+    its `linux-artifact-security` admits the artifact against the release's
+    native evidence; the artifact is packaged on the runtime image with the
+    tooling's own Dockerfile, pushed, and its one exact digest read back;
+  - `result.json` and `build.log` belong to the directory's owner, mode 0600.
+    The log starts with the promotion header and the provenance proof, then
+    names the CLI files' digests. After a Docker failure up to 16 native
+    operation logs are kept, and the error is logged last.
+- **native-probe.** The tooling image's maintenance protocol, under the probe's
+  own lock (`/var/lock/day2-app-builds/probe`) and from its fresh private Docker
+  configuration, without a build slot. `preflight` runs it for a candidate
+  record before any app is stopped.
+- **Registry token.** The build host's own service account token from its
+  metadata server, given to `docker login` on stdin only, twice per build (the
+  second just before the push). The Docker configuration is in a root-only
+  directory under `/run/day2-app-builds` (tmpfs), wiped when a slot or the
+  probe lock is taken and on every exit, and the token's bytes are overwritten
+  once used. The token never appears in an argument, a log, a receipt or an
+  error.
+- **Build host directories.** The lock directory `/var/lock/day2-app-builds`
+  and `/run/day2-app-builds` must be root-owned with mode 0700; otherwise every
+  build is refused with what they are.
+- **check.** Reads only `day2.json` and the record: the record's exact fields,
+  its binding, its native admission, its checked artifact's provenance, its
+  app-local images and its build log path, for `APP`, against the derived
+  registry and state bucket only, never the app's current `sdk`.
+- **Failures** after the spec validates exit 6 with `candidate_failed` and the
+  controller's own message (`builder returned another source or toolchain`,
+  `checked-input cache identity changed`, `native build pool wait budget
+  exhausted`, `SDK lacks the required offline admission protocol; ...` and the
+  rest). State reads and writes, IAP copies and commands and Docker failures are
+  permanent. Only the forge reads of `instance source` stay retryable: exit 7
+  with `source_unavailable`.
+- **Known limits:**
+  - JSON the earlier controller accepted is refused when a record or the
+    tooling's admission output holds a duplicate key, a float (`-0`
+    included, which Python reads as the integer 0), a boolean where an integer
+    is required or an integer of 2^64 or more. The admission output is checked
+    before anything is pushed.
+  - The CLI copied to the build host must run there: the job image's operator
+    and the build host share the Debian 13 / glibc family.
+  - A killed `build`, or one whose session may still be running, leaves its job
+    directory on the build host's tmpfs until the next reboot; the next build in
+    its slot reaps the container.
+  - Build logs have no size bound, as before.
+
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
@@ -518,7 +671,8 @@ writes is valid to the other.
    schedules), never to restate a derived name.
 3. **Platform-owned control (started: slice 1, publishing and fetching SDK
    releases with `day2 instance release`; slice 2, reading app sources and
-   checked artifacts with `day2 instance source`).** Deployment, promotion, webhook and
+   checked artifacts with `day2 instance source`; slice 3, building, probing and
+   checking deployment candidates with `day2 instance candidate`).** Deployment, promotion, webhook and
    artifact provenance logic moves from instance repositories into `ops/*.roc` recipes
    with narrow Rust capabilities. Instance workflows become rendered shims that
    call `day2 instance plan` and `day2 instance apply`; any edit to a shim fails
