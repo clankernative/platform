@@ -293,15 +293,23 @@ mod tests {
 
     fn terminal_pair() -> Result<(File, File)> {
         use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
-        let master = File::from(openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).context("synthetic openpt")?);
+        let master = File::from(
+            openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).context("synthetic openpt")?,
+        );
         grantpt(&master).context("synthetic grantpt")?;
         unlockpt(&master).context("synthetic unlockpt")?;
         let name = ptsname(&master, Vec::new()).context("synthetic ptsname")?;
         let slave = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(std::ffi::OsStr::from_bytes(name.to_bytes())).context("synthetic slave open")?;
-        rustix::fs::fcntl_setfl(&master,rustix::fs::fcntl_getfl(&master).context("synthetic master flags")?|rustix::fs::OFlags::NONBLOCK).context("synthetic nonblocking master")?;
+            .open(std::ffi::OsStr::from_bytes(name.to_bytes()))
+            .context("synthetic slave open")?;
+        rustix::fs::fcntl_setfl(
+            &master,
+            rustix::fs::fcntl_getfl(&master).context("synthetic master flags")?
+                | rustix::fs::OFlags::NONBLOCK,
+        )
+        .context("synthetic nonblocking master")?;
         Ok((master, slave))
     }
 
@@ -311,7 +319,11 @@ mod tests {
         // mode. Every configured bit and control character is still compared;
         // the separate poll asserts that no secret input actually remains.
         #[cfg(target_os = "macos")]
-        let value = { let mut value=value;value.local_modes.remove(LocalModes::PENDIN);value };
+        let value = {
+            let mut value = value;
+            value.local_modes.remove(LocalModes::PENDIN);
+            value
+        };
         format!("{value:?}")
     }
 

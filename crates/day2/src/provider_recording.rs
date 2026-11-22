@@ -616,8 +616,11 @@ mod tests {
 
     #[test]
     fn a_synthetic_identifier_collision_never_produces_a_bundle() {
-        let (mut session,_)=carta();session.redactor=redact::Redactor::carta("1001");
-        session.token().unwrap();session.stakeholders().unwrap();session.grants().unwrap();
-        assert!(matches!(session.finish(),Err(Failure::SecretInOutput)));
+        let (mut session, _) = carta();
+        session.redactor = redact::Redactor::carta("1001");
+        session.token().unwrap();
+        session.stakeholders().unwrap();
+        session.grants().unwrap();
+        assert!(matches!(session.finish(), Err(Failure::SecretInOutput)));
     }
 }

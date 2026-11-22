@@ -143,12 +143,28 @@ pub(super) struct Redactor {
 }
 
 impl Redactor {
-    pub(super) fn validate_identities(&self,provider:Provider)->Result<(),Failure> {
-        let replacements=self.identifiers.values().map(|id|match provider {Provider::Carta=>format!("{}",1000+id),Provider::OpenAi=>format!("redacted_{id}")}).collect::<std::collections::BTreeSet<_>>();
-        if self.identifiers.keys().any(|(class,value)| {
-            let value=if class=="issuer" {value.as_str()} else {value.strip_prefix("string:").or_else(||value.strip_prefix("number:")).unwrap_or(value)};
+    pub(super) fn validate_identities(&self, provider: Provider) -> Result<(), Failure> {
+        let replacements = self
+            .identifiers
+            .values()
+            .map(|id| match provider {
+                Provider::Carta => format!("{}", 1000 + id),
+                Provider::OpenAi => format!("redacted_{id}"),
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if self.identifiers.keys().any(|(class, value)| {
+            let value = if class == "issuer" {
+                value.as_str()
+            } else {
+                value
+                    .strip_prefix("string:")
+                    .or_else(|| value.strip_prefix("number:"))
+                    .unwrap_or(value)
+            };
             replacements.contains(value)
-        }) { return Err(Failure::SecretInOutput); }
+        }) {
+            return Err(Failure::SecretInOutput);
+        }
         Ok(())
     }
 
