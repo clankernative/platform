@@ -273,6 +273,17 @@ impl Session {
             return Err(Failure::Json);
         }
         let bytes = self.redactor.body(self.provider, body)?;
+        self.refuse_private_output(&bytes)?;
+        self.recordings.push(Recording {
+            name,
+            bytes,
+            status,
+            response_bytes: body.len(),
+        });
+        Ok(())
+    }
+
+    fn refuse_private_output(&self, bytes: &[u8]) -> Result<(), Failure> {
         if bytes
             .windows(self.secret.len())
             .any(|v| v == self.secret.as_bytes())
@@ -288,12 +299,6 @@ impl Session {
         {
             return Err(Failure::SecretInOutput);
         }
-        self.recordings.push(Recording {
-            name,
-            bytes,
-            status,
-            response_bytes: body.len(),
-        });
         Ok(())
     }
 
@@ -398,12 +403,7 @@ impl Session {
         };
         let provenance = json!({"format":1,"provider":self.provider.name(),"captured_at":crate::oauth::effects::wall_time().map_err(|_|Failure::Expired)?,"provider_qualified":false,"redaction_policy":"closed-schema-values-v1","sources":source_bindings(),"coverage":match self.provider {Provider::Carta=>"playground-first-page-per-collection",Provider::OpenAi=>"one-production-prepared-responses-request"},"request":request,"files":files});
         let bytes = serde_json::to_vec_pretty(&provenance).map_err(|_| Failure::Json)?;
-        if bytes
-            .windows(self.secret.len())
-            .any(|v| v == self.secret.as_bytes())
-        {
-            return Err(Failure::SecretInOutput);
-        }
+        self.refuse_private_output(&bytes)?;
         Ok(Bundle {
             recordings: std::mem::take(&mut self.recordings),
             provenance: bytes,
@@ -428,6 +428,7 @@ mod tests {
     struct CartaFixture {
         replies: VecDeque<Reply>,
         calls: Arc<Mutex<Vec<&'static str>>>,
+        bearer: &'static str,
     }
 
     impl CartaPort for CartaFixture {
@@ -445,7 +446,7 @@ mod tests {
             max: usize,
         ) -> Result<Reply, TransportFailure> {
             assert!(query.is_none(), "recording never follows pagination");
-            assert_eq!(token.bearer(), TOKEN);
+            assert_eq!(token.bearer(), self.bearer);
             assert_eq!(max, MAX_BODY);
             self.calls.lock().unwrap().push(collection.segment());
             Ok(self.replies.pop_front().unwrap())
@@ -462,6 +463,7 @@ mod tests {
         let port = CartaFixture {
             replies,
             calls: calls.clone(),
+            bearer: TOKEN,
         };
         let mut session = Session::with(
             Provider::Carta,
@@ -637,6 +639,7 @@ mod tests {
         let port = CartaFixture {
             replies: VecDeque::from([reply]),
             calls: calls.clone(),
+            bearer: "Bearer",
         };
         let mut session = Session::with(
             Provider::Carta,
@@ -651,5 +654,51 @@ mod tests {
         assert_eq!(session.token(), Err(Failure::Order));
         assert!(session.finish().is_err());
         assert_eq!(*calls.lock().unwrap(), ["token"]);
+    }
+
+    #[test]
+    fn held_bearer_is_refused_in_final_provenance_even_when_bodies_are_safe() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let replies = [
+            json!({"access_token":"playground","token_type":"Bearer","expires_in":3600}),
+            json!({"stakeholders":[]}),
+            json!({"optionGrants":[]}),
+        ]
+        .into_iter()
+        .map(|v| Reply {
+            status: 200,
+            json: true,
+            body: serde_json::to_vec(&v).unwrap(),
+            retry_after_seconds: None,
+        })
+        .collect();
+        let port = CartaFixture {
+            replies,
+            calls: calls.clone(),
+            bearer: "playground",
+        };
+        let mut session = Session::with(
+            Provider::Carta,
+            Live::Carta {
+                port: Box::new(port),
+                token: None,
+            },
+            SECRET.into(),
+            Phase::Token,
+        );
+        session.redactor = redact::Redactor::carta("987654321");
+        session.token().unwrap();
+        session.stakeholders().unwrap();
+        session.grants().unwrap();
+        assert!(session.recordings.iter().all(|r| {
+            !std::str::from_utf8(r.bytes())
+                .unwrap()
+                .contains("playground")
+        }));
+        assert!(matches!(session.finish(), Err(Failure::SecretInOutput)));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["token", "stakeholders", "optionGrants"]
+        );
     }
 }
