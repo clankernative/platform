@@ -147,9 +147,16 @@ impl Redactor {
         let replacements = self
             .identifiers
             .values()
-            .map(|id| match provider {
-                Provider::Carta => format!("{}", 1000 + id),
-                Provider::OpenAi => format!("redacted_{id}"),
+            .flat_map(|id| {
+                let number = 1000 + id;
+                [
+                    number.to_string(),
+                    json!(number as f64).to_string(),
+                    match provider {
+                        Provider::Carta => number.to_string(),
+                        Provider::OpenAi => format!("redacted_{id}"),
+                    },
+                ]
             })
             .collect::<std::collections::BTreeSet<_>>();
         if self.identifiers.keys().any(|(class, value)| {
@@ -529,6 +536,22 @@ mod tests {
             v["optionGrants"][0]["stakeholderId"]
         );
         assert_eq!(v["optionGrants"][0]["quantity"], 0);
+    }
+
+    #[test]
+    fn collisions_cover_integer_float_and_string_identifier_spellings() {
+        for (provider, body) in [
+            (Provider::Carta, br#"{"id":1001.0}"#.as_slice()),
+            (Provider::OpenAi, br#"{"id":1001}"#),
+            (Provider::OpenAi, br#"{"id":"redacted_1"}"#),
+        ] {
+            let mut redactor = Redactor::default();
+            redactor.body(provider, body).unwrap();
+            assert_eq!(
+                redactor.validate_identities(provider),
+                Err(Failure::SecretInOutput)
+            );
+        }
     }
 
     #[test]
