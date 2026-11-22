@@ -1,14 +1,16 @@
 use super::issuer_costs::{Costs, Operation, Outcome, Recorder, Subject, preserve_error};
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
-    birth::IssuerOwner,
+    NativeRole,
+    birth::{self, IssuerOwner},
     channel::Channel,
     policy::{EnrollmentPolicy, decode_key},
     process::{MessageProcess, SelfSnapshot},
     protocol::{self, Packet, ProcessData, SignedStage, StageData},
     runtime::{self, RuntimeBinding},
 };
-use anyhow::{Result, ensure};
+use crate::security_epoch::scheduled_backup::requester;
+use anyhow::{Context, Result, ensure};
 use std::collections::BTreeMap;
 
 struct Enrollment {
@@ -544,6 +546,27 @@ fn serve(
             &costs.hashes(Subject::Requester),
         )
     })?;
+    if let Packet::BackupObserveHello {
+        policy,
+        public_key,
+        request,
+        intent,
+    } = packet
+    {
+        return backup_observe(
+            issuer,
+            enrolled,
+            issuance,
+            (channel, acquisition),
+            (costs, &mut current, &mut peer),
+            BackupObservationHello {
+                policy,
+                public_key,
+                request,
+                intent,
+            },
+        );
+    }
     if let Packet::FreezeHello { selection, request } = packet {
         return freeze(
             issuer,
@@ -1923,4 +1946,182 @@ mod retained_restore_app_tests {
             }
         }
     }
+}
+
+// Fixed comparison-only purpose; no Job role, CREATE proof or source owner.
+struct BackupObservationHello {
+    policy: day2_capabilities::Digest,
+    public_key: String,
+    request: day2_capabilities::Digest,
+    intent: String,
+}
+
+fn backup_observe(
+    issuer: &mut IssuerOwner,
+    enrolled: &BTreeMap<(u32, u64, NativeRole), Enrollment>,
+    issuance: &Issuance,
+    wire: (&mut Channel, &mut NativeAcquisition),
+    checks: (&Costs, &mut SelfSnapshot, &mut MessageProcess),
+    hello: BackupObservationHello,
+) -> Result<()> {
+    let (channel, original) = wire;
+    let (costs, current, controller) = checks;
+    let requested = (|| {
+        issuance.require_open()?;
+        ensure!(
+            hello.policy == issuer.policy.digest()?,
+            "native_backup_policy_changed"
+        );
+        let selected = issuer
+            .policy
+            .scheduled_backup
+            .as_ref()
+            .context("native_backup_requester_disabled")?;
+        let job_code = selected.executable.clone();
+        decode_key(&hello.public_key)?;
+        let key = (
+            controller.data().process,
+            controller.data().start_ticks,
+            NativeRole::EpochController,
+        );
+        let existing = enrolled
+            .get(&key)
+            .context("native_backup_enrolled_controller_required")?;
+        ensure!(
+            existing.public_key == hello.public_key && existing.process == *controller.data(),
+            "native_backup_controller_changed"
+        );
+        runtime::require_common(controller.data(), &issuer.certificate.data.process)?;
+        let actual = costs.measure(Operation::Runtime, || {
+            runtime::current(
+                &issuer.policy,
+                NativeRole::EpochController,
+                controller,
+                original,
+                costs,
+            )
+        })?;
+        ensure!(
+            actual == existing.runtime,
+            "native_backup_controller_runtime_changed"
+        );
+        let intent = requester::intent_digest_data(hello.intent.as_bytes())?;
+        let challenge = protocol::nonce("scheduled-backup-observe")?;
+        channel.send(
+            &Packet::BackupObserveNonce {
+                request: hello.request.clone(),
+                challenge: challenge.clone(),
+            },
+            original,
+        )?;
+        // Exactly THIS Bind packet carries the Controller's kernel PIDFD and
+        // the two Job anchors. The normal enrollment receiver remains strict.
+        let (packet, mut anchors) = channel.receive_backup_anchors(
+            controller,
+            &job_code,
+            original,
+            &costs.hashes(Subject::Requester),
+        )?;
+        let Packet::BackupObserveBind {
+            request,
+            challenge: answered,
+            signature,
+        } = packet
+        else {
+            anyhow::bail!("native_backup_observation_order")
+        };
+        ensure!(
+            request == hello.request && answered == challenge,
+            "native_backup_observation_binding"
+        );
+        protocol::verify(
+            &hello.public_key,
+            "scheduled-backup-observe-bind",
+            &(
+                &hello.policy,
+                &hello.public_key,
+                &hello.request,
+                &challenge,
+                &intent,
+            ),
+            &signature,
+        )?;
+        let job = day2_capabilities::Digest::of(&(
+            "day2-scheduled-backup-process-v1",
+            anchors.process_data(),
+        ))?;
+        let controller_commitment = day2_capabilities::Digest::of(&(
+            "day2-scheduled-backup-controller-v1",
+            &hello.public_key,
+            controller.data(),
+        ))?;
+        ensure!(
+            requester::validate_process_commitments_data(
+                hello.intent.as_bytes(),
+                &job,
+                &controller_commitment
+            )? == intent,
+            "native_backup_intent_changed"
+        );
+        let observed =
+            anchors.observe_runtime(&issuer.policy, hello.intent.as_bytes(), original, costs)?;
+        ensure!(
+            birth::load_policy(original)? == issuer.policy,
+            "native_backup_policy_changed"
+        );
+        issuer.certificate.verify(&issuer.policy)?;
+        issuer
+            .parent
+            .check_identity(original, &costs.hashes(Subject::ParentBefore))?;
+        current.check(original)?;
+        controller.check_identity(original, &costs.hashes(Subject::Requester))?;
+        anchors.check(original, &costs.hashes(Subject::Requester))?;
+        let (origin, deadline) = original.interval_data()?;
+        let data = protocol::BackupObservationData {
+            issuer: issuer.certificate.digest()?,
+            policy: hello.policy,
+            controller: controller.data().clone(),
+            controller_key: hello.public_key,
+            job: anchors.process_data().clone(),
+            runtime: observed.runtime,
+            workload: observed.workload,
+            intent,
+            request: hello.request,
+            challenge,
+            issuer_original: original.identity_domain()?,
+            origin_ns: origin.as_nanos().try_into()?,
+            deadline_ns: deadline.as_nanos().try_into()?,
+        };
+        let observation = protocol::SignedBackupObservation {
+            signature: issuer.key.sign("scheduled-backup-observation", &data)?,
+            data,
+        };
+        // The signature attests this historical observation only. It cannot
+        // attest the later sender post or complete a source/transfer owner.
+        issuer
+            .parent
+            .check_identity(original, &costs.hashes(Subject::ParentBefore))?;
+        current.check(original)?;
+        controller.check_identity(original, &costs.hashes(Subject::Requester))?;
+        anchors.check(original, &costs.hashes(Subject::Requester))?;
+        channel.send(
+            &Packet::BackupObserveGrant {
+                observation: Box::new(observation),
+            },
+            original,
+        )?;
+        anchors.check(original, &costs.hashes(Subject::Requester))?;
+        controller.check_identity(original, &costs.hashes(Subject::Requester))?;
+        current.check(original)?;
+        issuer
+            .parent
+            .check_identity(original, &costs.hashes(Subject::ParentBefore))?;
+        original.remaining()?;
+        Ok(())
+    })();
+    if requested.is_err() {
+        channel.refuse();
+        original.refuse();
+    }
+    requested
 }

@@ -8,6 +8,7 @@ use super::issuer_costs::HashCosts;
 use super::peer_idle::{IdleRequest, PeerChannel};
 use super::{RestoredCurrentPeerPort, RestoredPeerSource, RestoredPeerTail};
 use crate::security_epoch::native_clock::NativeAcquisition;
+use crate::security_epoch::native_enrollment::process::backup_anchor::ForwardedJobAnchors;
 use crate::security_epoch::native_enrollment::{
     process::MessageProcess,
     protocol::{self, MAX_PACKET, Packet},
@@ -273,7 +274,7 @@ impl Channel {
         Ok(())
     }
 
-    fn refuse(&mut self) {
+    pub(super) fn refuse(&mut self) {
         self.refused.set(true);
         if let Some(transcript) = &mut self.transcript {
             transcript.refuse();
@@ -569,6 +570,7 @@ impl Channel {
                     let role = match &packet {
                         Packet::StageHello { role, .. } => *role,
                         Packet::FreezeHello { .. }
+                        | Packet::BackupObserveHello { .. }
                         | Packet::RestorePrepareHello { .. }
                         | Packet::RestoreFinishHello { .. }
                         | Packet::RestoreRoleHello { .. } => super::NativeRole::EpochController,
@@ -612,6 +614,55 @@ impl Channel {
             acquisition.refuse();
         }
         result
+    }
+
+    /// The only rights-bearing enrollment step. The old strict receive path
+    /// is unchanged and still rejects all SCM_RIGHTS. Arity is selected here,
+    /// never by an untrusted payload or a general caller option.
+    pub(super) fn receive_backup_anchors(
+        &mut self,
+        controller: &mut MessageProcess,
+        code: &Digest,
+        acquisition: &mut NativeAcquisition,
+        costs: &HashCosts,
+    ) -> Result<(Packet, ForwardedJobAnchors)> {
+        let requested = (|| {
+            ensure!(!self.refused.get(), "native_enrollment_channel_refused");
+            let mut bytes = [0_u8; MAX_PACKET];
+            acquisition.remaining()?;
+            self.begin_packet(Direction::Receive, None, acquisition)?;
+            let received = loop {
+                acquisition.remaining()?;
+                match net::recv_pidfd_rights_packet(
+                    &self.socket,
+                    &mut [IoSliceMut::new(&mut bytes)],
+                    net::PidfdRightsCount::Two,
+                ) {
+                    Ok(packet) => break packet,
+                    Err(RecvPidfdError::Io(Errno::AGAIN)) => {
+                        self.transport(Transport::WouldBlock, PollFlags::IN, acquisition)?
+                    }
+                    Err(RecvPidfdError::Io(Errno::INTR)) => {
+                        self.transport(Transport::Interrupted, PollFlags::IN, acquisition)?
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            let packet = protocol::decode(&bytes[..received.packet.bytes])?;
+            ensure!(
+                matches!(packet, Packet::BackupObserveBind { .. }),
+                "native_backup_observation_order"
+            );
+            let anchors =
+                ForwardedJobAnchors::receive(received, controller, code, acquisition, costs)?;
+            self.packet_delivered(packet.frame(), acquisition)?;
+            Ok((packet, anchors))
+        })();
+        if requested.is_err() {
+            self.refuse();
+            acquisition.refuse();
+        }
+        requested
     }
 
     fn receive_kernel(

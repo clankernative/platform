@@ -156,6 +156,11 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/native_enrollment/process/backup_anchor.rs",
+      "scope": "const",
+      "fingerprint": "sha256:12af3fcef7d335e2bd051504f4eaad9f79fc0bc7ab343919f09c2d0d439d6ced"
+    },
+    {
       "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",
       "scope": "const",
       "fingerprint": "sha256:6f8ca0aecf4bccbda5f3048a437cac010724b53865a7c856c810edaa20719fff",
@@ -14049,6 +14054,40 @@
       "kind": "private_material",
       "consuming_methods": [],
       "destructor": "sha256:e2ad14970bfc213595c702ef6cee76f0f2ea835959c5a7e18d4fab4e120805ac"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/process/backup_anchor.rs",
+      "type_name": "ForwardedJobAnchors",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , original : & mut NativeAcquisition , costs : & HashCosts) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn observe_runtime (& mut self , policy : & EnrollmentPolicy , intent : & [u8] , original : & mut NativeAcquisition , costs : & Costs) -> Result < ScheduledRuntimeData >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn process_data (& self) -> & ProcessData",
+        "pub (in crate :: security_epoch :: native_enrollment) fn receive (received : ReceivedPidfdRightsPacket , admitted_forwarder : & mut MessageProcess , expected_job_code : & Digest , original : & mut NativeAcquisition , costs : & HashCosts) -> Result < Self >"
+      ],
+      "factories": [
+        {
+          "owner": "ForwardedJobAnchors",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn receive (received : ReceivedPidfdRightsPacket , admitted_forwarder : & mut MessageProcess , expected_job_code : & Digest , original : & mut NativeAcquisition , costs : & HashCosts) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ForwardedJobAnchors",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , original : & mut NativeAcquisition , costs : & HashCosts) -> Result < () >"
+        },
+        {
+          "owner": "ForwardedJobAnchors",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn observe_runtime (& mut self , policy : & EnrollmentPolicy , intent : & [u8] , original : & mut NativeAcquisition , costs : & Costs) -> Result < ScheduledRuntimeData >"
+        },
+        {
+          "owner": "ForwardedJobAnchors",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn process_data (& self) -> & ProcessData"
+        }
+      ],
+      "proof_uses": []
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/protected_restore.rs",

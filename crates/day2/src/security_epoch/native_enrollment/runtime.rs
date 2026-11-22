@@ -120,7 +120,10 @@ fn label<'a>(container: &'a wire::Container, key: &str) -> Result<&'a str> {
         .context("native_enrollment_runtime_label")
 }
 
-fn require_kernel(policy: &EnrollmentPolicy, acquisition: &mut NativeAcquisition) -> Result<()> {
+pub(super) fn require_kernel(
+    policy: &EnrollmentPolicy,
+    acquisition: &mut NativeAcquisition,
+) -> Result<()> {
     use crate::security_epoch::native_namespace as ns;
     acquisition.remaining()?;
     let mut file = std::fs::File::from(rustix::fs::open(

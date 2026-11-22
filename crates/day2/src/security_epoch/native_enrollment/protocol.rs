@@ -120,6 +120,33 @@ pub(super) struct SignedStage {
     pub signature: String,
 }
 
+/// Historical comparison only. In particular this is NOT protected CREATE
+/// provenance, a Job role, a source loan or proof of final native completion.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BackupObservationData {
+    pub issuer: Digest,
+    pub policy: Digest,
+    pub controller: ProcessData,
+    pub controller_key: String,
+    pub job: ProcessData,
+    pub runtime: RuntimeBinding,
+    pub workload: crate::security_epoch::scheduled_backup::requester::WorkloadData,
+    pub intent: Digest,
+    pub request: Digest,
+    pub challenge: Digest,
+    pub issuer_original: Digest,
+    pub origin_ns: u64,
+    pub deadline_ns: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SignedBackupObservation {
+    pub data: BackupObservationData,
+    pub signature: String,
+}
+
 /// Selection DATA for one irreversible issuer-closure attempt. The real
 /// requester still needs its retained role key, native message process and
 /// original. A signed statement alone is NOT business-rights Stop.
@@ -727,6 +754,24 @@ pub(super) enum Packet {
     RestoreAppConfirmGrant {
         confirmation: Box<SignedRestorePreparedConfirmation>,
     },
+    BackupObserveHello {
+        policy: Digest,
+        public_key: String,
+        request: Digest,
+        intent: String,
+    },
+    BackupObserveNonce {
+        request: Digest,
+        challenge: Digest,
+    },
+    BackupObserveBind {
+        request: Digest,
+        challenge: Digest,
+        signature: String,
+    },
+    BackupObserveGrant {
+        observation: Box<SignedBackupObservation>,
+    },
     StageHello {
         policy: Digest,
         role: NativeRole,
@@ -758,28 +803,32 @@ impl Packet {
     pub(super) fn frame(&self) -> Option<super::handshake::Frame> {
         use super::handshake::{Frame, Protocol, Step};
         let step = match self {
-            Self::StageHello { .. }
+            Self::BackupObserveHello { .. }
+            | Self::StageHello { .. }
             | Self::FreezeHello { .. }
             | Self::RestorePrepareHello { .. }
             | Self::RestoreAppHello { .. }
             | Self::RestoreFinishHello { .. }
             | Self::RestoreRoleHello { .. }
             | Self::RestoreAppConfirmHello { .. } => Step::Hello,
-            Self::StageNonce { .. }
+            Self::BackupObserveNonce { .. }
+            | Self::StageNonce { .. }
             | Self::FreezeNonce { .. }
             | Self::RestorePrepareNonce { .. }
             | Self::RestoreAppNonce { .. }
             | Self::RestoreFinishNonce { .. }
             | Self::RestoreRoleNonce { .. }
             | Self::RestoreAppConfirmNonce { .. } => Step::Challenge,
-            Self::StageBind { .. }
+            Self::BackupObserveBind { .. }
+            | Self::StageBind { .. }
             | Self::FreezeBind { .. }
             | Self::RestorePrepareBind { .. }
             | Self::RestoreAppBind { .. }
             | Self::RestoreFinishBind { .. }
             | Self::RestoreRoleBind { .. }
             | Self::RestoreAppConfirmBind { .. } => Step::Bind,
-            Self::StageGrant { .. }
+            Self::BackupObserveGrant { .. }
+            | Self::StageGrant { .. }
             | Self::FreezeGrant { .. }
             | Self::RestorePrepareGrant { .. }
             | Self::RestoreAppGrant { .. }
@@ -898,6 +947,17 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Packet> {
     // The unique raw JSON decoder above still rejects duplicate keys before
     // any Value-to-typed conversion can discard them.
     let objects: &[&str] = match value.get("kind").and_then(serde_json::Value::as_str) {
+        Some("backup_observe_grant") => &[
+            "/observation",
+            "/observation/data",
+            "/observation/data/controller",
+            "/observation/data/controller/namespaces",
+            "/observation/data/job",
+            "/observation/data/job/namespaces",
+            "/observation/data/runtime",
+            "/observation/data/runtime/container",
+            "/observation/data/workload",
+        ],
         Some("restore_app_confirm_hello" | "restore_app_confirm_bind") => &[
             "/decision",
             "/decision/statement",

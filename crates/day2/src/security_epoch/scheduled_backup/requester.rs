@@ -232,6 +232,27 @@ pub(in crate::security_epoch) struct WorkloadData {
     pub admission_generation: Digest,
 }
 
+/// Exact mechanical-process commitments only. Authentication and the
+/// Controller's actual original remain with the native caller, not this DATA.
+#[cfg(any(target_os = "linux", test))]
+pub(in crate::security_epoch) fn validate_process_commitments_data(
+    bytes: &[u8],
+    job: &Digest,
+    controller: &Digest,
+) -> Result<Digest> {
+    let intent = Intent::decode_data(bytes)?;
+    ensure!(
+        intent.requester.process == *job && intent.transport.controller == *controller,
+        "backup_requester_process_commitment"
+    );
+    intent.commitment_data()
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(in crate::security_epoch) fn intent_digest_data(bytes: &[u8]) -> Result<Digest> {
+    Intent::decode_data(bytes)?.commitment_data()
+}
+
 pub(in crate::security_epoch) fn validate_workload_data(
     selected: &RequesterPolicy,
     runtime_subject: &ReviewedSubject,

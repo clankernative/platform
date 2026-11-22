@@ -906,3 +906,25 @@ fn coherent_cron_hash_and_intent_cannot_bless_an_unbounded_or_malformed_start_de
     }
     Ok(())
 }
+
+#[test]
+fn process_commitments_are_exact_data_and_do_not_select_an_actor_or_original() -> Result<()> {
+    let f = Fixture::new()?;
+    let bytes = serde_json::to_vec(&f.intent)?;
+    let job = &f.intent.requester.process;
+    let controller = &f.intent.transport.controller;
+    assert_eq!(
+        validate_process_commitments_data(&bytes, job, controller)?,
+        intent_digest_data(&bytes)?
+    );
+    assert!(
+        validate_process_commitments_data(&bytes, &Digest::new(b"other real process"), controller)
+            .is_err()
+    );
+    assert!(
+        validate_process_commitments_data(&bytes, job, &Digest::new(b"other enrolled Controller"))
+            .is_err()
+    );
+    assert!(intent_digest_data(b"{\"unsupported\":true}").is_err());
+    Ok(())
+}
