@@ -446,7 +446,7 @@ CARGO_CONTEXTS = {
                     "@crates__tower-0.5.3//:tower",
                     "@crates__tower-http-0.6.11//:tower_http",
                     "@crates__tower-service-0.3.3//:tower_service",
-                    "@crates__url-2.5.8//:url",
+                    "@crates__url-2.5.9//:url",
                     "@crates__webpki-roots-1.0.10//:webpki_roots"
                 ],
                 "features": [
@@ -1147,7 +1147,7 @@ CARGO_CONTEXTS = {
                     "@crates__tower-0.5.3//:tower",
                     "@crates__tower-http-0.6.11//:tower_http",
                     "@crates__tower-service-0.3.3//:tower_service",
-                    "@crates__url-2.5.8//:url",
+                    "@crates__url-2.5.9//:url",
                     "@crates__webpki-roots-1.0.10//:webpki_roots"
                 ],
                 "features": [
@@ -1822,7 +1822,7 @@ CARGO_CONTEXTS = {
                     "@crates__tower-0.5.3//:tower",
                     "@crates__tower-http-0.6.11//:tower_http",
                     "@crates__tower-service-0.3.3//:tower_service",
-                    "@crates__url-2.5.8//:url",
+                    "@crates__url-2.5.9//:url",
                     "@crates__webpki-roots-1.0.10//:webpki_roots"
                 ],
                 "features": [
