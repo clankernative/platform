@@ -282,13 +282,11 @@ impl Session {
         if let Live::Carta {
             token: Some(token), ..
         } = &self.live
-        {
-            if bytes
+            && bytes
                 .windows(token.bearer().len())
                 .any(|v| v == token.bearer().as_bytes())
-            {
-                return Err(Failure::SecretInOutput);
-            }
+        {
+            return Err(Failure::SecretInOutput);
         }
         self.recordings.push(Recording {
             name,
@@ -622,5 +620,36 @@ mod tests {
         session.stakeholders().unwrap();
         session.grants().unwrap();
         assert!(matches!(session.finish(), Err(Failure::SecretInOutput)));
+    }
+
+    #[test]
+    fn an_actual_token_matching_a_protocol_literal_is_still_refused() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let reply = Reply {
+            status: 200,
+            json: true,
+            body: serde_json::to_vec(
+                &json!({"access_token":"Bearer","token_type":"Bearer","expires_in":3600}),
+            )
+            .unwrap(),
+            retry_after_seconds: None,
+        };
+        let port = CartaFixture {
+            replies: VecDeque::from([reply]),
+            calls: calls.clone(),
+        };
+        let mut session = Session::with(
+            Provider::Carta,
+            Live::Carta {
+                port: Box::new(port),
+                token: None,
+            },
+            SECRET.into(),
+            Phase::Token,
+        );
+        assert_eq!(session.token(), Err(Failure::SecretInOutput));
+        assert_eq!(session.token(), Err(Failure::Order));
+        assert!(session.finish().is_err());
+        assert_eq!(*calls.lock().unwrap(), ["token"]);
     }
 }
