@@ -14534,10 +14534,10 @@ the following restrictions:
 
 3. This notice may not be removed or altered from any source distribution.
 
-===== form_urlencoded 1.2.2 =====
+===== form_urlencoded 1.2.3 =====
 License: MIT OR Apache-2.0
 Source: registry+https://github.com/rust-lang/crates.io-index
-Unmodified source: https://crates.io/api/v1/crates/form_urlencoded/1.2.2/download
+Unmodified source: https://crates.io/api/v1/crates/form_urlencoded/1.2.3/download
 
 --- LICENSE-APACHE ---
                               Apache License
@@ -64816,10 +64816,10 @@ Unmodified source: https://crates.io/api/v1/crates/untrusted/0.9.0/download
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
-===== url 2.5.8 =====
+===== url 2.5.9 =====
 License: MIT OR Apache-2.0
 Source: registry+https://github.com/rust-lang/crates.io-index
-Unmodified source: https://crates.io/api/v1/crates/url/2.5.8/download
+Unmodified source: https://crates.io/api/v1/crates/url/2.5.9/download
 
 --- LICENSE-APACHE ---
                               Apache License
