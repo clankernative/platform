@@ -150,6 +150,32 @@ afterwards. See
 credential's authority, the profile, the fixtures an administrator creates
 first, and which checklist items a run settles.
 
+## Explicit redacted fixture recordings
+
+`xtask provider-record carta|openai NEW_DIRECTORY` is a separate, explicit operator recipe in
+[`ProviderRecording.roc`](../ops/ProviderRecording.roc). The human launches the installed command in their own terminal;
+neither verification nor an application invokes it. It prompts for credentials without echo, never accepts them through
+argv, environment or a file, and persists only closed-schema redacted JSON. Raw bodies and provider error text have no
+output path. The adapter refuses duplicate or unknown fields, unsupported protocol literals and oversized input.
+
+Carta is fixed to playground: one token call and one page each for stakeholders and option grants, with no pagination
+continuation. OpenAI uses the actual synchronous Responses request builder with `gpt-6-luna`, a fixed `Reply OK.` prompt,
+64 output tokens, storage/background/streaming off and no tools. The user explicitly approves its small charge before
+entering a key. The exact prepared body is saved as provenance; it is not substituted for another pinned profile.
+
+A new 0700 directory receives exclusive 0600 redacted files and `PROVENANCE.json` last. The manifest binds request,
+adapter/recipe source hashes, time, observed status/byte counts, redaction version and redacted file hashes. It retains
+`provider_qualified: false`: one page is a sample, and a redacted recording is neither a provider signature nor proof of
+application acceptance. Protocol/model/status/usage values and absent/null/empty/type distinctions remain observed;
+private text, identifiers, times and financial values become synthetic. No fixture changes occur automatically.
+
+Prompts have a three-minute absolute bound and 16 KiB byte cap. Typed Ctrl-C/Ctrl-D cancel hidden input and ordinary
+returns/unwinding restore exact terminal settings. Default external signal termination or abort can bypass Rust cleanup;
+the fixed recovery instruction is `stty sane`. A storage failure may leave a partial or even fully written manifest visible. Presence is not completion: require the
+actual command to exit successfully and verify every listed file hash by readback before using the recording. Failed
+runs are never retried automatically. Run builds before supplying credentials and use a clean environment so exported secrets cannot enter
+Bazel client-environment arguments. Agent-controlled tools must never start the real secret prompt or provider call.
+
 ## Carta issuer captures
 
 A resource on a live `carta` connection makes `carta.snapshot.v2` collect one

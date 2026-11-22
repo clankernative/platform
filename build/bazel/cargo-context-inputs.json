@@ -14,10 +14,10 @@
     "crates/day2/Cargo.toml": "sha256:773a65438afc3a3a59ac816e1a9de20d6f03445e113a2b8047fe875c5ee896f8",
     "crates/durable-temporal/Cargo.toml": "sha256:5a1730efafe115fb23c9aa9c4ffa22a843a3260550d615eacb39cafe7304653d",
     "crates/worker/Cargo.toml": "sha256:b8e2f551cc92785726ac6133da2ef8afdd397b7c1a05ec4acf47f070f812ee67",
-    "crates/xtask/Cargo.toml": "sha256:f44a25720249070a4d6ce1d6b3c4a95ec1cda72fe61e29740d9cd9cc391f16fc"
+    "crates/xtask/Cargo.toml": "sha256:a039a7d170cee0b13cce334c790f03491bb2b977711fce591c53c3f775ce06a2"
   },
   "models": {
-    "build/bazel/cargo_contexts.bzl": "sha256:569ab552aef3396b2ceed074479fac88d8fbf1164ec22b10d7100cd83fb569f1",
+    "build/bazel/cargo_contexts.bzl": "sha256:7a9c3a43041f26f5d89f8c8b7f57746370bee60cd7c1440965cbc01a13de9e98",
     "build/bazel/cargo_production_contexts.bzl": "sha256:d302599c543862d781551ea9b8cf68462a3f3982cb8956bc49b3d1a194b2998e"
   }
 }

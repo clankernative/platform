@@ -27,6 +27,7 @@ mod linux_qualification;
 mod linux_runtime_qualification;
 mod native_toolchain;
 mod provider_conformance;
+mod provider_recording;
 mod qualification_evidence;
 mod release_inputs;
 mod roc_packages;
@@ -565,6 +566,13 @@ fn main() -> Result<()> {
                 &evidence,
                 action.ends_with("-resume"),
             )?;
+        }
+        "provider-record" => {
+            let usage = "usage: xtask provider-record carta|openai NEW_DIRECTORY";
+            let provider = day2::provider_recording::Provider::parse(&args.next().context(usage)?)?;
+            let directory = PathBuf::from(args.next().context(usage)?);
+            ensure!(args.next().is_none(), "{usage}");
+            provider_recording::execute(&root, provider, &directory)?;
         }
         "carta-qualify" => {
             let usage = "usage: xtask carta-qualify PROFILE SECRET_FILE NEW_EVIDENCE_DIRECTORY";
