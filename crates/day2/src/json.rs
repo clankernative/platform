@@ -82,7 +82,9 @@ pub fn decode_evidence<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     decode_with_limits(bytes, 4 * 1_048_576, 250_000)
 }
 
-fn decode_with_limits<T: DeserializeOwned>(
+/// Decode with an explicit byte and node budget, keeping the same key and depth
+/// validation. For documents whose producer bounds them by bytes alone.
+pub fn decode_with_limits<T: DeserializeOwned>(
     bytes: &[u8],
     byte_limit: usize,
     node_limit: usize,

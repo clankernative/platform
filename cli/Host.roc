@@ -38,12 +38,31 @@ Host :: [].{
 		)
 	}
 
+	## `day2 instance source`: as for release, the action fixes the mode and the host reads the rendered request from
+	## this file and validates it again. The host's progress, such as the wait for a main CI run, goes to stderr.
+	instance_source! : Str, Str => Try(Str, Str)
+	instance_source! = |verb, request| {
+		exchange!(
+			Json.to_str(
+				{ protocol: 1.U32, action: "instance-source-${verb}", input: Json.to_str({ request: request }) },
+			),
+			Progress,
+		)
+	}
+
 	call! : Str => Try(Str, Str)
-	call! = |request| {
+	call! = |request| exchange!(request, Quiet)
+
+	exchange! : Str, [Quiet, Progress] => Try(Str, Str)
+	exchange! = |request, progress| {
 		executable = Env.exe_path!().map_err(|_| "cannot locate platform CLI")?
 		text = Path.to_str(executable).map_err(|_| "CLI path must be UTF-8")?
 		directory = Str.join_with(text.split_on("/").drop_last(1), "/")
-		command = Cmd.new(OsStr.from_str("${directory}/day2-host")).args([OsStr.from_str(request)])
+		host = Cmd.new(OsStr.from_str("${directory}/day2-host")).args([OsStr.from_str(request)])
+		command = match progress {
+			Quiet => host
+			Progress => host.stderr(Inherit)
+		}
 		decoded : Request
 		decoded = Json.parse(request).map_err(|_| "invalid host request")?
 		streaming = if decoded.action == "workflow" {

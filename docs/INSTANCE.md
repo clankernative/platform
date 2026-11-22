@@ -13,6 +13,11 @@ day2 instance plan DIRECTORY PLATFORM NEW_DIRECTORY [--agent]
 day2 instance apply DIRECTORY PLATFORM PLAN_DIRECTORY NEW_DIRECTORY [--agent]
 day2 instance release publish DIRECTORY REQUEST NEW_MANIFEST [--agent]
 day2 instance release fetch DIRECTORY DIGEST BYTES [--agent]
+day2 instance source head DIRECTORY BINDING [--agent]
+day2 instance source archive DIRECTORY BINDING COMMIT NEW_ARCHIVE [--agent]
+day2 instance source controls ARCHIVE [--agent]
+day2 instance source verify-controls DIRECTORY BINDING ARCHIVE [--agent]
+day2 instance source checked-artifact DIRECTORY BINDING COMMIT INPUTS NEW_ARCHIVE [--agent]
 ```
 
 `instance check` reads exactly `DIRECTORY/day2.json` and prints every derived
@@ -20,7 +25,9 @@ name. It reads no other file. `instance render` validates the same file and
 prints the [OpenTofu inputs](#rendered-inputs) the platform renders from it.
 `instance plan` runs a [read-only plan](#plan) of the core roots with those
 inputs, and `instance apply` [applies](#apply) them. `instance release`
-[publishes and fetches](#release) the qualified SDK releases apps pin. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
+[publishes and fetches](#release) the qualified SDK releases apps pin, and
+`instance source` [reads an app's source and checked artifact](#source) from the
+forge. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
 derivation; there is no second schema.
 
 ## The spec
@@ -392,6 +399,112 @@ named by its sha256. Both names come from `day2.json`.
   `operator-*` temporary directories in the cache root. They are never treated
   as cache hits.
 
+## Source
+
+`instance source` reads an app's source on the instance's Gitea forge for the
+instance's existing deploy controller, value for value: a proof either one
+writes is valid to the other.
+
+- **Binding.** `BINDING` is a file holding the controller's source binding for
+  one app, exactly: `app`, `repository`, `directory`, `runtime_image`,
+  `tooling_image`, `image_repository`, `source` (`forge`, `server`,
+  `repository`, `repository_id`, `branch`), `qualified_release`,
+  `verification` and `ci_artifact`. It is validated as the controller validates
+  it (closed objects, integers that are not booleans, no duplicate keys), then
+  against `day2.json`: the source server is `forge.server`, the repository is in
+  `forge.org`, the app is one of `apps`, and `qualified_release` and
+  `verification.cases` are that app's `sdk` and `verification`. Images must be
+  under the app's directory in the artifact registry.
+  - The binding is the transitional input from the instance's existing deploy
+    controller, not a spec field. Its repository and image names restate names
+    `day2.json` derives, so they are checked only for ownership (the org and the
+    app): one live app still predates the derived names.
+  - The binding goes away when the deploy controller moves into the platform;
+    the rename to the derived names happens in roadmap step 4.
+- **head.** The repository must still have the bound ID; prints the head commit
+  of the bound branch, an exact non-zero commit.
+- **archive.** Writes `COMMIT`'s Gitea archive (at most 64 MiB) to
+  `NEW_ARCHIVE`.
+- **controls.** Reads no spec. Prints the CI-control digest of a source archive
+  with one root directory: the sha256 of
+  `{"files":[[name,bytes,hex],...],"version":1}`, sorted by name, over every
+  non-Markdown file under `.ci/` except the app-owned `.ci/roc.json`, and
+  `.gitea/workflows/roc.yml`. `.ci/roc.json`, `.ci/platform-release.json`,
+  `.ci/publish_artifact.py`, `.ci/sdk_release.py` and the workflow must be
+  present. Budgets: 8192 entries, 16 MiB per entry, 128 MiB in all, 2 MiB per
+  control file. Decompression stops at 160 MiB, and a pax or GNU long-name
+  header may declare at most 1 MiB, checked before it is read. An operator
+  approves an app's controls by pinning this digest as `ci_artifact.digest`.
+- **verify-controls.** First, with no network read, the archive's control digest
+  must be the approved one and `.ci/platform-release.json` must be the binding's
+  qualified release manifest. Then it reads that manifest through the
+  [release cache](#release) and requires `.ci/roc.json` to name its platform
+  commit, the binding's app root and its verification seed and cases, with only
+  safe Roc test paths. A failed bucket read is permanent (exit 6).
+- **checked-artifact.** Waits within the job, up to 2100 s and reading at most
+  every 20 s (it prints `Waiting for the exact main commit's checked artifact`
+  to stderr once), for the newest push run of `roc.yml` on main at exactly
+  `COMMIT`, which must be this repository's own run and must succeed. Then its
+  one `roc` job of that attempt must have succeeded, its log must carry exactly
+  one `DAY2_CHECKED_APP_V1` receipt for this repository, commit, `INPUTS`, SDK
+  and verification profile, and the upload it names must be this run's and not
+  expired. The ZIP must hold exactly one unencrypted `app.tar.gz` of the
+  receipt's size and digest. Only once the run is still the same successful
+  attempt is the archive written to `NEW_ARCHIVE`; the receipt carries the proof
+  `{version, run, attempt, job, receipt}` with the log's receipt exactly as
+  decoded.
+- **Forge reads.** Only the instance's forge, with `AUTODEPLOY_SOURCE_TOKEN`,
+  else `GITEA_TOKEN`, sent as `Authorization: token`, never printed. Each read
+  has one 90 s window up to its response headers, then 90 s for each read of its
+  body, and is bounded: 1 MiB for JSON, 64 MiB for an archive, 8 MiB for a log
+  and 130 MiB for an artifact ZIP. Redirects are never followed, except one 302
+  from an artifact's ZIP route to an https URL on the forge itself,
+  `storage.googleapis.com` or a bucket host under it, with no userinfo, port or
+  fragment; only that artifact's same-origin `/raw` route receives the token.
+- **ZIP reader.** Hand-written for the one layout the upload transport writes:
+  one stored or deflated entry at offset 0, its data descriptor if it has one,
+  one central header and the end record, with no extra fields, comments,
+  prepended bytes or ZIP64. Local and central headers must agree, a descriptor
+  must repeat the central CRC and sizes, and the CRC-32 is checked.
+- **Files.** New files are created exclusively and synced; an existing file is
+  refused before anything is read from the forge. If a write fails, the partial
+  file the command created is removed, and nothing else.
+- **Failures** after the spec validates exit 6 with `source_failed` and the
+  controller's own message (`source_metadata_http_<code>`,
+  `source_repository_identity_changed`, `source_branch_commit_invalid`,
+  `source_archive_http_<code>`, `checked_artifact_download_http_<code>`,
+  `checked_artifact_redirect_refused`, `main CI did not succeed; ...` and the
+  rest). A platform host that cannot start or crashes also exits 6.
+- **Retryable failures** exit 7 with `source_unavailable`, `"retryable": true`
+  and the code `checked_main_artifact_not_ready` or
+  `source_temporarily_unavailable`: HTTP 408, 429 or 5xx, a failed connection, a
+  disconnect before the response headers, a failed or short body read, or a
+  timeout. Unlike the earlier controller, which treated a disconnect before the
+  headers or during a body as permanent, these are retryable on purpose: a
+  network blip during a 64 MiB archive or a 130 MiB ZIP must not block a
+  deployment until an operator steps in. Argument and spec errors exit 2, 3
+  or 5.
+- **Known limits:**
+  - Only Gitea, and only the instance's own forge.
+  - Some archive shapes are refused that other tar readers interpret
+    differently; git never writes them, so only a malicious forge could. They
+    are:
+    - a pax global header with a record other than `comment`, or after a
+      pending extension, and an extension with no member after it;
+    - a GNU long name beside a different pax path, two pax headers for one
+      member, and a duplicate `path` or `size` record;
+    - `GNU.sparse.*` records, and a pax `size` that is not canonical decimal or
+      differs from the header's;
+    - a name with a NUL, and a non-ustar header with a prefix field;
+    - sparse and Solaris entries;
+    - data on a link, device, FIFO or directory entry.
+  - JSON the earlier controller accepted is refused when it holds:
+    - a float or boolean where an integer is required;
+    - an integer of 2^64 or more;
+    - nesting deeper than 32 levels.
+  - A `.ci/roc.json` with a UTF-8 byte-order mark, or in UTF-16, is refused; the
+    earlier controller accepted it.
+
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
@@ -404,7 +517,8 @@ named by its sha256. Both names come from `day2.json`.
    Fields are added only for real choices (size presets, verification cases,
    schedules), never to restate a derived name.
 3. **Platform-owned control (started: slice 1, publishing and fetching SDK
-   releases with `day2 instance release`).** Deployment, promotion, webhook and
+   releases with `day2 instance release`; slice 2, reading app sources and
+   checked artifacts with `day2 instance source`).** Deployment, promotion, webhook and
    artifact provenance logic moves from instance repositories into `ops/*.roc` recipes
    with narrow Rust capabilities. Instance workflows become rendered shims that
    call `day2 instance plan` and `day2 instance apply`; any edit to a shim fails
