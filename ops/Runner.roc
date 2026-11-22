@@ -23,6 +23,7 @@ import ops.Simulation
 import ops.ProviderConformance
 import ops.OAuthRegistration
 import ops.CartaQualification
+import ops.ProviderRecording
 import ops.GoogleWorkspaceQualification
 import ops.Release
 import ops.GkeRelease
@@ -88,6 +89,7 @@ run! = |args| match args {
 	["provider-conformance"] => ProviderConformance.run!(call!)
 	["oauth-registration"] => OAuthRegistration.run!(call!)
 	["carta-qualification"] => CartaQualification.run!(call!)
+	["provider-recording", provider] => ProviderRecording.run!(provider, call!)
 	["google-workspace-qualification"] => GoogleWorkspaceQualification.run!(call!)
 	["release-step", snapshot] => Release.run(snapshot)
 	["gke-release"] => GkeRelease.run!(call!)

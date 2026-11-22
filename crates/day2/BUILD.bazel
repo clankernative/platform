@@ -65,6 +65,7 @@ COMPILE_INPUTS = [
     "//:ops/NativeEnrollment.roc",
     "//:ops/OAuthRegistration.roc",
     "//:ops/ProviderConformance.roc",
+    "//:ops/ProviderRecording.roc",
     "//:ops/Provision.roc",
     "//:ops/Release.roc",
     "//:ops/Runner.roc",

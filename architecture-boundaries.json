@@ -1838,7 +1838,10 @@
           "target": null,
           "rename": null,
           "features": [
-            "fs"
+            "event",
+            "fs",
+            "pty",
+            "termios"
           ],
           "default_features": true,
           "optional": false,

@@ -66,6 +66,7 @@ mod live;
 mod managed_credentials;
 pub mod mcp;
 pub mod migration;
+pub mod provider_recording;
 mod release_binding;
 // Protocol kernels are staged behind host-only verification and custody wiring.
 #[allow(dead_code)]

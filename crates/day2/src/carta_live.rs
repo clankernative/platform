@@ -444,7 +444,7 @@ struct TokenDto {
     scope: Option<String>,
 }
 
-fn parse_token(body: &[u8]) -> Result<AccessToken, Failure> {
+pub(crate) fn parse_token(body: &[u8]) -> Result<AccessToken, Failure> {
     let token: TokenDto = crate::json::decode(body).map_err(|_| Failure::AuthenticationFailed)?;
     if !token.token_type.eq_ignore_ascii_case("bearer")
         || token.access_token.is_empty()

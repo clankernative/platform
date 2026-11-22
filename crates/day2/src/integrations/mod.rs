@@ -7,6 +7,8 @@ mod github_actions;
 mod linear_work;
 mod object_store;
 mod openai;
+pub(crate) use openai::recording_exchange as openai_recording_exchange;
+pub(crate) use openai::recording_request as openai_recording_request;
 pub mod simulated;
 mod slack;
 mod slack_webhook;

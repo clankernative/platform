@@ -180,3 +180,103 @@ fn usage(json: &Value, profile: &OpenAiText) -> Result<(u64, u64, u64), AdapterE
         .map_err(|_| AdapterError::ResponseInvalid)?;
     Ok((input, output, cost))
 }
+
+/// Operator recording of exactly the production prepared request. The raw
+/// reply stays in the recorder process; this does not interpret it as success.
+pub(crate) fn recording_exchange(
+    project: &str,
+    key: &str,
+    transport: &dyn super::Transport,
+) -> Result<super::WireResponse, AdapterError> {
+    let prepared = recording_prepared(project)?;
+    let credentials = super::Credentials::bearer(key.into())?;
+    transport
+        .send(
+            &prepared.request,
+            super::Authorization::Bearer(&credentials),
+            crate::provider_recording::MAX_BODY as u64,
+        )
+        .map_err(|failure| failure.kind)
+}
+
+fn recording_prepared(project: &str) -> Result<PreparedCall, AdapterError> {
+    use day2_capabilities::resources::VersionRef;
+    let connection = LiveConnection::OpenAi {
+        credential_ref: VersionRef {
+            id: "operator-recording".into(),
+            revision: 1,
+        },
+        project_id: project.into(),
+        organization_id: None,
+    };
+    connection
+        .validate()
+        .map_err(|_| AdapterError::InvalidProfile)?;
+    let profile = OpenAiText {
+        model: crate::provider_recording::OPENAI_MODEL.into(),
+        max_input_bytes: 64,
+        max_input_tokens: 64,
+        max_output_tokens: 64,
+        input_nanos_per_token: 100,
+        output_nanos_per_token: 500,
+    };
+    prepare(
+        &connection,
+        &profile,
+        r#"{"handle":"recording","text":"Reply OK.","max_output_tokens":64}"#,
+    )
+}
+
+pub(crate) fn recording_request() -> Result<Value, AdapterError> {
+    // The exact prepared body contains fixed public text only. The private
+    // project/header and credential are never part of this provenance.
+    let prepared = recording_prepared("proj_recording")?;
+    serde_json::from_slice(&prepared.request.body).map_err(|_| AdapterError::InvalidRequest)
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::*;
+    use crate::integrations::{
+        Authorization, Method, Transport, TransportError, WireRequest, WireResponse,
+    };
+    struct Wire;
+    impl Transport for Wire {
+        fn send(
+            &self,
+            request: &WireRequest,
+            _: Authorization<'_>,
+            max: u64,
+        ) -> Result<WireResponse, TransportError> {
+            assert_eq!(request.url, "https://api.openai.com/v1/responses");
+            assert!(matches!(request.method, Method::Post));
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body, recording_request().unwrap());
+            assert_eq!(
+                body,
+                json!({"model":crate::provider_recording::OPENAI_MODEL,"input":"Reply OK.","max_output_tokens":64,"store":false,"background":false,"stream":false,"tools":[],"tool_choice":"none","text":{"format":{"type":"text"}},"service_tier":"default","truncation":"disabled"})
+            );
+            assert_eq!(
+                request.headers,
+                [("openai-project", "proj_synthetic".to_owned())]
+            );
+            assert_eq!(max, crate::provider_recording::MAX_BODY as u64);
+            Ok(WireResponse {
+                status: 200,
+                json_content_type: true,
+                body: b"{}".to_vec(),
+                request_id: None,
+                metadata: vec![],
+            })
+        }
+    }
+    #[test]
+    fn recording_wire_and_provenance_are_the_actual_production_prepare() {
+        assert_eq!(
+            recording_exchange("proj_synthetic", "synthetic-key", &Wire)
+                .unwrap()
+                .status,
+            200
+        );
+    }
+}

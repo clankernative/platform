@@ -499,9 +499,11 @@ CARGO_CONTEXTS = {
                     "fs",
                     "net",
                     "process",
+                    "pty",
                     "std",
                     "stdio",
                     "system",
+                    "termios",
                     "time"
                 ],
                 "proc_macro_deps": []
@@ -1200,9 +1202,11 @@ CARGO_CONTEXTS = {
                     "fs",
                     "net",
                     "process",
+                    "pty",
                     "std",
                     "stdio",
                     "system",
+                    "termios",
                     "time"
                 ],
                 "proc_macro_deps": []
@@ -1881,9 +1885,11 @@ CARGO_CONTEXTS = {
                     "fs",
                     "net",
                     "process",
+                    "pty",
                     "std",
                     "stdio",
                     "system",
+                    "termios",
                     "time"
                 ],
                 "proc_macro_deps": []
