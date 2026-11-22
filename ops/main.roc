@@ -4,6 +4,7 @@ package
 		LocalDev,
 		InstanceRoots,
 		InstanceRelease,
+		InstanceSource,
 		Build,
 		Delegation,
 		Check,

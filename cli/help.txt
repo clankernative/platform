@@ -11,6 +11,12 @@ USAGE
   day2 instance apply <directory> <platform> <plan directory> <new directory> [--agent]
   day2 instance release publish <directory> <request> <new manifest> [--agent]
   day2 instance release fetch <directory> <sha256:digest> <bytes> [--agent]
+  day2 instance source head <directory> <binding> [--agent]
+  day2 instance source archive <directory> <binding> <commit> <new archive> [--agent]
+  day2 instance source controls <archive> [--agent]
+  day2 instance source verify-controls <directory> <binding> <archive> [--agent]
+  day2 instance source checked-artifact <directory> <binding> <commit>
+                       <sha256:inputs> <new archive> [--agent]
   day2 platform --help
 
 PLATFORM OPERATIONS
@@ -69,6 +75,36 @@ COMMANDS
                   operator CLI's path. Every cached file is verified on use.
                   Verifies integrity and qualification evidence, not
                   approval: approval is the digest you pass.
+  instance source head
+                  Validate <directory>/day2.json and <binding>, the JSON the
+                  instance's deploy controller binds an app's source with:
+                  its forge, org, app, SDK and verification cases must be
+                  the spec's. Print the head commit of the bound Gitea
+                  branch; the repository must still have the bound ID.
+  instance source archive
+                  The same checks, then write <commit>'s Gitea archive to
+                  <new archive>.
+  instance source controls
+                  Print the CI-control digest of a source archive with one
+                  root directory: every non-Markdown file under .ci/ except
+                  .ci/roc.json, and .gitea/workflows/roc.yml. An app's
+                  binding approves this value as ci_artifact.digest.
+  instance source verify-controls
+                  Check <archive>'s controls against <binding>: the approved
+                  digest, the qualified SDK release it selects (read through
+                  the release cache) and the verification profile.
+  instance source checked-artifact
+                  Wait up to 35 minutes for <commit>'s main CI run, then
+                  verify its one native job, the one receipt the job's log
+                  carries, the upload, the downloaded archive and that the
+                  attempt has not changed. Write the archive to
+                  <new archive> and print its provenance proof.
+                  Source commands read the forge with
+                  AUTODEPLOY_SOURCE_TOKEN, else GITEA_TOKEN, allowing 90 s
+                  until a response's headers and 90 s for each body read.
+                  They exit 6 when they refuse and 7 when a read failed
+                  transiently: a 408, 429 or 5xx, a dropped connection, a
+                  short body or a timeout.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
@@ -104,8 +140,10 @@ FOR AGENTS
   is a JSON string containing illustrative input, not an executable command.
   Help/version JSON lists implemented_commands and explicit capability flags.
   Exit codes: 0 success/help; 2 usage; 3 context/read failure; 4 not found;
-              5 invalid or unsupported metadata; 6 an instance root or a
-              release failed; 1 output failure.
+              5 invalid or unsupported metadata; 6 an instance root, a
+              release or a source command failed, or the platform host
+              could not run; 7 a source read failed transiently
+              (retryable); 1 output failure.
 
 PROTOTYPE SCOPE
   Local source distribution. Current artifact discovery uses shared runtime

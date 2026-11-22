@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use day2_ops::{
-    backup, chrome_extension, infra, instance_release, instance_roots, local_dev, maintenance,
-    process, projection,
+    backup, chrome_extension, infra, instance_release, instance_roots, instance_source, local_dev,
+    maintenance, process, projection,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -37,6 +37,9 @@ struct Operations {
     /// The mode the host action fixed for `day2 instance release publish|fetch`, and its session.
     release_mode: Option<instance_release::Mode>,
     release_session: Option<instance_release::Session>,
+    /// The mode the host action fixed for `day2 instance source`, and its session.
+    source_mode: Option<instance_source::Mode>,
+    source_session: Option<instance_source::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
     maintenance_recovery: Option<maintenance::Recovery>,
@@ -763,6 +766,40 @@ impl Operations {
                 .as_mut()
                 .context("release session required")?
                 .operator(),
+            "instance-source-prepare" => {
+                ensure!(
+                    self.source_session.is_none(),
+                    "one source session per workflow"
+                );
+                let mode = self
+                    .source_mode
+                    .context("only day2 instance source starts a source session")?;
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                self.source_session = Some(instance_source::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    mode,
+                    instance_source::Effects::native()?,
+                )?);
+                Ok(json!({}))
+            }
+            "instance-source-step" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    name: String,
+                }
+                let name = input::<Input>(&request)?.name;
+                // A retryable read reaches the CLI as exactly `retryable: <code>`.
+                self.source_session
+                    .as_mut()
+                    .context("source session required")?
+                    .step(&name)
+                    .map_err(instance_source::reported)
+            }
             "infra-receipt" => self
                 .infrastructure
                 .as_ref()
@@ -889,6 +926,13 @@ impl Operations {
     }
 }
 
+/// The source command a host action starts: `instance-source-<mode>`.
+fn source_mode(action: &str) -> Option<instance_source::Mode> {
+    action
+        .strip_prefix("instance-source-")
+        .and_then(instance_source::Mode::from_name)
+}
+
 fn run(request: Request) -> Result<Value> {
     ensure!(
         request.protocol == 1 && request.input.len() <= 65_536,
@@ -901,6 +945,8 @@ fn run(request: Request) -> Result<Value> {
         instance_session: None,
         release_mode: None,
         release_session: None,
+        source_mode: None,
+        source_session: None,
         local: None,
         maintenance: None,
         maintenance_recovery: None,
@@ -914,6 +960,7 @@ fn run(request: Request) -> Result<Value> {
         "instance-release-fetch",
     ]
     .contains(&request.action.as_str())
+        && source_mode(&request.action).is_none()
     {
         ensure!(
             ["instance-project", "artifact-project", "artifact-version"]
@@ -966,6 +1013,24 @@ fn run(request: Request) -> Result<Value> {
                 .request
                 .to_str()
                 .context("release request path must be UTF-8")?
+                .to_owned(),
+        ]
+    } else if let Some(mode) = source_mode(&request.action) {
+        // `day2 instance source <mode>` only, as for release: the action fixes
+        // the session's mode and the adapter validates the request.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: PathBuf,
+        }
+        let input: Input = input(&request)?;
+        operations.source_mode = Some(mode);
+        vec![
+            format!("instance-source-{}-session", mode.name()),
+            input
+                .request
+                .to_str()
+                .context("source request path must be UTF-8")?
                 .to_owned(),
         ]
     } else if request.action == "local-session" {

@@ -6,6 +6,7 @@ import Names
 import InstanceSpec
 import InstanceRender
 import InstanceRelease
+import InstanceSource
 
 ## Status, error, stream, and exit code are projections of one closed outcome.
 Output :: { outcome : Outcome }.{
@@ -17,6 +18,7 @@ Output :: { outcome : Outcome }.{
 		Rendered(Cli.Instance, Names.LocalPath, InstanceSpec),
 		Ran(Cli.Roots, Names.LocalPath, InstanceSpec, InstanceRender.Receipt),
 		Released(Cli.Release, Names.LocalPath, InstanceSpec, InstanceRelease.Report),
+		Sourced(Cli.SourceRequest, Try(Names.LocalPath, [Null]), InstanceSource.Report),
 		Failed(Problem, Cli.Format, Cli.Command),
 	]
 
@@ -50,6 +52,7 @@ Output :: { outcome : Outcome }.{
 			Outcome.Rendered(request, path, spec) => rendered_text(request, path, spec)
 			Outcome.Ran(request, path, spec, receipt) => ran_text(request, path, spec, receipt)
 			Outcome.Released(request, path, spec, receipt) => released_text(request, path, spec, receipt)
+			Outcome.Sourced(request, path, report) => sourced_text(request, path, report)
 			Outcome.Failed(problem, _, _) => error_text(problem)
 		}
 	}
@@ -83,6 +86,7 @@ format = |outcome| match outcome {
 	Output.Outcome.Checked(request, _, _) | Output.Outcome.Rendered(request, _, _) => request.parts().format
 	Output.Outcome.Ran(request, _, _, _) => request.parts().format
 	Output.Outcome.Released(request, _, _, _) => request.parts().format
+	Output.Outcome.Sourced(request, _, _) => request.parts().format
 }
 
 next_actions : Source -> List(Cli.Action)
@@ -139,6 +143,7 @@ json = |outcome| match outcome {
 	Output.Outcome.Rendered(request, path, spec) => rendered_json(request, path, spec)
 	Output.Outcome.Ran(request, path, spec, receipt) => ran_json(request, path, spec, receipt)
 	Output.Outcome.Released(request, path, spec, receipt) => released_json(request, path, spec, receipt)
+	Output.Outcome.Sourced(request, path, report) => sourced_json(request, path, report)
 	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
 	Output.Outcome.Help(_) => info_json(Bool.True)
 	Output.Outcome.Version(_) => info_json(Bool.False)
@@ -471,6 +476,105 @@ released_text = |request, path, spec, report| {
 	)
 }
 
+## After a source command, validate the spec it read; `controls` read none.
+source_actions : Cli.SourceRequest -> List(Cli.Action)
+source_actions = |request| match request.instance() {
+	Ok(instance) => [Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(instance))]
+	Err(Null) => [help_action({})]
+}
+
+sourced_json : Cli.SourceRequest, Try(Names.LocalPath, [Null]), InstanceSource.Report -> Str
+# As released_json: the envelope is encoded with `"receipt":null`, which only that key can spell, and the host's text
+# replaces it verbatim.
+sourced_json = |request, path, report| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	spec_path : Try(Str, [Null])
+	spec_path = path.map_ok(|value| value.to_str())
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: request.command().name(),
+		exit_code: 0.I32,
+		context: {
+			spec_path,
+			spec_validation: match path {
+				Ok(_) => "checked"
+				Err(Null) => "not_read"
+			},
+		},
+		result: { receipt: null },
+		error: null,
+		next_actions: source_actions(request).map(|action| action.dto()),
+	})
+		.replace_first("\"receipt\":null", "\"receipt\":${report.text}")
+}
+
+sourced_text : Cli.SourceRequest, Try(Names.LocalPath, [Null]), InstanceSource.Report -> Str
+sourced_text = |request, path, report| {
+	receipt = report.receipt
+	row = |label, value| ["  ${label}${Str.repeat(" ", 10 - label.count_utf8_bytes())}${Output.safe(value)}"]
+	optional = |label, value| match value {
+		Ok(text) => row(label, text)
+		Err(Null) => []
+	}
+	bound = match (receipt.app_id, receipt.repository) {
+		(Ok(name), Ok(repository)) => row("App", "${name} (${repository})")
+		_ => []
+	}
+	archive = match receipt.archive {
+		Ok(file) => row("Archive", "${file.path} (${file.digest}, ${file.bytes.to_str()} bytes)")
+		Err(Null) => []
+	}
+	proof = match receipt.proof {
+		Ok(value) => row(
+			"Proof",
+			"run ${
+				value
+					.run
+					.to_str()
+			}, attempt ${
+				value
+					.attempt
+					.to_str()
+			}, job ${value.job.to_str()}, upload ${value.receipt.upload_id.to_str()}",
+		)
+		Err(Null) => []
+	}
+	title = match request.parts().action {
+		Cli.SourceAction.Head(_) => "branch head"
+		Cli.SourceAction.Archive(_) => "source archive written"
+		Cli.SourceAction.Controls(_) => "CI-control digest"
+		Cli.SourceAction.VerifyControls(_) => "CI controls verified against the binding"
+		Cli.SourceAction.CheckedArtifact(_) => "checked artifact verified and written"
+	}
+	spec = match path {
+		Ok(value) => ["SPEC", "  ${Output.safe(value.to_str())}", ""]
+		Err(Null) => []
+	}
+	next =
+		Str.join_with(
+			source_actions(request)
+				.map(|action| action.dto())
+				.map(|action| "  ${Output.safe(action.description)}\n    ${Output.safe(action.command)}"),
+			"\n\n",
+		)
+	Str.join_with(
+		["DAY2  /  instance source  /  ${title}", ""]
+			.concat(spec)
+			.concat(["SOURCE"])
+			.concat(bound)
+			.concat(optional("Commit", receipt.commit))
+			.concat(archive)
+			.concat(optional("Controls", receipt.controls))
+			.concat(optional("Platform", receipt.platform_commit))
+			.concat(optional("Inputs", receipt.source_inputs))
+			.concat(proof)
+			.concat(["", "NEXT", next]),
+		"\n",
+	)
+}
+
 toggled : Cli.Instance -> Cli.Instance
 toggled = |request| request.with_format(
 	match request.parts().format {
@@ -780,6 +884,11 @@ info_json = |is_help| {
 				"instance.apply",
 				"instance.release.publish",
 				"instance.release.fetch",
+				"instance.source.head",
+				"instance.source.archive",
+				"instance.source.controls",
+				"instance.source.verify-controls",
+				"instance.source.checked-artifact",
 			],
 			platform_commands: [
 				"platform.build",

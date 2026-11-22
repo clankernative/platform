@@ -1,0 +1,45 @@
+{
+  "format": 1,
+  "mode": "checked-artifact",
+  "app_id": "links",
+  "repository": "tools/links-app",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "archive": {
+    "path": "/work/ci-artifact.tar.gz",
+    "digest": "sha256:a789e3fa1ffe742748bda51e387abc56427e3e1a35c1d220cf52be0d9a7f6195",
+    "bytes": 2900
+  },
+  "controls": null,
+  "platform_commit": null,
+  "source_inputs": "sha256:abababababababababababababababababababababababababababababababab",
+  "proof": {
+    "attempt": 1,
+    "job": 31,
+    "receipt": {
+      "archive": {
+        "bytes": 2900,
+        "digest": "sha256:a789e3fa1ffe742748bda51e387abc56427e3e1a35c1d220cf52be0d9a7f6195"
+      },
+      "artifact_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "artifact_name": "day2-checked-app-0123456789abcdef0123456789abcdef01234567-efefefefefefefefefefefefefefefef",
+      "examples": 12,
+      "generated": 40,
+      "repository": "tools/links-app",
+      "sdk_release": {
+        "bytes": 1204,
+        "digest": "sha256:1cf71b18b153b05c89206328b10f81c9a672aa7317a122c25ba41fead2669f01"
+      },
+      "source_commit": "0123456789abcdef0123456789abcdef01234567",
+      "source_inputs": "sha256:abababababababababababababababababababababababababababababababab",
+      "upload_id": 9223372036854775807,
+      "verification": {
+        "cases": 4,
+        "seed": 42,
+        "version": 1
+      },
+      "version": 1
+    },
+    "run": 7,
+    "version": 1
+  }
+}

@@ -10,6 +10,7 @@ import ops.Workflow
 import ops.LocalDev
 import ops.InstanceRoots
 import ops.InstanceRelease
+import ops.InstanceSource
 import ops.Build
 import ops.Delegation
 import ops.Check
@@ -62,6 +63,12 @@ run! = |args| match args {
 	# Only the host starts these, for `day2 instance release publish` and `fetch`; they have no `platform` entry.
 	["instance-release-publish-session", request] => InstanceRelease.publish!(request, call!)
 	["instance-release-fetch-session", request] => InstanceRelease.fetch!(request, call!)
+	# Only the host starts these, for `day2 instance source`; they have no `platform` entry.
+	["instance-source-head-session", request] => InstanceSource.head!(request, call!)
+	["instance-source-archive-session", request] => InstanceSource.archive!(request, call!)
+	["instance-source-controls-session", request] => InstanceSource.controls!(request, call!)
+	["instance-source-verify-controls-session", request] => InstanceSource.verify_controls!(request, call!)
+	["instance-source-checked-artifact-session", request] => InstanceSource.checked_artifact!(request, call!)
 	["build-recipe"] => Build.recipe!(call!)
 	["build-delegation"] => Delegation.build!(call!)
 	["build-delegation-business"] => Delegation.business!(call!)

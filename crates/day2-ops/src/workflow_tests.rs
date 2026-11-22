@@ -993,6 +993,87 @@ fn release_fetch_binds_each_blob_before_the_operator() -> Result<()> {
     Ok(())
 }
 
+/// Runs a source session against a fake host in which the step `failing`
+/// fails. Returns the session's result and its effects in order.
+fn source_session(session: &str, failing: &str) -> Result<(Result<Value>, Vec<String>)> {
+    assert!(
+        automation::SOURCES
+            .iter()
+            .any(|(name, _)| *name == "ops/InstanceSource.roc")
+    );
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &[session, "/private/source/request.json"],
+        |request| {
+            let input: Value = request.decode()?;
+            let step = match request.action.as_str() {
+                "instance-source-prepare" => {
+                    // The host reads the CLI's rendered request from its file.
+                    assert_eq!(input, json!({"request": "/private/source/request.json"}));
+                    "prepare".to_owned()
+                }
+                "instance-source-step" => input["name"].as_str().unwrap().to_owned(),
+                _ => panic!("unexpected source effect: {}", request.action),
+            };
+            effects.push(step.clone());
+            if step == failing {
+                bail!("retryable: source_temporarily_unavailable");
+            }
+            Ok(json!({ "step": step }))
+        },
+    );
+    Ok((result, effects))
+}
+
+#[test]
+fn source_sessions_prepare_then_run_each_step_in_order() -> Result<()> {
+    for (session, steps) in [
+        ("instance-source-head-session", vec!["head"]),
+        ("instance-source-archive-session", vec!["archive"]),
+        ("instance-source-controls-session", vec!["controls"]),
+        (
+            "instance-source-verify-controls-session",
+            vec!["controls", "release"],
+        ),
+        (
+            "instance-source-checked-artifact-session",
+            vec!["run", "job", "artifact", "download", "attempt"],
+        ),
+    ] {
+        let (result, effects) = source_session(session, "")?;
+        assert_eq!(result?, json!({"step": steps.last().unwrap()}), "{session}");
+        let mut expected = vec!["prepare"];
+        expected.extend(&steps);
+        assert_eq!(effects, expected, "{session}");
+    }
+    // A failed step stops the session, and its error reaches the host verbatim:
+    // nothing is written after a refused download, and controls that are not the
+    // approved ones stop the check before the release is read.
+    let (result, effects) = source_session("instance-source-checked-artifact-session", "download")?;
+    assert_eq!(
+        format!("{:#}", result.unwrap_err()),
+        "retryable: source_temporarily_unavailable"
+    );
+    assert_eq!(effects, ["prepare", "run", "job", "artifact", "download"]);
+    let (result, effects) = source_session("instance-source-verify-controls-session", "controls")?;
+    assert!(result.is_err());
+    assert_eq!(effects, ["prepare", "controls"]);
+    let (result, effects) = source_session("instance-source-head-session", "prepare")?;
+    assert!(result.is_err());
+    assert_eq!(effects, ["prepare"]);
+    for mode in crate::instance_source::Mode::ALL {
+        let session = format!("instance-source-{}", mode.name());
+        let result = automation::run(
+            &automation::runner()?,
+            &["platform", &session, "/private/source/request.json"],
+            |request| panic!("unexpected effect: {}", request.action),
+        );
+        assert!(result.is_err(), "{session}");
+    }
+    Ok(())
+}
+
 #[test]
 fn centralized_ci_runs_the_shared_roc_campaign_before_publishing_evidence() -> Result<()> {
     let mut finished = false;

@@ -25,6 +25,8 @@ Problem := [
 	PlanFailed(Str),
 	ApplyFailed(Str),
 	ReleaseFailed(Str),
+	SourceFailed(Str),
+	SourceUnavailable(Str),
 ].{
 	Dto : { code : Str, message : Str, hint : Str, exit_code : I32, retryable : Bool }
 
@@ -48,7 +50,8 @@ Problem := [
 		| InvalidCatalog(_)
 		| UnsupportedArtifact(_)
 		| MetadataTooLarge => 5
-		PlanFailed(_) | ApplyFailed(_) | ReleaseFailed(_) => 6
+		PlanFailed(_) | ApplyFailed(_) | ReleaseFailed(_) | SourceFailed(_) => 6
+		SourceUnavailable(_) => 7
 	}
 
 	code : Problem -> Str
@@ -78,11 +81,13 @@ Problem := [
 		PlanFailed(_) => "plan_failed"
 		ApplyFailed(_) => "apply_failed"
 		ReleaseFailed(_) => "release_failed"
+		SourceFailed(_) => "source_failed"
+		SourceUnavailable(_) => "source_unavailable"
 	}
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan|apply|release <directory>."
+		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan|apply|release|source <directory>."
 		MissingCommand => "Describe options require the command app describe <app>."
 		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
@@ -107,6 +112,8 @@ Problem := [
 		PlanFailed(detail) => "The instance plan failed: ${detail}"
 		ApplyFailed(detail) => "The instance apply failed: ${detail}"
 		ReleaseFailed(detail) => "The instance release failed: ${detail}"
+		# The host's own message, exactly, which the deploy controller records.
+		SourceFailed(detail) | SourceUnavailable(detail) => detail
 	}
 
 	hint : Problem -> Str
@@ -134,6 +141,12 @@ Problem := [
 		ReleaseFailed(
 			_,
 		) => "Publish as an operator with gcloud and docker signed in for the instance project; fetch with read access to its state bucket. Published objects are never replaced, and a cached blob or operator file that changed is refused, never repaired."
+		SourceFailed(
+			_,
+		) => "Read with AUTODEPLOY_SOURCE_TOKEN or GITEA_TOKEN set for the instance forge. This refusal is permanent for these inputs: fix the binding, the source or its CI, then run again."
+		SourceUnavailable(
+			_,
+		) => "A forge read failed transiently or the exact main commit's CI run did not finish in time. Nothing was written; retry later."
 		InvalidAppName(_) => "Use a lowercase identifier up to 48 bytes; day2_ and sqlite_ prefixes are reserved."
 		InvalidOperationName(_) => "Use dot-separated lowercase identifiers, at most 80 bytes in total."
 		_ => "Run day2 --help for usage and examples."
@@ -149,6 +162,9 @@ Problem := [
 				message: message(problem),
 				hint: hint(problem),
 				exit_code: exit_code(problem),
-				retryable: Bool.False,
+				retryable: match problem {
+					SourceUnavailable(_) => Bool.True
+					_ => Bool.False
+				},
 			}
 }

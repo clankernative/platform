@@ -18,6 +18,7 @@ Cli :: [].{
 		Render(Instance),
 		Roots(Roots),
 		Release(Release),
+		Source(SourceRequest),
 	]
 
 	## The command a response reports, including failures before a request exists.
@@ -29,6 +30,11 @@ Cli :: [].{
 		InstanceApply,
 		InstanceReleasePublish,
 		InstanceReleaseFetch,
+		InstanceSourceHead,
+		InstanceSourceArchive,
+		InstanceSourceControls,
+		InstanceSourceVerifyControls,
+		InstanceSourceCheckedArtifact,
 	].{
 		name : Command -> Str
 		name = |command| match command {
@@ -39,6 +45,11 @@ Cli :: [].{
 			InstanceApply => "instance.apply"
 			InstanceReleasePublish => "instance.release.publish"
 			InstanceReleaseFetch => "instance.release.fetch"
+			InstanceSourceHead => "instance.source.head"
+			InstanceSourceArchive => "instance.source.archive"
+			InstanceSourceControls => "instance.source.controls"
+			InstanceSourceVerifyControls => "instance.source.verify-controls"
+			InstanceSourceCheckedArtifact => "instance.source.checked-artifact"
 		}
 	}
 
@@ -136,6 +147,90 @@ Cli :: [].{
 		instance = |request| Instance.{ directory: request.directory, format: request.format }
 	}
 
+	## A source command and its paths. BINDING is the file holding the deploy controller's source binding for the app;
+	## COMMIT is a full lowercase commit and INPUTS the checked source inputs, sha256:<hex>.
+	## - head DIRECTORY BINDING: the bound branch's commit.
+	## - archive DIRECTORY BINDING COMMIT NEW_ARCHIVE: the commit's archive, written to NEW_ARCHIVE.
+	## - controls ARCHIVE: the CI-control digest of a source archive.
+	## - verify-controls DIRECTORY BINDING ARCHIVE: ARCHIVE's controls against the binding and its qualified release.
+	## - checked-artifact DIRECTORY BINDING COMMIT INPUTS NEW_ARCHIVE: the checked artifact of COMMIT's main CI run,
+	##   written to NEW_ARCHIVE, and its provenance.
+	SourceAction := [
+		Head({ directory : Names.LocalPath, binding : Names.LocalPath }),
+		Archive({ directory : Names.LocalPath, binding : Names.LocalPath, commit : Str, output : Names.LocalPath }),
+		Controls(Names.LocalPath),
+		VerifyControls({ directory : Names.LocalPath, binding : Names.LocalPath, archive : Names.LocalPath }),
+		CheckedArtifact(
+			{
+				directory : Names.LocalPath,
+				binding : Names.LocalPath,
+				commit : Str,
+				inputs : Str,
+				output : Names.LocalPath,
+			},
+		),
+	].{
+		verb : SourceAction -> Str
+		verb = |action| match action {
+			Head(_) => "head"
+			Archive(_) => "archive"
+			Controls(_) => "controls"
+			VerifyControls(_) => "verify-controls"
+			CheckedArtifact(_) => "checked-artifact"
+		}
+
+		## The instance directory whose day2.json a command validates; `controls` reads none.
+		directory : SourceAction -> Try(Names.LocalPath, [Null])
+		directory = |action| match action {
+			Head(paths) => Ok(paths.directory)
+			Archive(paths) => Ok(paths.directory)
+			Controls(_) => Err(Null)
+			VerifyControls(paths) => Ok(paths.directory)
+			CheckedArtifact(paths) => Ok(paths.directory)
+		}
+
+		## The command's arguments after its verb.
+		arguments : SourceAction -> List(Str)
+		arguments = |action| match action {
+			Head(paths) => [paths.directory.to_str(), paths.binding.to_str()]
+			Archive(paths) => [paths.directory.to_str(), paths.binding.to_str(), paths.commit, paths.output.to_str()]
+			Controls(archive) => [archive.to_str()]
+			VerifyControls(paths) => [paths.directory.to_str(), paths.binding.to_str(), paths.archive.to_str()]
+			CheckedArtifact(paths) => [
+				paths.directory.to_str(),
+				paths.binding.to_str(),
+				paths.commit,
+				paths.inputs,
+				paths.output.to_str(),
+			]
+		}
+	}
+
+	SourceRequest :: { action : SourceAction, format : Format }.{
+		parts : SourceRequest -> { action : SourceAction, format : Format }
+		parts = |request| { action: request.action, format: request.format }
+
+		with_format : SourceRequest, Format -> SourceRequest
+		with_format = |request, format| { ..request, format }
+
+		## The command a response reports.
+		command : SourceRequest -> Command
+		command = |request| match request.action {
+			SourceAction.Head(_) => Command.InstanceSourceHead
+			SourceAction.Archive(_) => Command.InstanceSourceArchive
+			SourceAction.Controls(_) => Command.InstanceSourceControls
+			SourceAction.VerifyControls(_) => Command.InstanceSourceVerifyControls
+			SourceAction.CheckedArtifact(_) => Command.InstanceSourceCheckedArtifact
+		}
+
+		## The same instance, as `check` and `render` read it; `controls` has none.
+		instance : SourceRequest -> Try(Instance, [Null])
+		instance = |request| match request.action.directory() {
+			Ok(directory) => Ok(Instance.{ directory, format: request.format })
+			Err(Null) => Err(Null)
+		}
+	}
+
 	## The scanner's optional fields and positionals never escape parsing.
 	Describe :: { app_name : Names.App, source : Source, filter : Filter, format : Format }.{
 		parts : Describe -> { app_name : Names.App, source : Source, filter : Filter, format : Format }
@@ -204,6 +299,7 @@ Cli :: [].{
 					["instance", "check", _] | ["instance", "render", _] => Ok(Request.Help(raw.format))
 					["instance", "plan", ..] | ["instance", "apply", ..] => Ok(Request.Help(raw.format))
 					["instance", "release", ..] => Ok(Request.Help(raw.format))
+					["instance", "source", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 						Ok(Request.Help(raw.format))
@@ -249,6 +345,68 @@ Cli :: [].{
 				["instance", "release", "fetch", directory, digest, bytes] => Ok(
 					Request.Release(release(ReleaseAction.Fetch(reference(digest, bytes)?), directory, raw)?),
 				)
+				["instance", "source"]
+				| ["instance", "source", "head"]
+				| ["instance", "source", "head", _]
+				| ["instance", "source", "archive"]
+				| ["instance", "source", "archive", _]
+				| ["instance", "source", "archive", _, _]
+				| ["instance", "source", "archive", _, _, _]
+				| ["instance", "source", "controls"]
+				| ["instance", "source", "verify-controls"]
+				| ["instance", "source", "verify-controls", _]
+				| ["instance", "source", "verify-controls", _, _]
+				| ["instance", "source", "checked-artifact"]
+				| ["instance", "source", "checked-artifact", _]
+				| ["instance", "source", "checked-artifact", _, _]
+				| ["instance", "source", "checked-artifact", _, _, _]
+				| ["instance", "source", "checked-artifact", _, _, _, _] => Err(Problem.MissingArgument)
+				["instance", "source", "head", directory, binding] => {
+					path = |value, role| source_path("head", value, role)
+					action = SourceAction.Head({
+						directory: path(directory, "an instance directory")?,
+						binding: path(binding, "a binding file")?,
+					})
+					Ok(Request.Source(source_request(action, raw)?))
+				}
+				["instance", "source", "archive", directory, binding, revision, output] => {
+					path = |value, role| source_path("archive", value, role)
+					action = SourceAction.Archive({
+						directory: path(directory, "an instance directory")?,
+						binding: path(binding, "a binding file")?,
+						commit: source_commit("archive", revision)?,
+						output: path(output, "a new archive file")?,
+					})
+					Ok(Request.Source(source_request(action, raw)?))
+				}
+				["instance", "source", "controls", archive] => Ok(
+					Request.Source(
+						source_request(
+							SourceAction.Controls(source_path("controls", archive, "a source archive")?),
+							raw,
+						)?,
+					),
+				)
+				["instance", "source", "verify-controls", directory, binding, archive] => {
+					path = |value, role| source_path("verify-controls", value, role)
+					action = SourceAction.VerifyControls({
+						directory: path(directory, "an instance directory")?,
+						binding: path(binding, "a binding file")?,
+						archive: path(archive, "a source archive")?,
+					})
+					Ok(Request.Source(source_request(action, raw)?))
+				}
+				["instance", "source", "checked-artifact", directory, binding, revision, inputs, output] => {
+					path = |value, role| source_path("checked-artifact", value, role)
+					action = SourceAction.CheckedArtifact({
+						directory: path(directory, "an instance directory")?,
+						binding: path(binding, "a binding file")?,
+						commit: source_commit("checked-artifact", revision)?,
+						inputs: source_inputs(inputs)?,
+						output: path(output, "a new archive file")?,
+					})
+					Ok(Request.Source(source_request(action, raw)?))
+				}
 				["instance", "check", value] => Ok(Request.Check(instance("check", value, raw)?))
 				["instance", "render", value] => Ok(Request.Render(instance("render", value, raw)?))
 				["app", "describe", name] => {
@@ -289,6 +447,7 @@ Cli :: [].{
 		Request.Check(value) | Request.Render(value) => value.format
 		Request.Roots(value) => value.format
 		Request.Release(value) => value.format
+		Request.Source(value) => value.parts().format
 	}
 
 	quote : Str -> Str
@@ -340,6 +499,8 @@ Cli :: [].{
 						ReleaseAction.Fetch(approved) => [approved.digest, approved.bytes.to_str()]
 					},
 				)
+			Request.Source(value) => ["day2", "instance", "source", value.parts().action.verb()]
+				.concat(value.parts().action.arguments())
 		}
 		base.concat(
 			match request_format(request) {
@@ -437,6 +598,48 @@ reference = |digest, bytes| {
 decimal : U8 -> Bool
 decimal = |byte| byte >= '0' and byte <= '9'
 
+source_request : Cli.SourceAction, Raw -> Try(Cli.SourceRequest, Problem)
+source_request = |action, raw| {
+	if has_options(raw) {
+		return Err(Problem.ConflictingOptions("instance source ${action.verb()} accepts only --agent or --json."))
+	}
+	Ok(Cli.SourceRequest.{ action, format: raw.format })
+}
+
+source_path : Str, Str, Str -> Try(Names.LocalPath, Problem)
+source_path = |verb, value, role|
+	Names.LocalPath.from_str(value)
+		.map_err(|_| Problem.InvalidArguments("instance source ${verb} requires ${role} of at most 4096 bytes"))
+
+lower_hex : List(U8) -> Bool
+lower_hex = |bytes| bytes.all(|byte| decimal(byte) or (byte >= 'a' and byte <= 'f'))
+
+## A full lowercase commit.
+source_commit : Str, Str -> Try(Str, Problem)
+source_commit = |verb, value| {
+	bytes = value.to_utf8()
+	if bytes.len() == 40 and lower_hex(bytes) {
+		Ok(value)
+	} else {
+		Err(Problem.InvalidArguments("instance source ${verb} requires the commit as 40 lowercase hex digits"))
+	}
+}
+
+## The checked source inputs: sha256:<64 lowercase hex digits>.
+source_inputs : Str -> Try(Str, Problem)
+source_inputs = |value| {
+	hex = value.drop_prefix("sha256:").to_utf8()
+	if value.starts_with("sha256:") and hex.len() == 64 and lower_hex(hex) {
+		Ok(value)
+	} else {
+		Err(
+			Problem.InvalidArguments(
+				"instance source checked-artifact requires the source inputs as sha256:<64 lowercase hex digits>",
+			),
+		)
+	}
+}
+
 ## The instance verb follows the family, after any flags.
 instance_command : List(Str) -> Cli.Command
 instance_command = |args| match args {
@@ -445,6 +648,7 @@ instance_command = |args| match args {
 	["plan", ..] => Cli.Command.InstancePlan
 	["apply", ..] => Cli.Command.InstanceApply
 	["release", .. as rest] => release_command(rest)
+	["source", .. as rest] => source_command(rest)
 	[arg, .. as rest] if arg.starts_with("-") => instance_command(rest)
 	_ => Cli.Command.InstanceCheck
 }
@@ -456,6 +660,18 @@ release_command = |args| match args {
 	["publish", ..] => Cli.Command.InstanceReleasePublish
 	[arg, .. as rest] if arg.starts_with("-") => release_command(rest)
 	_ => Cli.Command.InstanceReleaseFetch
+}
+
+## The source verb follows `source`, after any flags. An incomplete source command reports the read-only head.
+source_command : List(Str) -> Cli.Command
+source_command = |args| match args {
+	["--instance", _, .. as rest] | ["--operation", _, .. as rest] => source_command(rest)
+	["archive", ..] => Cli.Command.InstanceSourceArchive
+	["controls", ..] => Cli.Command.InstanceSourceControls
+	["verify-controls", ..] => Cli.Command.InstanceSourceVerifyControls
+	["checked-artifact", ..] => Cli.Command.InstanceSourceCheckedArtifact
+	[arg, .. as rest] if arg.starts_with("-") => source_command(rest)
+	_ => Cli.Command.InstanceSourceHead
 }
 
 has_options : Raw -> Bool
@@ -629,3 +845,83 @@ expect match Cli.parse(["instance", "release", "list", ".", "a", "b"]) {
 }
 expect Cli.requested(["instance", "release", "--agent", "publish", "."]).name() == "instance.release.publish"
 expect Cli.requested(["--agent", "instance", "release", "fetch"]).name() == "instance.release.fetch"
+expect match Cli.parse([
+	"instance",
+	"source",
+	"checked-artifact",
+	"../acme",
+	"binding.json",
+	Str.repeat("ab", 20),
+	"sha256:${Str.repeat("cd", 32)}",
+	"new.tar.gz",
+	"--agent",
+]) {
+	Ok(Cli.Request.Source(value)) => value.command().name()
+		== "instance.source.checked-artifact"
+		and Cli.Action.new("", Cli.Request.Source(value)).dto().argv
+			== [
+				"day2",
+				"instance",
+				"source",
+				"checked-artifact",
+				"../acme",
+				"binding.json",
+				Str.repeat("ab", 20),
+				"sha256:${Str.repeat("cd", 32)}",
+				"new.tar.gz",
+				"--agent",
+			]
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "source", "controls", "source.tar.gz"]) {
+	Ok(Cli.Request.Source(value)) => value.command().name() == "instance.source.controls" and value.instance().is_err()
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "source", "verify-controls", ".", "binding.json", "source.tar.gz"]) {
+	Ok(Cli.Request.Source(value)) => value.parts().action.directory().is_ok()
+		and value.command().name()
+			== "instance.source.verify-controls"
+	_ => Bool.False
+}
+# Each source verb needs all of its arguments.
+expect
+	[
+		["instance", "source"],
+		["instance", "source", "head", "."],
+		["instance", "source", "archive", ".", "b.json", Str.repeat("ab", 20)],
+		["instance", "source", "controls"],
+		["instance", "source", "verify-controls", ".", "b.json"],
+		["instance", "source", "checked-artifact", ".", "b.json", Str.repeat("ab", 20), "sha256:x"],
+	]
+		.all(
+			|args| match Cli.parse(args) {
+				Err(Problem.MissingArgument) => Bool.True
+				_ => Bool.False
+			},
+		)
+# A commit or source inputs that are not exact are refused before anything runs.
+expect
+	[
+		["instance", "source", "archive", ".", "b.json", Str.repeat("AB", 20), "new.tar.gz"],
+		["instance", "source", "archive", ".", "b.json", Str.repeat("ab", 19), "new.tar.gz"],
+		["instance", "source", "checked-artifact", ".", "b.json", Str.repeat("ab", 20), "sha256:x", "new.tar.gz"],
+		["instance", "source", "checked-artifact", ".", "b.json", Str.repeat("ab", 20), Str.repeat("cd", 32), "n"],
+	]
+		.all(
+			|args| match Cli.parse(args) {
+				Err(Problem.InvalidArguments(_)) => Bool.True
+				_ => Bool.False
+			},
+		)
+expect match Cli.parse(["instance", "source", "head", ".", "b.json", "--demo"]) {
+	Err(Problem.ConflictingOptions(_)) => Bool.True
+	_ => Bool.False
+}
+expect match Cli.parse(["instance", "source", "fetch", ".", "b.json"]) {
+	Err(Problem.UnknownCommand) => Bool.True
+	_ => Bool.False
+}
+expect Cli.requested(["instance", "source", "--agent", "checked-artifact", "."]).name()
+	== "instance.source.checked-artifact"
+expect Cli.requested(["--agent", "instance", "source"]).name() == "instance.source.head"
+expect Cli.requested(["instance", "source", "verify-controls"]).name() == "instance.source.verify-controls"

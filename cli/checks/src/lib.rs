@@ -200,7 +200,8 @@ mod tests {
         assert_eq!(value["error"].is_null(), code == 0);
         if code != 0 {
             assert_eq!(value["error"]["exit_code"], code);
-            assert_eq!(value["error"]["retryable"], false);
+            // Only a transient source read is retryable, and only it exits 7.
+            assert_eq!(value["error"]["retryable"], code == 7);
             assert!(value["result"].is_null() && value["context"].is_null());
         } else if value["command"] == "app.describe" {
             let operations = value["result"]["operations"].as_array().unwrap();
@@ -410,6 +411,11 @@ mod tests {
         fs::copy(
             root().join("fixtures/release-receipt.json"),
             scratch.0.join("fixtures/release-receipt.json"),
+        )
+        .unwrap();
+        fs::copy(
+            root().join("fixtures/source-receipt.json"),
+            scratch.0.join("fixtures/source-receipt.json"),
         )
         .unwrap();
         let check = || {
@@ -1030,7 +1036,12 @@ mod tests {
                     "instance.plan",
                     "instance.apply",
                     "instance.release.publish",
-                    "instance.release.fetch"
+                    "instance.release.fetch",
+                    "instance.source.head",
+                    "instance.source.archive",
+                    "instance.source.controls",
+                    "instance.source.verify-controls",
+                    "instance.source.checked-artifact"
                 ])
             );
             assert_eq!(value["result"]["supports_authentication"], false);
@@ -2305,6 +2316,297 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(cached, [format!("{}.lock", "ab".repeat(32))]);
+    }
+
+    /// CRC-32 (IEEE), as gzip's trailer needs it.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0_u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// A ustar archive of `entries` (a name ending in `/` is a directory), in a
+    /// gzip member of stored deflate blocks: a synthetic app source archive.
+    fn tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut tar = Vec::new();
+        for (name, data) in entries {
+            let mut header = [0_u8; 512];
+            header[..name.len()].copy_from_slice(name.as_bytes());
+            let directory = name.ends_with('/');
+            header[100..108].copy_from_slice(if directory {
+                b"0000755\0"
+            } else {
+                b"0000644\0"
+            });
+            header[108..116].copy_from_slice(b"0000000\0");
+            header[116..124].copy_from_slice(b"0000000\0");
+            header[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
+            header[136..148].copy_from_slice(b"00000000000\0");
+            header[148..156].copy_from_slice(b"        ");
+            header[156] = if directory { b'5' } else { b'0' };
+            header[257..263].copy_from_slice(b"ustar\0");
+            header[263..265].copy_from_slice(b"00");
+            let sum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+            header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+            tar.extend_from_slice(&header);
+            tar.extend_from_slice(data);
+            tar.resize(tar.len().next_multiple_of(512), 0);
+        }
+        tar.resize(tar.len() + 1024, 0);
+        let mut gzip = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+        let blocks: Vec<&[u8]> = tar.chunks(65_535).collect();
+        for (index, block) in blocks.iter().enumerate() {
+            let length = u16::try_from(block.len()).unwrap();
+            gzip.push(u8::from(index + 1 == blocks.len()));
+            gzip.extend_from_slice(&length.to_le_bytes());
+            gzip.extend_from_slice(&(!length).to_le_bytes());
+            gzip.extend_from_slice(block);
+        }
+        gzip.extend_from_slice(&crc32(&tar).to_le_bytes());
+        gzip.extend_from_slice(&u32::try_from(tar.len()).unwrap().to_le_bytes());
+        gzip
+    }
+
+    #[test]
+    fn instance_source_validates_before_it_reads_and_exits_7_only_when_retryable() {
+        let scratch = Scratch::new();
+        let instance = scratch.0.join("instance");
+        fs::create_dir(&instance).unwrap();
+        let binding = scratch.0.join("binding.json");
+        let archive = scratch.0.join("source.tar.gz");
+        let output = scratch.0.join("new.tar.gz");
+        // Neither gcloud nor a reachable forge: every proxied read fails at once.
+        let tools = scratch.0.join("no-tools");
+        fs::create_dir(&tools).unwrap();
+        let cache = scratch.0.join("cache");
+        let commit = "ab".repeat(20);
+        let inputs = format!("sha256:{}", "cd".repeat(32));
+        let (directory, bound, read, new) = (
+            instance.to_str().unwrap(),
+            binding.to_str().unwrap(),
+            archive.to_str().unwrap(),
+            output.to_str().unwrap(),
+        );
+        let source = |args: &[&str], code: i32| {
+            let value = envelope(
+                &run_with(
+                    args,
+                    None,
+                    &[
+                        ("PATH", tools.as_path()),
+                        ("DAY2_RELEASE_CACHE", cache.as_path()),
+                        ("HTTPS_PROXY", Path::new("http://127.0.0.1:1")),
+                        ("https_proxy", Path::new("http://127.0.0.1:1")),
+                        ("NO_PROXY", Path::new("")),
+                        ("no_proxy", Path::new("")),
+                        ("AUTODEPLOY_SOURCE_TOKEN", Path::new("synthetic-token")),
+                    ],
+                ),
+                code,
+            );
+            assert!(!value.to_string().contains("synthetic-token"));
+            value
+        };
+        let failure = |value: &Value| {
+            (
+                value["command"].as_str().unwrap().to_owned(),
+                value["error"]["code"].as_str().unwrap().to_owned(),
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                value["error"]["retryable"].as_bool().unwrap(),
+            )
+        };
+        let head = ["instance", "source", "head", directory, bound, "--agent"];
+        let archived = [
+            "instance",
+            "source",
+            "archive",
+            directory,
+            bound,
+            commit.as_str(),
+            new,
+            "--agent",
+        ];
+        let controls = ["instance", "source", "controls", read, "--agent"];
+        let verify = [
+            "instance",
+            "source",
+            "verify-controls",
+            directory,
+            bound,
+            read,
+            "--agent",
+        ];
+        let checked = [
+            "instance",
+            "source",
+            "checked-artifact",
+            directory,
+            bound,
+            commit.as_str(),
+            inputs.as_str(),
+            new,
+            "--agent",
+        ];
+        for (args, command) in [
+            (
+                vec!["instance", "source", "--agent"],
+                "instance.source.head",
+            ),
+            (
+                vec!["instance", "source", "archive", directory, bound, "--agent"],
+                "instance.source.archive",
+            ),
+            (
+                vec!["instance", "source", "controls", "--agent"],
+                "instance.source.controls",
+            ),
+            (
+                vec![
+                    "instance",
+                    "source",
+                    "checked-artifact",
+                    directory,
+                    "--agent",
+                ],
+                "instance.source.checked-artifact",
+            ),
+        ] {
+            let (reported, code, _, retryable) = failure(&source(&args, 2));
+            assert_eq!(
+                (reported.as_str(), code.as_str(), retryable),
+                (command, "missing_argument", false),
+                "{args:?}"
+            );
+        }
+        // Only an exact commit and exact source inputs reach the host.
+        let upper = commit.to_uppercase();
+        let mut args = archived.to_vec();
+        args[5] = upper.as_str();
+        assert_eq!(failure(&source(&args, 2)).1, "invalid_arguments");
+        let mut args = checked.to_vec();
+        args[6] = "sha256:short";
+        assert_eq!(failure(&source(&args, 2)).1, "invalid_arguments");
+        let mut demo = head.to_vec();
+        demo.push("--demo");
+        assert_eq!(failure(&source(&demo, 2)).1, "conflicting_options");
+        // The spec is validated before anything runs.
+        assert_eq!(failure(&source(&head, 3)).1, "metadata_unreadable");
+        fs::write(
+            instance.join("day2.json"),
+            SPEC.replacen(r#""org":"tools""#, r#""org":"Tools""#, 1),
+        )
+        .unwrap();
+        assert_eq!(failure(&source(&head, 5)).1, "invalid_spec");
+        fs::write(instance.join("day2.json"), SPEC).unwrap();
+        // The host validates the binding against day2.json before it reads the forge.
+        let (command, code, message, retryable) = failure(&source(&head, 6));
+        assert_eq!(
+            (command.as_str(), code.as_str(), retryable),
+            ("instance.source.head", "source_failed", false)
+        );
+        assert!(message.contains("binding.json"), "{message}");
+        let registry = "us-central1-docker.pkg.dev/exampleco-tools/go";
+        let valid = json!({
+            "app": "go", "repository": "tools/shortlinks", "directory": ".",
+            "runtime_image": format!("{registry}/day2-runtime@sha256:{}", "1".repeat(64)),
+            "tooling_image": format!("{registry}/day2-tooling@sha256:{}", "2".repeat(64)),
+            "image_repository": format!("{registry}/go"),
+            "source": {"forge": "gitea", "server": "https://git.example.com",
+                "repository": "tools/shortlinks", "repository_id": 7, "branch": "main"},
+            "qualified_release": {"digest": format!("sha256:{}", "98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848"), "bytes": 1236},
+            "verification": {"version": 1, "seed": 42, "cases": 4},
+            "ci_artifact": {"version": 1, "workflow": "roc.yml", "job": "roc",
+                "digest": format!("sha256:{}", "3".repeat(64))},
+        });
+        let mut foreign = valid.clone();
+        foreign["source"]["server"] = json!("https://git.example.org");
+        fs::write(&binding, foreign.to_string()).unwrap();
+        assert_eq!(
+            failure(&source(&head, 6)).2,
+            "the binding's source server is not day2.json's forge.server"
+        );
+        let mut weaker = valid.clone();
+        weaker["verification"]["cases"] = json!(6);
+        fs::write(&binding, weaker.to_string()).unwrap();
+        assert_eq!(
+            failure(&source(&head, 6)).2,
+            "the binding's verification cases are not day2.json's apps.go.verification"
+        );
+        fs::write(&binding, valid.to_string()).unwrap();
+        // A forge that cannot be reached is a retryable failure, exit 7.
+        for args in [head.as_slice(), checked.as_slice()] {
+            let (_, code, message, retryable) = failure(&source(args, 7));
+            assert_eq!(
+                (code.as_str(), message.as_str(), retryable),
+                ("source_unavailable", "source_temporarily_unavailable", true),
+                "{args:?}"
+            );
+        }
+        assert!(!output.exists());
+        // A new file is never overwritten.
+        fs::write(&output, b"reviewed").unwrap();
+        let (_, code, message, _) = failure(&source(&archived, 6));
+        assert_eq!(code, "source_failed");
+        assert!(message.contains("requires a new file"), "{message}");
+        assert_eq!(fs::read(&output).unwrap(), b"reviewed");
+        // controls reads no spec and no network.
+        fs::write(
+            &archive,
+            tar_gz(&[
+                ("app-source/", b""),
+                ("app-source/.ci/roc.json", b"{}"),
+                ("app-source/.ci/platform-release.json", b"{}\n"),
+                ("app-source/.ci/publish_artifact.py", b"# synthetic\n"),
+                ("app-source/.ci/sdk_release.py", b"# synthetic\n"),
+                ("app-source/.gitea/workflows/roc.yml", b"name: synthetic\n"),
+            ]),
+        )
+        .unwrap();
+        let value = source(&controls, 0);
+        assert_eq!(value["command"], "instance.source.controls");
+        assert!(value["context"]["spec_path"].is_null());
+        let receipt = &value["result"]["receipt"];
+        assert_eq!(
+            receipt["controls"],
+            "sha256:6ac6cbcd25ee8eda88f712e6becec74597cd95e742e6cc9e364a69414965ad16"
+        );
+        assert_eq!(receipt["archive"]["path"], read);
+        assert!(receipt["app_id"].is_null() && receipt["proof"].is_null());
+        let text = run(&controls[..4], None);
+        assert_eq!(text.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&text.stdout).contains("CI-control digest"));
+        // verify-controls checks the approved digest before it reads the bucket:
+        // no gcloud is needed to refuse controls that are not the approved ones.
+        let (command, code, message, retryable) = failure(&source(&verify, 6));
+        assert_eq!(
+            (command.as_str(), code.as_str(), retryable),
+            ("instance.source.verify-controls", "source_failed", false)
+        );
+        assert_eq!(
+            message,
+            "source CI differs from the instance-approved contract"
+        );
+        let mut approved = valid.clone();
+        approved["ci_artifact"]["digest"] =
+            json!("sha256:6ac6cbcd25ee8eda88f712e6becec74597cd95e742e6cc9e364a69414965ad16");
+        fs::write(&binding, approved.to_string()).unwrap();
+        assert_eq!(
+            failure(&source(&verify, 6)).2,
+            "source CI selects another qualified SDK"
+        );
+        assert!(!cache.exists());
     }
 
     #[test]
