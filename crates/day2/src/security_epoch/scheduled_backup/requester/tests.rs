@@ -823,3 +823,45 @@ fn cron_job_and_running_pod_specs_must_derive_not_merely_have_independent_matchi
     }
     Ok(())
 }
+
+#[test]
+fn coherent_reviewed_hashes_cannot_bless_secret_or_ambient_environment_injection() -> Result<()> {
+    for env in [
+        json!([{ "name":"PRIVATE", "valueFrom":{"secretKeyRef":{"name":"fixture-custody","key":"fixture-key"}} }]),
+        json!([{ "name":"GOOGLE_APPLICATION_CREDENTIALS", "value":"/unreviewed/path" }]),
+        json!([{ "name":"NODE", "valueFrom":{"fieldRef":{"fieldPath":"spec.nodeName"}} }]),
+        json!([{ "name":"UNSUPPORTED", "unknown":"fixture" }]),
+        json!("wrong-shape"),
+    ] {
+        let mut f = Fixture::new()?;
+        for (index, path) in [
+            (2, "/spec/jobTemplate/spec/template/spec"),
+            (3, "/spec/template/spec"),
+            (4, "/spec"),
+        ] {
+            f.objects[index].pointer_mut(path).unwrap()["containers"][0]["env"] = env.clone();
+        }
+        f.policy.cron_spec = Digest::of(&f.objects[2]["spec"])?;
+        f.intent.cron_job_spec = f.policy.cron_spec.clone();
+        f.policy.job_pod_spec = Digest::of(&f.objects[3]["spec"]["template"]["spec"])?;
+        f.policy.running_pod_spec = Digest::of(&f.objects[4]["spec"])?;
+        assert_eq!(
+            f.check().unwrap_err().to_string(),
+            "backup_requester_environment"
+        );
+    }
+    let mut f = Fixture::new()?;
+    for (index, path) in [
+        (2, "/spec/jobTemplate/spec/template/spec"),
+        (3, "/spec/template/spec"),
+        (4, "/spec"),
+    ] {
+        f.objects[index].pointer_mut(path).unwrap()["containers"][0]["env"] = json!([]);
+    }
+    f.policy.cron_spec = Digest::of(&f.objects[2]["spec"])?;
+    f.intent.cron_job_spec = f.policy.cron_spec.clone();
+    f.policy.job_pod_spec = Digest::of(&f.objects[3]["spec"]["template"]["spec"])?;
+    f.policy.running_pod_spec = Digest::of(&f.objects[4]["spec"])?;
+    assert!(f.check().is_ok());
+    Ok(())
+}

@@ -650,6 +650,15 @@ fn pod_profile(selected: &RequesterPolicy, spec: &Value) -> Result<()> {
             "terminationMessagePolicy",
         ],
     )?;
+    // The fixed native requester needs no Pod-supplied environment. In
+    // particular a complete expected spec hash must not bless SecretRef,
+    // token, credential-source or other ambient environment injection.
+    ensure!(
+        containers[0]
+            .get("env")
+            .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty)),
+        "backup_requester_environment"
+    );
     let security = containers[0]
         .get("securityContext")
         .context("backup_requester_security_context")?;
