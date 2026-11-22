@@ -294,6 +294,16 @@ pub(in crate::security_epoch) fn validate_workload_data(
     object(&cron, "batch/v1", "CronJob", &selected.cron_job)?;
     require_namespace(&cron, &selected.namespace.name)?;
     let cron_spec = cron.get("spec").context("backup_requester_cron_spec")?;
+    // A reviewed hash cannot authorize unbounded unsuspend catch-up. This
+    // fixed profile permits at most one hour to START a scheduled Job; it
+    // does not change that Job's deadline or any native original/role bound.
+    ensure!(
+        cron_spec
+            .get("startingDeadlineSeconds")
+            .and_then(Value::as_u64)
+            .is_some_and(|seconds| (1..=3600).contains(&seconds)),
+        "backup_requester_start_deadline"
+    );
     ensure!(
         Digest::of(cron_spec)? == selected.cron_spec
             && cron_spec.get("suspend") == Some(&Value::Bool(false))

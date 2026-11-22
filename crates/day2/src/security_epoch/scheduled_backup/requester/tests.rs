@@ -865,3 +865,44 @@ fn coherent_reviewed_hashes_cannot_bless_secret_or_ambient_environment_injection
     assert!(f.check().is_ok());
     Ok(())
 }
+
+#[test]
+fn coherent_cron_hash_and_intent_cannot_bless_an_unbounded_or_malformed_start_deadline()
+-> Result<()> {
+    for deadline in [
+        None,
+        Some(json!(null)),
+        Some(json!(0)),
+        Some(json!(-1)),
+        Some(json!(3601)),
+        Some(json!("60")),
+        Some(json!(1.5)),
+        Some(json!(true)),
+        Some(json!({"seconds":60})),
+    ] {
+        let mut f = Fixture::new()?;
+        let spec = f.objects[2]["spec"].as_object_mut().unwrap();
+        match deadline {
+            Some(value) => {
+                spec.insert("startingDeadlineSeconds".into(), value);
+            }
+            None => {
+                spec.remove("startingDeadlineSeconds");
+            }
+        }
+        f.policy.cron_spec = Digest::of(&f.objects[2]["spec"])?;
+        f.intent.cron_job_spec = f.policy.cron_spec.clone();
+        assert_eq!(
+            f.check().unwrap_err().to_string(),
+            "backup_requester_start_deadline"
+        );
+    }
+    for seconds in [1, 60, 3600] {
+        let mut f = Fixture::new()?;
+        f.objects[2]["spec"]["startingDeadlineSeconds"] = json!(seconds);
+        f.policy.cron_spec = Digest::of(&f.objects[2]["spec"])?;
+        f.intent.cron_job_spec = f.policy.cron_spec.clone();
+        f.check()?;
+    }
+    Ok(())
+}
