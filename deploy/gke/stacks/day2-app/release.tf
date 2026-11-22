@@ -97,6 +97,31 @@ resource "terraform_data" "release_admission" {
   depends_on = [terraform_data.native_admission]
   lifecycle {
     precondition {
+      condition     = try(local.live.metadata.annotations["day2.dev/runtime-pair"], null) == null
+      error_message = "A runtime handoff owns this Deployment. Resume the saved runtime-rollout before applying infrastructure."
+    }
+
+    precondition {
+      condition = local.runtime_pair_selection == null || try(
+        local.runtime_pair_enabled &&
+        local.runtime_pair_selection == substr(sha256(local.live.metadata.annotations["day2.dev/rollout"]), 0, 16) &&
+        local.release_instance == "day2-pair-${local.runtime_pair_selection}-selection" &&
+        jsonencode(local.runtime_pair_container.args) == jsonencode(local.runtime_pair_args) &&
+        one([for v in local.live.spec.template.spec.volumes : v.configMap.name if v.name == "runtime-pair"]) == local.release_instance &&
+        toset([for mount in local.runtime_pair_container.volumeMounts : mount.subPath if
+          mount.name == "runtime-pair" && mount.readOnly && mount.mountPath == "/run/day2-pair/${mount.subPath}"
+        ]) == toset(local.runtime_pair_files) &&
+        can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", local.runtime_pair_node)) &&
+        length(try(local.runtime_pair_term.matchExpressions, [])) == 0 &&
+        alltrue([for f in local.runtime_pair_term.matchFields :
+          f.key == "metadata.name" && f.operator == "In" && one(f.values) == local.runtime_pair_node
+        ]),
+        false
+      )
+      error_message = "The adopted runtime requires its release-managed rolling template, exact selection mounts and same-node constraint."
+    }
+
+    precondition {
       condition     = !local.activation_blocked
       error_message = "${var.app_id}: an activation checkpoint is active or unrecognized. Complete or recover the exact saved activation before planning infrastructure for this app; do not remove the checkpoint or restart its old image."
     }
