@@ -47,6 +47,8 @@ pub(in crate::security_epoch) struct RequesterPolicy {
     /// Actual qualified controller subjects, never guessed standard names.
     pub cron_controller: String,
     pub job_controller: String,
+    /// The actual qualified garbage-collector subject for owned cleanup only.
+    pub cleanup_controller: String,
     /// Reviewed infrastructure/configuration writers; not the app deployer.
     pub configuration_writers: Vec<String>,
 }
@@ -83,6 +85,7 @@ impl RequesterPolicy {
         );
         for subject in std::iter::once(&self.cron_controller)
             .chain(std::iter::once(&self.job_controller))
+            .chain(std::iter::once(&self.cleanup_controller))
             .chain(&self.configuration_writers)
         {
             ensure!(
@@ -95,7 +98,10 @@ impl RequesterPolicy {
         }
         ensure!(
             !self.configuration_writers.contains(&self.cron_controller)
-                && !self.configuration_writers.contains(&self.job_controller),
+                && !self.configuration_writers.contains(&self.job_controller)
+                && !self
+                    .configuration_writers
+                    .contains(&self.cleanup_controller),
             "backup_requester_subject_overlap"
         );
         Ok(())
@@ -124,6 +130,7 @@ impl RequesterPolicy {
         let generation = q(self.generation.as_str());
         let cron_controller = q(&self.cron_controller);
         let job_controller = q(&self.job_controller);
+        let cleanup_controller = q(&self.cleanup_controller);
         let writers = serde_json::to_string(&self.configuration_writers)?;
         let owner = |kind: &str, api: &str| {
             format!(
@@ -150,6 +157,26 @@ impl RequesterPolicy {
             "(object != null && has(object.spec.serviceAccountName) && object.spec.serviceAccountName == {account}) || (oldObject != null && has(oldObject.spec.serviceAccountName) && oldObject.spec.serviceAccountName == {account})"
         );
         let unchanged = "object.spec == oldObject.spec && object.metadata.ownerReferences == oldObject.metadata.ownerReferences && object.metadata.annotations == oldObject.metadata.annotations";
+        // DELETE is a reducing lifecycle operation, not CREATE/mutation or
+        // source authority. Permit only the qualified controller and the exact
+        // protected old owner chain, so activeDeadlineSeconds can terminate.
+        let delete_owner = |kind: &str, api: &str| {
+            format!(
+                "has(oldObject.metadata.ownerReferences) && oldObject.metadata.ownerReferences.size() == 1 && oldObject.metadata.ownerReferences[0].controller == true && oldObject.metadata.ownerReferences[0].kind == {} && oldObject.metadata.ownerReferences[0].apiVersion == {}",
+                q(kind),
+                q(api)
+            )
+        };
+        let job_delete = format!(
+            "(request.userInfo.username == {cron_controller} || request.userInfo.username == {cleanup_controller}) && {} && oldObject.metadata.ownerReferences[0].uid == {uid} && oldObject.metadata.ownerReferences[0].name == {cron}",
+            delete_owner("CronJob", "batch/v1")
+        );
+        let pod_delete = format!(
+            "(request.userInfo.username == {job_controller} || request.userInfo.username == {cleanup_controller}) && {} && has(oldObject.metadata.annotations) && {} in oldObject.metadata.annotations && oldObject.metadata.annotations[{}] == {uid}",
+            delete_owner("Job", "batch/v1"),
+            q(CRON_UID),
+            q(CRON_UID)
+        );
         let job_create = format!(
             "request.userInfo.username == {cron_controller} && {} && object.metadata.ownerReferences[0].uid == {uid} && object.metadata.ownerReferences[0].name == {cron} && {generation_check} && {cron_check} && has(object.metadata.annotations) && {} in object.metadata.annotations && object.metadata.annotations[{}].matches('^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T[0-9]{{2}}:[0-9]{{2}}:[0-9]{{2}}Z$')",
             owner("CronJob", "batch/v1"),
@@ -169,8 +196,8 @@ impl RequesterPolicy {
             "matchConditions":[{"name":"selected-namespace","expression":format!("request.namespace == {namespace}")}],
             "validations":[
                 {"expression":format!("request.resource.resource != 'cronjobs' || !((object != null && object.metadata.name == {cron}) || (oldObject != null && oldObject.metadata.name == {cron})) || request.userInfo.username in {writers}"),"message":"scheduled backup configuration writer required"},
-                {"expression":format!("request.resource.resource != 'jobs' || !({selected_job}) || (request.operation == 'CREATE' ? ({job_create}) : (request.operation == 'UPDATE' ? ({unchanged}) : request.userInfo.username in {writers}))"),"message":"protected scheduled backup Job required"},
-                {"expression":format!("request.resource.resource != 'pods' || !({selected_pod}) || (request.operation == 'CREATE' ? ({pod_create}) : (request.operation == 'UPDATE' ? ({unchanged}) : request.userInfo.username in {writers}))"),"message":"protected scheduled backup Pod required"}
+                {"expression":format!("request.resource.resource != 'jobs' || !({selected_job}) || (request.operation == 'CREATE' ? ({job_create}) : (request.operation == 'UPDATE' ? ({unchanged}) : (request.userInfo.username in {writers} || ({job_delete}))))"),"message":"protected scheduled backup Job required"},
+                {"expression":format!("request.resource.resource != 'pods' || !({selected_pod}) || (request.operation == 'CREATE' ? ({pod_create}) : (request.operation == 'UPDATE' ? ({unchanged}) : (request.userInfo.username in {writers} || ({pod_delete}))))"),"message":"protected scheduled backup Pod required"}
             ]
         }))
     }
@@ -318,6 +345,10 @@ pub(in crate::security_epoch) fn validate_workload_data(
     let job_spec = job
         .pointer("/spec/template/spec")
         .context("backup_requester_job_spec")?;
+    ensure!(
+        cron_spec.pointer("/jobTemplate/spec/template/spec") == Some(job_spec),
+        "backup_requester_cron_job_template_changed"
+    );
     pod_profile(selected, job_spec)?;
     ensure!(
         Digest::of(job_spec)? == selected.job_pod_spec,
@@ -341,6 +372,7 @@ pub(in crate::security_epoch) fn validate_workload_data(
         "backup_requester_pod_generation"
     );
     let spec = pod.get("spec").context("backup_requester_pod_spec")?;
+    require_pod_derivation(selected, job_spec, spec)?;
     pod_profile(selected, spec)?;
     ensure!(
         Digest::of(spec)? == selected.running_pod_spec
@@ -489,6 +521,50 @@ fn owner(value: &Value, api: &str, kind: &str, name: &str, uid: &str) -> Result<
             && owners[0].get("controller") == Some(&Value::Bool(true)),
         "backup_requester_owner_join"
     );
+    Ok(())
+}
+
+/// Supported Pod admission additions are explicit and exact. They cannot
+/// override a selected template field or bless another mutator's output.
+fn require_pod_derivation(selected: &RequesterPolicy, template: &Value, pod: &Value) -> Result<()> {
+    let mut expected = template.clone();
+    let map = expected
+        .as_object_mut()
+        .context("backup_requester_template_map")?;
+    match map.get("nodeName") {
+        Some(value) => ensure!(
+            value.as_str() == Some(selected.node_name.as_str()),
+            "backup_requester_template_node"
+        ),
+        None => {
+            map.insert("nodeName".into(), json!(selected.node_name));
+        }
+    }
+    for (key, value) in [
+        ("serviceAccount", json!(selected.service_account.name)),
+        ("priority", json!(0)),
+        ("preemptionPolicy", json!("PreemptLowerPriority")),
+    ] {
+        if !map.contains_key(key) && pod.get(key).is_some() {
+            ensure!(
+                pod.get(key) == Some(&value),
+                "backup_requester_pod_default_changed"
+            );
+            map.insert(key.into(), value);
+        }
+    }
+    if !map.contains_key("tolerations") && pod.get("tolerations").is_some() {
+        let value = json!([
+            {"key":"node.kubernetes.io/not-ready","operator":"Exists","effect":"NoExecute","tolerationSeconds":300},
+            {"key":"node.kubernetes.io/unreachable","operator":"Exists","effect":"NoExecute","tolerationSeconds":300}
+        ]);
+        ensure!(
+            pod.get("tolerations") == Some(&value),
+            "backup_requester_pod_tolerations_changed"
+        );
+        map.insert("tolerations".into(), value);
+    }
+    ensure!(expected == *pod, "backup_requester_pod_derivation_changed");
     Ok(())
 }
 

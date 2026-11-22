@@ -53,6 +53,7 @@ impl Fixture {
             binding: object_selection("calendar-backup", 7),
             cron_controller: "fixture:qualified-cron-controller".into(),
             job_controller: "fixture:qualified-job-controller".into(),
+            cleanup_controller: "fixture:qualified-garbage-collector".into(),
             configuration_writers: vec!["fixture:reviewed-config-writer".into()],
         };
         let annotations = json!({GENERATION:policy.generation,CRON_UID:policy.cron_job.uid});
@@ -397,4 +398,428 @@ fn response_codec_refuses_duplicates_arrays_and_oversize_before_comparison() {
         );
     }
     assert!(decode(&vec![b' '; MAX_RESPONSE + 1]).is_err());
+}
+
+// A deliberately finite test interpreter for the actual generated DELETE
+// expressions. It evaluates standard CEL map/list/Boolean operators used by
+// these controls, not Kubernetes admission, type checking or provider proofs.
+// Unsupported syntax/calls fail the test; they never become a positive result.
+#[derive(Clone, Debug, PartialEq)]
+enum CelToken {
+    Name(String),
+    Text(String),
+    Number(u64),
+    Symbol(String),
+}
+#[derive(Clone, Debug)]
+enum CelNode {
+    Literal(Value),
+    Root(String),
+    Field(Box<Self>, String),
+    Index(Box<Self>, usize),
+    Array(Vec<Self>),
+    Has(Box<Self>),
+    Size(Box<Self>),
+    Not(Box<Self>),
+    Binary(String, Box<Self>, Box<Self>),
+    Conditional(Box<Self>, Box<Self>, Box<Self>),
+    UnsupportedCall(String, Box<Self>, Vec<Self>),
+}
+struct CelFixture {
+    tokens: Vec<CelToken>,
+    at: usize,
+}
+impl CelFixture {
+    fn parse(text: &str) -> Result<CelNode> {
+        let bytes = text.as_bytes();
+        let mut at = 0;
+        let mut tokens = Vec::new();
+        while at < bytes.len() {
+            let byte = bytes[at];
+            if byte.is_ascii_whitespace() {
+                at += 1;
+                continue;
+            }
+            if byte == b'\'' || byte == b'"' {
+                let quote = byte;
+                let start = at;
+                at += 1;
+                while at < bytes.len() && bytes[at] != quote {
+                    ensure!(bytes[at] != b'\\', "unsupported CEL fixture escape");
+                    at += 1;
+                }
+                ensure!(at < bytes.len(), "unterminated CEL fixture string");
+                tokens.push(CelToken::Text(text[start + 1..at].into()));
+                at += 1;
+            } else if byte.is_ascii_alphabetic() || byte == b'_' {
+                let start = at;
+                while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+                    at += 1;
+                }
+                tokens.push(CelToken::Name(text[start..at].into()));
+            } else if byte.is_ascii_digit() {
+                let start = at;
+                while at < bytes.len() && bytes[at].is_ascii_digit() {
+                    at += 1;
+                }
+                tokens.push(CelToken::Number(text[start..at].parse()?));
+            } else {
+                let pair = text.get(at..at + 2).unwrap_or("");
+                if ["==", "!=", "&&", "||"].contains(&pair) {
+                    tokens.push(CelToken::Symbol(pair.into()));
+                    at += 2;
+                } else {
+                    ensure!(
+                        b"!().[],:?".contains(&byte),
+                        "unsupported CEL fixture token"
+                    );
+                    tokens.push(CelToken::Symbol((byte as char).to_string()));
+                    at += 1;
+                }
+            }
+        }
+        let mut parser = Self { tokens, at: 0 };
+        let node = parser.conditional()?;
+        ensure!(
+            parser.at == parser.tokens.len(),
+            "trailing CEL fixture input"
+        );
+        Ok(node)
+    }
+    fn take(&mut self, symbol: &str) -> bool {
+        if self.tokens.get(self.at) == Some(&CelToken::Symbol(symbol.into())) {
+            self.at += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn require(&mut self, symbol: &str) -> Result<()> {
+        ensure!(self.take(symbol), "missing CEL fixture symbol");
+        Ok(())
+    }
+    fn conditional(&mut self) -> Result<CelNode> {
+        let test = self.binary(0)?;
+        if self.take("?") {
+            let yes = self.conditional()?;
+            self.require(":")?;
+            let no = self.conditional()?;
+            Ok(CelNode::Conditional(
+                Box::new(test),
+                Box::new(yes),
+                Box::new(no),
+            ))
+        } else {
+            Ok(test)
+        }
+    }
+    fn binary(&mut self, level: usize) -> Result<CelNode> {
+        if level == 3 {
+            return self.unary();
+        }
+        let mut left = self.binary(level + 1)?;
+        loop {
+            let op = match self.tokens.get(self.at) {
+                Some(CelToken::Symbol(s))
+                    if (level == 0 && s == "||")
+                        || (level == 1 && s == "&&")
+                        || (level == 2 && ["==", "!="].contains(&s.as_str())) =>
+                {
+                    Some(s.clone())
+                }
+                Some(CelToken::Name(s)) if level == 2 && s == "in" => Some(s.clone()),
+                _ => None,
+            };
+            let Some(op) = op else {
+                break;
+            };
+            self.at += 1;
+            let right = self.binary(level + 1)?;
+            left = CelNode::Binary(op, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+    fn unary(&mut self) -> Result<CelNode> {
+        if self.take("!") {
+            return Ok(CelNode::Not(Box::new(self.unary()?)));
+        }
+        let mut value = if self.take("(") {
+            let value = self.conditional()?;
+            self.require(")")?;
+            value
+        } else if self.take("[") {
+            let mut items = Vec::new();
+            if !self.take("]") {
+                loop {
+                    items.push(self.conditional()?);
+                    if self.take("]") {
+                        break;
+                    }
+                    self.require(",")?;
+                }
+            }
+            CelNode::Array(items)
+        } else {
+            let token = self
+                .tokens
+                .get(self.at)
+                .context("missing CEL fixture atom")?
+                .clone();
+            self.at += 1;
+            match token {
+                CelToken::Text(s) => CelNode::Literal(json!(s)),
+                CelToken::Number(n) => CelNode::Literal(json!(n)),
+                CelToken::Name(s) if s == "null" => CelNode::Literal(Value::Null),
+                CelToken::Name(s) if s == "true" || s == "false" => {
+                    CelNode::Literal(json!(s == "true"))
+                }
+                CelToken::Name(s) if s == "has" => {
+                    self.require("(")?;
+                    let v = self.conditional()?;
+                    self.require(")")?;
+                    CelNode::Has(Box::new(v))
+                }
+                CelToken::Name(s) => CelNode::Root(s),
+                _ => anyhow::bail!("unsupported CEL fixture atom"),
+            }
+        };
+        loop {
+            if self.take(".") {
+                let Some(CelToken::Name(name)) = self.tokens.get(self.at).cloned() else {
+                    anyhow::bail!("missing CEL fixture field")
+                };
+                self.at += 1;
+                if self.take("(") {
+                    let mut args = Vec::new();
+                    if !self.take(")") {
+                        loop {
+                            args.push(self.conditional()?);
+                            if self.take(")") {
+                                break;
+                            }
+                            self.require(",")?;
+                        }
+                    }
+                    value = if name == "size" && args.is_empty() {
+                        CelNode::Size(Box::new(value))
+                    } else {
+                        CelNode::UnsupportedCall(name, Box::new(value), args)
+                    };
+                } else {
+                    value = CelNode::Field(Box::new(value), name);
+                }
+            } else if self.take("[") {
+                let token = self
+                    .tokens
+                    .get(self.at)
+                    .context("missing CEL fixture index")?
+                    .clone();
+                self.at += 1;
+                self.require("]")?;
+                value = match token {
+                    CelToken::Number(n) => CelNode::Index(Box::new(value), usize::try_from(n)?),
+                    CelToken::Text(key) => CelNode::Field(Box::new(value), key),
+                    _ => anyhow::bail!("unsupported CEL fixture index"),
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(value)
+    }
+}
+impl CelNode {
+    fn evaluate(&self, context: &Value) -> Result<Value> {
+        let boolean = |value: Value| value.as_bool().context("CEL fixture Boolean required");
+        match self {
+            Self::Literal(v) => Ok(v.clone()),
+            Self::Root(name) => context
+                .get(name)
+                .cloned()
+                .context("missing CEL fixture root"),
+            Self::Field(parent, key) => parent
+                .evaluate(context)?
+                .get(key)
+                .cloned()
+                .context("missing CEL fixture field"),
+            Self::Index(parent, index) => parent
+                .evaluate(context)?
+                .get(index)
+                .cloned()
+                .context("missing CEL fixture index"),
+            Self::Array(items) => Ok(Value::Array(
+                items
+                    .iter()
+                    .map(|v| v.evaluate(context))
+                    .collect::<Result<Vec<_>>>()?,
+            )),
+            Self::Has(value) => Ok(json!(value.evaluate(context).is_ok())),
+            Self::Size(value) => {
+                let value = value.evaluate(context)?;
+                Ok(json!(match &value {
+                    Value::Array(v) => v.len(),
+                    Value::Object(v) => v.len(),
+                    _ => anyhow::bail!("unsupported CEL fixture size"),
+                }))
+            }
+            Self::Not(value) => Ok(json!(!boolean(value.evaluate(context)?)?)),
+            Self::Conditional(test, yes, no) => {
+                if boolean(test.evaluate(context)?)? {
+                    yes.evaluate(context)
+                } else {
+                    no.evaluate(context)
+                }
+            }
+            Self::Binary(op, left, right) => {
+                let left = left.evaluate(context)?;
+                let result = match op.as_str() {
+                    "&&" => boolean(left)? && boolean(right.evaluate(context)?)?,
+                    "||" => boolean(left)? || boolean(right.evaluate(context)?)?,
+                    "==" => left == right.evaluate(context)?,
+                    "!=" => left != right.evaluate(context)?,
+                    "in" => match right.evaluate(context)? {
+                        Value::Array(values) => values.contains(&left),
+                        Value::Object(values) => {
+                            left.as_str().is_some_and(|s| values.contains_key(s))
+                        }
+                        _ => anyhow::bail!("unsupported CEL fixture membership"),
+                    },
+                    _ => anyhow::bail!("unsupported CEL fixture operator"),
+                };
+                Ok(json!(result))
+            }
+            Self::UnsupportedCall(name, target, args) => {
+                let _ = (name, target, args);
+                anyhow::bail!("unexecuted CEL fixture call reached")
+            }
+        }
+    }
+}
+
+#[test]
+fn generated_delete_rules_allow_real_deadline_cleanup_and_refuse_untrusted_or_wrong_owner()
+-> Result<()> {
+    let f = Fixture::new()?;
+    let spec = f.policy.policy_spec_data()?;
+    for (resource, index, object, controller) in [
+        ("jobs", 1, &f.objects[3], f.policy.cron_controller.as_str()),
+        ("pods", 2, &f.objects[4], f.policy.job_controller.as_str()),
+    ] {
+        let expression = spec["validations"][index]["expression"].as_str().unwrap();
+        let program = CelFixture::parse(expression)?;
+        let context = |actor: &str, old: Value| json!({"request":{"resource":{"resource":resource},"operation":"DELETE","namespace":"calendar","userInfo":{"username":actor}},"object":null,"oldObject":old});
+        assert_eq!(
+            program.evaluate(&context(controller, object.clone()))?,
+            json!(true)
+        );
+        assert_eq!(
+            program.evaluate(&context("fixture:reviewed-config-writer", object.clone()))?,
+            json!(true)
+        );
+        assert_eq!(
+            program.evaluate(&context("fixture:untrusted", object.clone()))?,
+            json!(false)
+        );
+        assert_eq!(
+            program.evaluate(&context(&f.policy.cleanup_controller, object.clone()))?,
+            json!(true)
+        );
+        // Old generations still need their real deadline/cleanup path.
+        let mut old = object.clone();
+        old["metadata"]["annotations"][GENERATION] = json!(digest("old-generation"));
+        assert_eq!(program.evaluate(&context(controller, old))?, json!(true));
+        for field in ["kind", "apiVersion", "controller"] {
+            let mut old = object.clone();
+            old["metadata"]["ownerReferences"][0][field] = json!("wrong");
+            assert_eq!(program.evaluate(&context(controller, old))?, json!(false));
+        }
+        let mut old = object.clone();
+        if resource == "jobs" {
+            old["metadata"]["ownerReferences"][0]["uid"] = json!(uid(99));
+        } else {
+            old["metadata"]["annotations"][CRON_UID] = json!(uid(99));
+        }
+        assert_eq!(program.evaluate(&context(controller, old))?, json!(false));
+        let mut wrong_cleanup = object.clone();
+        if resource == "jobs" {
+            wrong_cleanup["metadata"]["ownerReferences"][0]["uid"] = json!(uid(99));
+        } else {
+            wrong_cleanup["metadata"]["annotations"][CRON_UID] = json!(uid(99));
+        }
+        assert_eq!(
+            program.evaluate(&context(&f.policy.cleanup_controller, wrong_cleanup))?,
+            json!(false)
+        );
+        // Mutation control on the ACTUAL emitted expression, not a duplicate
+        // fixture policy: removing the controller alternative denies cleanup.
+        let quoted = serde_json::to_string(controller)?;
+        let needle = format!("request.userInfo.username == {quoted}");
+        let count = expression.matches(&needle).count();
+        assert_eq!(count, 2);
+        let location = expression.rfind(&needle).unwrap();
+        let mut mutant = expression.to_owned();
+        mutant.replace_range(location..location + needle.len(), "false");
+        assert_eq!(
+            CelFixture::parse(&mutant)?.evaluate(&context(controller, object.clone()))?,
+            json!(false)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn cron_job_and_running_pod_specs_must_derive_not_merely_have_independent_matching_hashes()
+-> Result<()> {
+    let mut f = Fixture::new()?;
+    f.objects[2]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["command"] =
+        json!(["changed-command"]);
+    f.policy.cron_spec = Digest::of(&f.objects[2]["spec"])?;
+    f.intent.cron_job_spec = f.policy.cron_spec.clone();
+    assert_eq!(
+        f.check().unwrap_err().to_string(),
+        "backup_requester_cron_job_template_changed"
+    );
+    let mut f = Fixture::new()?;
+    for index in [2, 3] {
+        let path = if index == 2 {
+            "/spec/jobTemplate/spec/template/spec"
+        } else {
+            "/spec/template/spec"
+        };
+        f.objects[index].pointer_mut(path).unwrap()["containers"][0]["command"] =
+            json!(["changed-command"]);
+    }
+    f.policy.cron_spec = Digest::of(&f.objects[2]["spec"])?;
+    f.intent.cron_job_spec = f.policy.cron_spec.clone();
+    f.policy.job_pod_spec = Digest::of(&f.objects[3]["spec"]["template"]["spec"])?;
+    assert_eq!(
+        f.check().unwrap_err().to_string(),
+        "backup_requester_pod_derivation_changed"
+    );
+    let mut f = Fixture::new()?;
+    for (key, value) in [
+        ("serviceAccount", json!("backup")),
+        ("priority", json!(0)),
+        ("preemptionPolicy", json!("PreemptLowerPriority")),
+    ] {
+        f.objects[4]["spec"][key] = value;
+    }
+    f.objects[4]["spec"]["tolerations"] = json!([
+        {"key":"node.kubernetes.io/not-ready","operator":"Exists","effect":"NoExecute","tolerationSeconds":300},
+        {"key":"node.kubernetes.io/unreachable","operator":"Exists","effect":"NoExecute","tolerationSeconds":300}
+    ]);
+    f.policy.running_pod_spec = Digest::of(&f.objects[4]["spec"])?;
+    assert!(f.check().is_ok());
+    for (key, value) in [
+        ("priority", json!(100)),
+        ("preemptionPolicy", json!("Never")),
+        ("serviceAccount", json!("other")),
+        ("tolerations", json!([])),
+    ] {
+        let mut g = Fixture::new()?;
+        g.objects[4]["spec"][key] = value;
+        g.policy.running_pod_spec = Digest::of(&g.objects[4]["spec"])?;
+        assert!(g.check().is_err());
+    }
+    Ok(())
 }
