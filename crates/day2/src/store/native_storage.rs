@@ -1024,12 +1024,16 @@ mod tests {
 
     #[test]
     fn credential_preflight_checks_attached_databases_under_callback_policy() -> Result<()> {
+        let profile = crate::oauth::restore::Profile::prepare()?;
         for mode in [SqlMode::Read, SqlMode::Write] {
             for attached in [false, true] {
-                let mut db = Connection::open_in_memory()?;
+                let db = crate::oauth::schema::RawAdmissionDatabase::open_in_memory()?;
+                db.execute_batch(crate::store::PLATFORM_DDL)?;
+                crate::oauth::fresh_owner::install(&db)?;
                 db.execute_batch(
                     "CREATE TABLE day2_credential_schema_version(version INTEGER PRIMARY KEY) STRICT",
                 )?;
+                let mut db = db.retire()?;
                 if attached {
                     db.execute_batch("ATTACH DATABASE ':memory:' AS unexpected")?;
                 }
@@ -1037,7 +1041,7 @@ mod tests {
                 let control = callbacks.control.clone();
                 let tx = callbacks.db.transaction()?;
                 let policy = CallbackPolicy::activate(&tx, control)?;
-                let result = crate::store::require_no_managed_credential_restore_state(&tx);
+                let result = crate::store::check_credential_restore_state(&tx, Some(&profile));
                 if attached {
                     assert_eq!(
                         result.unwrap_err().to_string(),

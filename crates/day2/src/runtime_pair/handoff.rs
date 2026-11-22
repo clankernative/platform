@@ -606,6 +606,7 @@ fn update(
     let _release = rollout::release_lock(runtime)?;
     super::local_stores(runtime)?;
     let expected = super::expected_storage(runtime)?;
+    let credentials = crate::oauth::restore::Profile::prepare()?;
     runtime.sql_write(|db| {
         ensure!(
             runtime.operators()?.contains(operator.name())
@@ -619,7 +620,7 @@ fn update(
             rollout::storage_shape(runtime, db)? == expected.shape,
             "runtime_pair_store_shape_changed"
         );
-        crate::store::require_no_managed_credential_restore_state(db)?;
+        crate::store::check_credential_restore_state(db, Some(&credentials))?;
         let mut release = super::executor::bound(runtime, db, false)?;
         ensure!(release.id == id, "runtime_pair_binding_changed");
         action(db, &mut release)?;

@@ -248,6 +248,7 @@ pub fn admit(runtime: &Runtime, id: &str, operator: &LocalOperator) -> Result<Re
     let _release = rollout::release_lock(runtime)?;
     super::local_stores(runtime)?;
     let expected = super::expected_storage(runtime)?;
+    let credentials = crate::oauth::restore::Profile::prepare()?;
     runtime.sql_write(|tx| {
         ensure!(
             runtime.operators()?.contains(operator.name())
@@ -261,7 +262,7 @@ pub fn admit(runtime: &Runtime, id: &str, operator: &LocalOperator) -> Result<Re
             rollout::storage_shape(runtime, tx)? == expected.shape,
             "runtime_pair_store_shape_changed"
         );
-        crate::store::require_no_managed_credential_restore_state(tx)?;
+        crate::store::check_credential_restore_state(tx, Some(&credentials))?;
         let release = prepared(runtime, tx)?;
         let ReleaseKind::RuntimePair { admission, .. } = &release.kind else {
             unreachable!()
@@ -516,6 +517,7 @@ impl Candidate {
         );
         let serving = crate::deployment::pair_executor_lease(instance, app)?;
         let runtime = Runtime::load(instance, app)?;
+        let expected = rollout::expected_storage_shape(&runtime)?;
         runtime.sql_read(|db| {
             require_executor(
                 &runtime,
@@ -523,7 +525,7 @@ impl Candidate {
                 &selection,
                 &crate::security_admission::host_code()?,
             )?;
-            rollout::verify_storage_shape(&runtime, db)
+            rollout::verify_storage_shape(&runtime, db, &expected)
         })?;
         Ok(Self {
             runtime,
@@ -710,6 +712,7 @@ pub fn source_drain(
     ensure!(budget <= 1000, "invocation_drain_budget");
     let _serving = crate::deployment::pair_executor_lease(instance, app)?;
     let runtime = Runtime::load(instance, app)?;
+    let expected = rollout::expected_storage_shape(&runtime)?;
     runtime.sql_read(|db| {
         let (_, generation) = require_executor(
             &runtime,
@@ -718,7 +721,7 @@ pub fn source_drain(
             &crate::security_admission::host_code()?,
         )?;
         runtime_generation::bind_admitted(&runtime, db, &generation)?;
-        rollout::verify_storage_shape(&runtime, db)
+        rollout::verify_storage_shape(&runtime, db, &expected)
     })?;
     crate::invocations::drain(&runtime, budget)
 }
