@@ -18,9 +18,9 @@ Two kinds of pending invocation never finish on their own:
   stopped before finishing it, for example when maintenance stopped the app
   mid-request. Only that request was running it: that scheduler resumes
   commands, never queries or pages, and a page load's identity is random, so no
-  later request repeats it. It stays pending until a migration abandons it
-  (below) or an operator does. A rolling profile drains queries and pages too,
-  so nothing there is orphaned; a native-storage app is not supported.
+  later request repeats it. It stays pending until the next migration abandons
+  it (below); an operator does not. A rolling profile drains queries and pages
+  too, so nothing there is orphaned; a native-storage app is not supported.
 
 ### A migration abandons its orphaned requests
 
@@ -34,12 +34,14 @@ The migration holds the migration exclusion: the operation lease and the
 exclusive serving lock, which no `day2-serve` (or runtime-pair executor) can
 hold beside it. A request cut off by that stop, or by any earlier stop or crash,
 is then provably over, so the migration abandons it itself instead of refusing
-the store with `migration_requires_drained_invocations` until an operator does:
+the store with `migration_requires_drained_invocations`:
 
-- It abandons exactly the invocations `orphaned_request` accepts (below), by
-  the same check: pending, unblocked, admitted by a direct request, of an
-  operation the store's scheduler never resumes, in an ordinary non-rolling
-  store.
+- It abandons exactly the orphaned requests: pending, unblocked invocations
+  that a direct request admitted (`trigger` `request`), of an operation the
+  store's scheduler never resumes, in an ordinary non-rolling store. A command
+  never qualifies: the scheduler resumes it, and a client may retry it under
+  its key. Neither does work that a schedule, a command request, ingress, a
+  delegation or a credential started.
 - It abandons under `LOCAL_OPERATOR`, who must be an instance operator or a
   policy administrator when there is something to abandon
   (`recovery_operator_required`). A GKE maintenance session passes its request's
@@ -63,13 +65,20 @@ copy taken once the app has stopped lists what the live migration will abandon;
 the earlier copy taken while the source still serves also lists reads that
 were then in flight and finished there.
 
+`day2 activate` and `day2 platform authority activate` refuse while any
+runnable work is pending (`activation_precondition_failed`), orphaned requests
+included. GKE activation always migrates first. Elsewhere, run `day2
+migration-plan` and `day2 migration-apply` onto the target before activating,
+and the migration abandons them.
+
 The lock is what keeps servers off the store, so this holds only for processes
 that take it. `day2 serve-local`, `day2 invoke`, `day2 resume` and the local
 development server do not: never migrate a store one of them is using.
 
-### Abandoning explicitly
+### Abandoning blocked work
 
-A local operator ends either kind explicitly, as one list of up to 16 invocations:
+A local operator ends blocked work explicitly, as one list of up to 16
+invocations:
 
 ```
 day2 recovery-abandon INSTANCE APP LOCAL_OPERATOR REQUESTS_JSON
@@ -77,31 +86,21 @@ day2 recovery-abandon INSTANCE APP LOCAL_OPERATOR REQUESTS_JSON
 
 The operator must be an instance operator or an administrator in the app's
 policy. Each request names `request_id` (the operator's idempotency key),
-`invocation`, `expected_artifact` (the artifact that admitted it), `reason` (at
-most 200 bytes, no control characters) and `cause`, `blocked` or
-`orphaned_request`: the operator states what they found. Each `request_id` and
-each invocation appears once. Repeating a request returns its original receipt,
-which names the cause; reusing its `request_id` for a different request is
-refused.
+`invocation`, `expected_artifact` (the artifact that admitted it) and `reason`
+(at most 200 bytes, no control characters). Each `request_id` and each
+invocation appears once. Repeating a request returns its original receipt, with
+cause `blocked`; reusing its `request_id` for a different request is refused.
 
 - The list is all or nothing. One transaction decides every item, and one
   refusal leaves every listed invocation as it was.
-- With `blocked`, only a pending, blocked invocation qualifies, including one
-  admitted by an earlier artifact.
-- With `orphaned_request`, only a pending, unblocked invocation that a direct
-  request admitted (`trigger` `request`), of an operation the store's scheduler
-  never resumes, qualifies. The decision holds the store's recovery exclusion:
-  the operation lease and the exclusive serving lock, which no `day2-serve` can
-  hold beside it. So no runtime holds the invocation, and the request that
-  admitted it has ended. While the app serves, it is refused with
-  `recovery_requires_exclusive_store`. A command never qualifies: the scheduler
-  resumes it, and a client may retry it under its key. Neither does work that a
-  schedule, a command request, ingress, a delegation or a credential started. A
-  blocked request is abandoned as `blocked`, so the recorded cause is exact.
+- Only a pending, blocked invocation qualifies, including one admitted by an
+  earlier artifact. Anything else is refused with
+  `recovery_requires_blocked_invocation`, an orphaned request included: the
+  next migration abandons it.
 - An invocation is abandoned at most once.
 - Each abandonment finishes the invocation as a failure (`invocation_abandoned`),
   appends a `day2_abandonments` row (operator, reason, the active authority
-  stamp and policy, evidence, and the request and receipt with their cause) and
+  stamp and policy, evidence, the request, and the receipt with its cause) and
   records a `recovery` audit event naming the operator. The reason stays in the
   abandonment row, not the event stream.
 - A block row stays. Receipts, execution, duplicate requests and cross-app
@@ -129,7 +128,7 @@ On GKE, run it with the app stopped through `day2 platform maintain
 recovery-abandon REQUEST_JSON_FILE` (see [deploy/gke](../deploy/gke/README.md),
 "Maintenance"). The request file lists the requests under `abandon` and is checked
 before anything stops. The session takes a verified backup, asks for a typed
-`abandon` that names each invocation and cause, runs `day2 recovery-abandon` in
+`abandon` that names each invocation, runs `day2 recovery-abandon` in
 the maintenance pod with the request's operator, then restores the app. After a
 refusal or an interrupted session, rerun the same request file in a new session:
 committed requests return their receipts, and a request changed in any field
