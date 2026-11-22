@@ -75,7 +75,7 @@ ListEvents :: [].{
 							and (output.status == "ok" or output.events.items().is_empty()),
 			),
 		},
-	})
+	}).observes("connection.resolve.v1").observes("google_calendar.list_events.v1")
 
 	empty : Str -> Output
 	empty = |status| { status, events: CollectionPage.empty({}) }

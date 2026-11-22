@@ -72,7 +72,11 @@ or `workspace_directory.user_path.v1` for an independent current-actor user
 lookup. `workspace_directory.named_user_path.v1` reads another person's user path
 (`WorkspaceDirectory.named_user_path`) and is accepted only on an internal
 command, for example a scheduled renewal; its grant is separate from the current
-actor's. Build verification
+actor's. An operation that calls a generated connection client declares
+`connection.resolve.v1` for `Connections.<name>.resolve`, plus
+`google_calendar.list_events.v1` for `Connections.<name>.list_events`; each is
+accepted only when `App.definition.connections` declares a connection it can
+serve. Build verification
 and local development derive synthetic Directory bindings from these declarations,
 independent of operation names. Admission checks capability names and rejects
 writes and duplicates. Production grants remain operator-owned. See

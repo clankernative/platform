@@ -5,7 +5,9 @@ for reading Calendar events. The admitted artifact is a small deployment target
 for the installation's native security-shell registration campaign. The ordinary
 `inspect` query reports app-owned intent. The `list_events` product query resolves
 the current verified human's requirement and reads their primary Calendar through
-private host custody. Both preserve an empty product database.
+private host custody. It declares both reads with `.observes`, so a rendered
+authority grants them to it and to nothing else. Both preserve an empty product
+database.
 
 Build it with the ordinary platform recipe:
 

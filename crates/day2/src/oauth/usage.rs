@@ -125,12 +125,20 @@ struct ReadInput {
     window: super::calendar::Window,
 }
 
+/// The connection reads an operation may declare and a policy may grant.
+pub(crate) const OBSERVATIONS: [&str; 2] = [
+    crate::connection_codegen::RESOLVE,
+    crate::connection_codegen::LIST_EVENTS,
+];
+
 pub(crate) fn observation(name: &str) -> bool {
-    [
-        crate::connection_codegen::RESOLVE,
-        crate::connection_codegen::LIST_EVENTS,
-    ]
-    .contains(&name)
+    OBSERVATIONS.contains(&name)
+}
+
+/// Whether a connection read can ever resolve `requirement`: only the current
+/// human's connections are served.
+pub(crate) fn resolvable(requirement: &ConnectionRequirement) -> bool {
+    requirement.owner == day2_capabilities::oauth::ConnectionOwner::CurrentHuman
 }
 
 pub(crate) fn install(db: &Connection) -> Result<()> {
@@ -521,10 +529,7 @@ fn resolve(
 ) -> Result<String> {
     let input: ResolveInput = crate::json::decode(instruction.data.as_bytes())?;
     let requirement = declaration(runtime, &input.registration)?;
-    ensure!(
-        requirement.owner == day2_capabilities::oauth::ConnectionOwner::CurrentHuman,
-        "unsupported connection owner"
-    );
+    ensure!(resolvable(requirement), "unsupported connection owner");
     let subject = serving.sql_read(runtime, |snapshot| {
         runtime.check_binding(snapshot)?;
         require_action(
@@ -723,8 +728,7 @@ fn execute_current(
     };
     ensure!(
         selection.identity()? == claims.selection
-            && selection.requirement.capability == super::google::CAPABILITY
-            && selection.requirement.actions.contains("list_events"),
+            && crate::connection_codegen::lists_events(&selection.requirement),
         "connection provider action or selection changed"
     );
     let selected_at = super::effects::wall_time()?;

@@ -433,10 +433,10 @@ Use for `Connections.calendar.list_events`. Uses cannot enter persistent models
 or public API codecs; provider tokens remain in private host custody.
 
 Reads require a durable verified human origin and current native authority:
-an explicit policy that grants the operation `connection.resolve.v1` and the
-provider read. A rendered authority cannot grant them yet, so neither can an app
-deployed through the GKE app root (see
-[rendered authority](AUTHORITY.md#rendered-authority)). They
+a policy that grants the operation `connection.resolve.v1` and the provider
+read. The operation declares both with `.observes`, as the canary's event query
+does, and a rendered authority, such as the GKE app root's, grants exactly what
+it declares (see [rendered authority](AUTHORITY.md#rendered-authority)). They
 use the exact currently published token material and admit one GET, at most 100 events and a window
 of at most 31 days. Any provider continuation returns `CapacityDeferred` without
 another request. The canary's native build, setup and compiled runtime/custody

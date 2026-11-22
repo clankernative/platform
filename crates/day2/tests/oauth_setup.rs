@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, ensure};
 use day2::{
     artifact::{Instance, LoadedArtifact},
+    authority_state::AuthorityDocument,
     deployment::oauth_setup,
     store::{Fault, Runtime},
 };
 use day2_capabilities::oauth::AccountBindingPolicy;
 use serde_json::{Value, json};
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 /// Re-pin desired DATA after this fixture renames an installation/app/client.
 /// The synthetic provider UID stays unchanged; this supplies no live authority.
@@ -29,19 +30,6 @@ fn select_fixture_epoch(draft: &mut Value, app: &str) -> Result<()> {
     epoch.validate()?;
     draft["control"]["security_epochs"] = json!({"app_epoch": epoch});
     Ok(())
-}
-
-/// The deployment oracle renders its app's authority, which cannot yet grant
-/// OAuth connection observations, so bind an explicit policy in its place.
-fn bind_explicit_authority(draft: &mut Value, app: &str, operations: Value) {
-    let binding = draft["apps"][app].as_object_mut().unwrap();
-    binding.remove("rendered_authority");
-    binding.insert("readers".into(), json!(["qa@example.com"]));
-    binding.insert("writers".into(), json!(["qa@example.com"]));
-    binding.insert(
-        "authority".into(),
-        json!({"version":1,"admins":[],"operations":operations}),
-    );
 }
 
 #[test]
@@ -77,13 +65,6 @@ fn admitted_gitlab_declaration_selects_company_client_and_external_ceiling() -> 
             map.insert("oauthgitlab".into(), app);
         }
         draft["apps"]["oauthgitlab"]["artifact"] = json!(artifact.directory());
-        bind_explicit_authority(
-            &mut draft,
-            "oauthgitlab",
-            json!({
-                "oauthgitlab.inspect":{"actors":["qa@example.com"],"mode":{"kind":"read"},"models":{}}
-            }),
-        );
         let connections = draft["apps"]["oauthgitlab"]["oauth_connections"]
             .as_object_mut()
             .unwrap();
@@ -191,15 +172,6 @@ fn admitted_calendar_canary_prepares_reproducible_selection_without_live_authori
     draft["apps"]["oauthcalendar"]["artifact"] = json!(artifact.directory());
     draft["apps"]["oauthcalendar"]["oauth_connections"]["calendar"]["namespace"]["app"] =
         json!("oauthcalendar");
-    bind_explicit_authority(
-        &mut draft,
-        "oauthcalendar",
-        json!({
-            "oauthcalendar.inspect": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{}},
-            "oauthcalendar.list_events": {"actors":["qa@example.com"], "mode":{"kind":"read"}, "models":{},
-                "observations":["connection.resolve.v1","google_calendar.list_events.v1"]}
-        }),
-    );
     select_fixture_epoch(&mut draft, "oauthcalendar")?;
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("instance.json");
@@ -231,6 +203,36 @@ fn admitted_calendar_canary_prepares_reproducible_selection_without_live_authori
     assert_eq!(
         instance.apps["oauthcalendar"].artifact,
         artifact.directory().to_string_lossy()
+    );
+    // The oracle binds only admins: the rendered policy grants the connection
+    // reads to the query that declares them and to nothing else, and so does
+    // the policy build verification and local development run under.
+    let reads = BTreeSet::from([
+        day2::connection_codegen::RESOLVE.to_owned(),
+        day2::connection_codegen::LIST_EVENTS.to_owned(),
+    ]);
+    let rendered = AuthorityDocument::resolve(&instance, "oauthcalendar", &artifact)?
+        .policy
+        .context("rendered policy missing")?;
+    assert_eq!(
+        rendered.operations["oauthcalendar.list_events"].observations,
+        reads
+    );
+    assert!(
+        rendered.operations["oauthcalendar.inspect"]
+            .observations
+            .is_empty()
+    );
+    let local = day2::development::local_policy_for(&artifact, "qa@example.com")?;
+    assert!(
+        local.operations["oauthcalendar.list_events"]
+            .observations
+            .is_superset(&reads)
+    );
+    assert!(
+        local.operations["oauthcalendar.inspect"]
+            .observations
+            .is_disjoint(&reads)
     );
     fs::write(&path, serde_json::to_vec(&prepared["instance"])?)?;
     assert_eq!(prepared, oauth_setup(&path)?, "setup must be idempotent");

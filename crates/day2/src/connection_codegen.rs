@@ -1,13 +1,19 @@
 //! Requirement-specific invocation handles. Neither the generic transport nor
 //! the private constructors survive both native admission profiles.
 use anyhow::{Result, ensure};
-use day2_capabilities::oauth::ConnectionDeclaration;
+use day2_capabilities::oauth::{ConnectionDeclaration, ConnectionRequirement};
 use std::collections::BTreeSet;
 
 pub const MODULE: &str = "Connections.roc";
 pub const RESOLVE: &str = "connection.resolve.v1";
 pub const LIST_EVENTS: &str = "google_calendar.list_events.v1";
 pub const USE_PREFIX: &str = "Day2ConnectionUse_";
+
+/// Whether `requirement`'s generated client reads Calendar events.
+pub fn lists_events(requirement: &ConnectionRequirement) -> bool {
+    requirement.capability == crate::oauth::google::CAPABILITY
+        && requirement.actions.contains("list_events")
+}
 
 pub fn invocation_type(name: &str) -> bool {
     name.strip_prefix("Connections.")
@@ -40,8 +46,7 @@ pub fn module(declarations: &[ConnectionDeclaration], admission: bool) -> Result
             &nominal,
             prefix,
             false,
-            declaration.requirement.capability == "google_calendar_events"
-                && declaration.requirement.actions.contains("list_events"),
+            lists_events(&declaration.requirement),
         )?;
     }
     source.push_str("}\n");
