@@ -171,8 +171,9 @@ private text, identifiers, times and financial values become synthetic. No fixtu
 
 Prompts have a three-minute absolute bound and 16 KiB byte cap. Typed Ctrl-C/Ctrl-D cancel hidden input and ordinary
 returns/unwinding restore exact terminal settings. Default external signal termination or abort can bypass Rust cleanup;
-the fixed recovery instruction is `stty sane`. An incomplete or failed run has no completion manifest and is never retried
-automatically. Run builds before supplying credentials and use a clean environment so exported secrets cannot enter
+the fixed recovery instruction is `stty sane`. A storage failure may leave a partial or even fully written manifest visible. Presence is not completion: require the
+actual command to exit successfully and verify every listed file hash by readback before using the recording. Failed
+runs are never retried automatically. Run builds before supplying credentials and use a clean environment so exported secrets cannot enter
 Bazel client-environment arguments. Agent-controlled tools must never start the real secret prompt or provider call.
 
 ## Carta issuer captures

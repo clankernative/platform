@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -132,6 +133,7 @@ fn inputs(provider: Provider) -> Result<Native> {
     let terminal = OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
         .open("/dev/tty")
         .map_err(|_| anyhow::anyhow!("recording_requires_user_terminal"))?;
     match provider {
@@ -240,17 +242,13 @@ impl Session {
                 }
                 Phase::Publish => {
                     let bundle = self.native.take().context("recording_not_open")?.finish()?;
-                    for recording in bundle.recordings() {
-                        qualification_evidence::publish(
-                            &self.directory,
-                            recording.name(),
-                            recording.bytes(),
-                        )?;
-                    }
-                    qualification_evidence::publish(
-                        &self.directory,
-                        "PROVENANCE.json",
+                    publish_ordered(
+                        bundle.recordings().iter().map(|r| (r.name(), r.bytes())),
                         bundle.provenance(),
+                        |name, bytes| {
+                            qualification_evidence::publish(&self.directory, name, bytes)
+                                .map(|_| ())
+                        },
                     )?;
                     self.phase = Phase::Complete;
                 }
@@ -264,6 +262,19 @@ impl Session {
         }
         result
     }
+}
+
+fn publish_ordered<'a>(
+    recordings: impl Iterator<Item = (&'static str, &'a [u8])>,
+    provenance: &[u8],
+    mut publish: impl FnMut(&str, &[u8]) -> Result<()>,
+) -> Result<()> {
+    for (name, bytes) in recordings {
+        publish(name, bytes)?;
+    }
+    // A late sync/close error can leave this name visible. Its presence alone
+    // never proves success: require actual command success and hash readback.
+    publish("PROVENANCE.json", provenance)
 }
 
 pub fn execute(root: &Path, provider: Provider, directory: &Path) -> Result<()> {
@@ -291,6 +302,47 @@ mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
 
+    #[test]
+    fn late_manifest_failure_is_not_success_even_with_valid_visible_data() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join("safe");
+        qualification_evidence::create_directory(&directory)?;
+        let body = b"{\"synthetic\":true}";
+        let manifest = serde_json::to_vec(
+            &json!({"files":[{"name":"synthetic.json","sha256":digest(body)}]}),
+        )?;
+        let mut order = Vec::new();
+        let result = publish_ordered(
+            [("synthetic.json", body.as_slice())].into_iter(),
+            &manifest,
+            |name, bytes| {
+                order.push(name.to_owned());
+                qualification_evidence::publish(&directory, name, bytes)?;
+                if name == "PROVENANCE.json" {
+                    anyhow::bail!("synthetic late sync failure");
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(order, ["synthetic.json", "PROVENANCE.json"]);
+        assert_eq!(fs::read(directory.join("PROVENANCE.json"))?, manifest);
+        assert_eq!(fs::read(directory.join("synthetic.json"))?, body);
+        let other = root.path().join("refused");
+        qualification_evidence::create_directory(&other)?;
+        let result = publish_ordered(
+            [("synthetic.json", body.as_slice())].into_iter(),
+            &manifest,
+            |name, _bytes| {
+                ensure!(name != "synthetic.json", "synthetic early write failure");
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!other.join("PROVENANCE.json").exists());
+        Ok(())
+    }
+
     fn terminal_pair() -> Result<(File, File)> {
         use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
         let master = File::from(
@@ -302,6 +354,7 @@ mod tests {
         let slave = OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
             .open(std::ffi::OsStr::from_bytes(name.to_bytes()))
             .context("synthetic slave open")?;
         rustix::fs::fcntl_setfl(
