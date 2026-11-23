@@ -1074,6 +1074,120 @@ fn source_sessions_prepare_then_run_each_step_in_order() -> Result<()> {
     Ok(())
 }
 
+/// Runs a candidate session against a fake host whose lookups find what
+/// `found` names and in which the step `failing` fails. Returns the session's
+/// result and its effects in order.
+fn candidate_session(
+    session: &str,
+    found: &[&str],
+    failing: &str,
+) -> Result<(Result<Value>, Vec<String>)> {
+    assert!(
+        automation::SOURCES
+            .iter()
+            .any(|(name, _)| *name == "ops/InstanceCandidate.roc")
+    );
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &[session, "/private/candidate/request.json"],
+        |request| {
+            let input: Value = request.decode()?;
+            let step = match request.action.as_str() {
+                "instance-candidate-prepare" => {
+                    assert_eq!(input, json!({"request": "/private/candidate/request.json"}));
+                    "prepare".to_owned()
+                }
+                "instance-candidate-step" => input["name"].as_str().unwrap().to_owned(),
+                _ => panic!("unexpected candidate effect: {}", request.action),
+            };
+            effects.push(step.clone());
+            if step == failing {
+                bail!("retryable: source_temporarily_unavailable");
+            }
+            if step == "stored" || step == "cached" {
+                return Ok(json!({ "found": found.contains(&step.as_str()) }));
+            }
+            Ok(json!({ "step": step }))
+        },
+    );
+    Ok((result, effects))
+}
+
+#[test]
+fn candidate_sessions_prepare_then_run_each_step_in_order() -> Result<()> {
+    let built = [
+        "prepare", "stored", "archive", "inputs", "controls", "cached", "run", "job", "artifact",
+        "download", "attempt", "release", "stage", "native", "collect", "record",
+    ];
+    for (session, found, steps) in [
+        ("instance-candidate-build-session", vec![], built.to_vec()),
+        (
+            "instance-candidate-build-session",
+            vec!["stored"],
+            vec!["prepare", "stored", "record"],
+        ),
+        (
+            "instance-candidate-build-session",
+            vec!["cached"],
+            vec![
+                "prepare", "stored", "archive", "inputs", "controls", "cached", "reuse", "record",
+            ],
+        ),
+        (
+            "instance-candidate-preflight-session",
+            vec![],
+            vec!["prepare", "validate", "stage", "probe"],
+        ),
+        (
+            "instance-candidate-check-session",
+            vec![],
+            vec!["prepare", "validate"],
+        ),
+        (
+            "instance-candidate-native-build-session",
+            vec![],
+            vec![
+                "prepare", "request", "slot", "inputs", "artifact", "tooling", "protocol",
+                "security", "package", "push", "result",
+            ],
+        ),
+        (
+            "instance-candidate-native-probe-session",
+            vec![],
+            vec!["prepare", "request", "probe"],
+        ),
+    ] {
+        let (result, effects) = candidate_session(session, &found, "")?;
+        assert_eq!(result?, json!({"step": steps.last().unwrap()}), "{session}");
+        assert_eq!(effects, steps, "{session}");
+    }
+    // A failed step stops the session, and its error reaches the host verbatim:
+    // a refused CI-control check never reaches the cached lookup or the build host.
+    let (result, effects) = candidate_session("instance-candidate-build-session", &[], "controls")?;
+    assert_eq!(
+        format!("{:#}", result.unwrap_err()),
+        "retryable: source_temporarily_unavailable"
+    );
+    assert_eq!(
+        effects,
+        ["prepare", "stored", "archive", "inputs", "controls"]
+    );
+    let (result, effects) = candidate_session("instance-candidate-build-session", &[], "native")?;
+    assert!(result.is_err());
+    assert_eq!(effects.last().unwrap(), "native");
+    for mode in crate::instance_candidate::Mode::ALL {
+        let session = format!("instance-candidate-{}", mode.name());
+        let result = automation::run(
+            &automation::runner()?,
+            &["platform", &session, "/private/candidate/request.json"],
+            |request| panic!("unexpected effect: {}", request.action),
+        );
+        assert!(result.is_err(), "{session}");
+    }
+    Ok(())
+}
+
 #[test]
 fn centralized_ci_runs_the_shared_roc_campaign_before_publishing_evidence() -> Result<()> {
     let mut finished = false;

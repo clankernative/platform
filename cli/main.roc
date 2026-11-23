@@ -17,6 +17,7 @@ import InstanceSpec
 import InstanceRender
 import InstanceRelease
 import InstanceSource
+import InstanceCandidate
 import Names
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
@@ -72,6 +73,7 @@ main! = |args| {
 		Cli.Request.Roots(roots) => ran!(roots)
 		Cli.Request.Release(release) => released!(release)
 		Cli.Request.Source(source) => sourced!(source)
+		Cli.Request.Candidate(candidate) => candidated!(candidate)
 	}
 	emit!(Output.new(outcome))
 }
@@ -184,6 +186,44 @@ sourced! = |source| {
 		}
 		Err(CallbackErr(error)) => failed(InstanceSource.problem(error))
 		Err(_) => failed(Problem.SourceFailed("cannot use a private temporary directory"))
+	}
+}
+
+## Validate the spec (except on the build host, whose commands read only their job directory) and derive the instance
+## names here, then run the candidate command through the platform host, which checks the request again. A retryable
+## forge read exits 7; any other refusal exits 6.
+candidated! : Cli.CandidateRequest => Output.Outcome
+candidated! = |candidate| {
+	parts = candidate.parts()
+	verb = parts.action.verb()
+	failed = |problem| Output.Outcome.Failed(problem, parts.format, candidate.command())
+	none : Try(Names.LocalPath, [Null])
+	none = Err(Null)
+	unread : Try(InstanceSpec, [Null])
+	unread = Err(Null)
+	(path, spec) = match parts.action.directory() {
+		Ok(directory) => match InstanceSpec.load!(directory) {
+			Ok((loaded, checked)) => (Ok(loaded), Ok(checked))
+			Err(problem) => return failed(problem)
+		}
+		Err(Null) => (none, unread)
+	}
+	request = InstanceCandidate.request(spec, parts.action)
+	# The request travels as a private temporary file, as source requests do.
+	ran = Env.with_temp_dir!(
+		|directory| {
+			file = Path.join(directory, "request.json")
+			Path.write_utf8!(file, request).map_err(|_| "cannot write the candidate ${verb} request")?
+			Host.instance_candidate!(verb, Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+		},
+	)
+	match ran {
+		Ok(raw) => match InstanceCandidate.receipt(raw, parts.action) {
+			Ok(report) => Output.Outcome.Candidated(candidate, path, report)
+			Err(_) => failed(Problem.CandidateFailed("the platform host returned an unreadable receipt"))
+		}
+		Err(CallbackErr(error)) => failed(InstanceCandidate.problem(error))
+		Err(_) => failed(Problem.CandidateFailed("cannot use a private temporary directory"))
 	}
 }
 

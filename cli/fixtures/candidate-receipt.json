@@ -1,0 +1,24 @@
+{
+  "format": 1,
+  "mode": "build",
+  "app_id": "links",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "outcome": "built",
+  "candidate": {
+    "path": "/work/candidate.json",
+    "digest": "sha256:ca8dd8e81246542c378e15e4fc99b1b6026be2a62ae09acab22954fb9bf30891",
+    "bytes": 2837
+  },
+  "record": "gs://exampleco-tools-tofu-state/day2/app-releases/links/candidates/f536a9a54a17b0e29a9075fb2d9e5da0157ba36627909e758e8f47d943dd798a/0123456789abcdef0123456789abcdef01234567.json",
+  "build_log": "gs://exampleco-tools-tofu-state/day2/app-releases/links/builds/f536a9a54a17b0e29a9075fb2d9e5da0157ba36627909e758e8f47d943dd798a/0123456789abcdef0123456789abcdef01234567.log",
+  "image": "us-central1-docker.pkg.dev/exampleco-tools/links/links@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "artifact_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "tooling_image": null,
+  "transfer": {
+    "bytes": 6799,
+    "milliseconds": 0
+  },
+  "slot": null,
+  "result": null,
+  "log": null
+}

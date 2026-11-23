@@ -5,6 +5,7 @@ package(default_visibility = ["//visibility:public"])
 COMPILE_INPUTS = [
     "//:cli/fixtures/release-receipt.json",
     "//:cli/fixtures/source-receipt.json",
+    "//:cli/fixtures/candidate-receipt.json",
     "//:cli/InstanceRender.roc",
     "//:cli/InstanceSpec.roc",
     "//:cli/JsonValue.roc",

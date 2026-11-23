@@ -19,6 +19,7 @@ cd ..
 ./cli/day2 instance apply ../my-instance ../platform-at-pin /tmp/my-instance-plan /tmp/my-instance-apply
 ./cli/day2 instance release fetch ../my-instance sha256:<manifest digest> <manifest bytes>
 ./cli/day2 instance source controls /tmp/app-source.tar.gz
+./cli/day2 instance candidate check ../my-instance links /tmp/candidate.json
 ./cli/day2 platform --help
 ./cli/day2 platform check examples/reports 42 16
 ./cli/day2 platform local-dev examples/reports

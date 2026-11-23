@@ -2,35 +2,35 @@ use super::*;
 use day2::sdk_release::{Evidence, Image, PROFILE, TARGET};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
-const SERVER: &str = "https://git.example.com";
-const PREFIX: &str = "https://git.example.com/api/v1/repos/tools/links-app";
-const REGISTRY: &str = "us-central1-docker.pkg.dev/exampleco-tools";
-const BUCKET: &str = "exampleco-tools-tofu-state";
-const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-const PLATFORM: &str = "fedcba9876543210fedcba9876543210fedcba98";
-const UPLOAD: u64 = (1 << 63) - 1;
-const TOKEN: &str = "synthetic-forge-token";
+pub(crate) const SERVER: &str = "https://git.example.com";
+pub(crate) const PREFIX: &str = "https://git.example.com/api/v1/repos/tools/links-app";
+pub(crate) const REGISTRY: &str = "us-central1-docker.pkg.dev/exampleco-tools";
+pub(crate) const BUCKET: &str = "exampleco-tools-tofu-state";
+pub(crate) const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+pub(crate) const PLATFORM: &str = "fedcba9876543210fedcba9876543210fedcba98";
+pub(crate) const UPLOAD: u64 = (1 << 63) - 1;
+pub(crate) const TOKEN: &str = "synthetic-forge-token";
 const GOLDEN_RECEIPT: &str = include_str!("../../../../cli/fixtures/source-receipt.json");
 
-fn inputs() -> String {
+pub(crate) fn inputs() -> String {
     format!("sha256:{}", "ab".repeat(32))
 }
 
 /// A fake forge, gcloud and clock in one world.
 #[derive(Default)]
-struct World {
+pub(crate) struct World {
     /// Responses per URL; the last one repeats.
-    routes: BTreeMap<String, VecDeque<Option<Response>>>,
+    pub(crate) routes: BTreeMap<String, VecDeque<Option<Response>>>,
     /// Each request's URL and whether it carried the token.
-    calls: Vec<(String, bool)>,
-    objects: BTreeMap<String, Vec<u8>>,
-    now: Duration,
-    sleeps: Vec<Duration>,
-    announced: Vec<String>,
+    pub(crate) calls: Vec<(String, bool)>,
+    pub(crate) objects: BTreeMap<String, Vec<u8>>,
+    pub(crate) now: Duration,
+    pub(crate) sleeps: Vec<Duration>,
+    pub(crate) announced: Vec<String>,
 }
 
 #[derive(Clone, Default)]
-struct Fake(Rc<RefCell<World>>);
+pub(crate) struct Fake(pub(crate) Rc<RefCell<World>>);
 
 fn clone_response(response: &Response) -> Response {
     Response {
@@ -42,14 +42,14 @@ fn clone_response(response: &Response) -> Response {
 
 impl Fake {
     /// Serve `responses` for `url` in order; `None` is a connection failure.
-    fn route(&self, url: &str, responses: Vec<Option<Response>>) {
+    pub(crate) fn route(&self, url: &str, responses: Vec<Option<Response>>) {
         self.0
             .borrow_mut()
             .routes
             .insert(url.to_owned(), responses.into());
     }
 
-    fn calls(&self) -> Vec<(String, bool)> {
+    pub(crate) fn calls(&self) -> Vec<(String, bool)> {
         self.0.borrow().calls.clone()
     }
 }
@@ -118,11 +118,11 @@ impl instance_release::Tools for Fake {
     }
 }
 
-fn ok(value: Value) -> Option<Response> {
+pub(crate) fn ok(value: Value) -> Option<Response> {
     bytes(value.to_string().into_bytes())
 }
 
-fn bytes(body: Vec<u8>) -> Option<Response> {
+pub(crate) fn bytes(body: Vec<u8>) -> Option<Response> {
     Some(Response {
         status: 200,
         location: None,
@@ -130,7 +130,7 @@ fn bytes(body: Vec<u8>) -> Option<Response> {
     })
 }
 
-fn status(code: u16) -> Option<Response> {
+pub(crate) fn status(code: u16) -> Option<Response> {
     Some(Response {
         status: code,
         location: None,
@@ -147,7 +147,7 @@ fn redirect(location: &str) -> Option<Response> {
 }
 
 /// A synthetic qualified release pinned under the instance's registry.
-fn manifest() -> Vec<u8> {
+pub(crate) fn manifest() -> Vec<u8> {
     let digest = |label: &str| day2::digest(label.as_bytes());
     let blob = |label: &str| BlobIdentity::of(label.as_bytes());
     Release {
@@ -175,7 +175,7 @@ fn manifest() -> Vec<u8> {
 }
 
 /// One tar entry with a raw name, written exactly as given.
-fn entry(builder: &mut tar::Builder<Vec<u8>>, name: &[u8], kind: u8, data: &[u8]) {
+pub(crate) fn entry(builder: &mut tar::Builder<Vec<u8>>, name: &[u8], kind: u8, data: &[u8]) {
     let mut header = tar::Header::new_ustar();
     header.set_entry_type(tar::EntryType::new(kind));
     header.set_size(data.len() as u64);
@@ -186,7 +186,7 @@ fn entry(builder: &mut tar::Builder<Vec<u8>>, name: &[u8], kind: u8, data: &[u8]
 }
 
 /// A pax record, `<length> <key>=<value>\n`.
-fn pax(key: &str, value: &[u8]) -> Vec<u8> {
+pub(crate) fn pax(key: &str, value: &[u8]) -> Vec<u8> {
     let body = [format!(" {key}=").as_bytes(), value, b"\n"].concat();
     let mut length = body.len() + 1;
     while length.to_string().len() + body.len() != length {
@@ -197,7 +197,7 @@ fn pax(key: &str, value: &[u8]) -> Vec<u8> {
 
 /// A gzip tar, as git archive writes one: a pax global comment, then the
 /// entries. A name in `long` is written through a pax path record.
-fn tarball(entries: &[(&[u8], u8, &[u8])], global: &[u8]) -> Vec<u8> {
+pub(crate) fn tarball(entries: &[(&[u8], u8, &[u8])], global: &[u8]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     entry(&mut builder, b"pax_global_header", b'g', global);
     for (name, kind, data) in entries {
@@ -214,11 +214,11 @@ fn tarball(entries: &[(&[u8], u8, &[u8])], global: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-fn comment() -> Vec<u8> {
+pub(crate) fn comment() -> Vec<u8> {
     pax("comment", COMMIT.as_bytes())
 }
 
-fn roc_json(platform: &str) -> Vec<u8> {
+pub(crate) fn roc_json(platform: &str) -> Vec<u8> {
     json!({"schemaVersion": 1, "platformRevision": platform, "appRoot": "app",
         "campaign": {"seed": 42, "cases": 4}, "unitTests": ["tests/Unit.roc"], "testSources": []})
     .to_string()
@@ -226,36 +226,41 @@ fn roc_json(platform: &str) -> Vec<u8> {
 }
 
 /// The app's source archive at COMMIT, with the given `.ci/roc.json`.
-fn source(roc: &[u8]) -> Vec<u8> {
-    let release = manifest();
-    tarball(
-        &[
-            (b"links-app/", b'5', b""),
-            (b"links-app/.ci/roc.json", b'0', roc),
-            (b"links-app/.ci/platform-release.json", b'0', &release),
-            (
-                b"links-app/.ci/publish_artifact.py",
-                b'0',
-                b"# synthetic publisher\n",
-            ),
-            (
-                b"links-app/.ci/sdk_release.py",
-                b'0',
-                b"# synthetic selector\n",
-            ),
-            (b"links-app/.ci/README.md", b'0', b"prose\n"),
-            (
-                b"links-app/.gitea/workflows/roc.yml",
-                b'0',
-                b"name: synthetic\n",
-            ),
-            (b"links-app/app/main.roc", b'0', b"app [main!] {}\n"),
-        ],
-        &comment(),
-    )
+pub(crate) fn source(roc: &[u8]) -> Vec<u8> {
+    source_with(roc, &[])
 }
 
-fn instance(sdk: &str) -> Instance {
+/// The app's source archive at COMMIT, with the given `.ci/roc.json` and
+/// `extra` entries after its own.
+pub(crate) fn source_with(roc: &[u8], extra: &[(&[u8], u8, &[u8])]) -> Vec<u8> {
+    let release = manifest();
+    let own: [(&[u8], u8, &[u8]); 8] = [
+        (b"links-app/", b'5', b""),
+        (b"links-app/.ci/roc.json", b'0', roc),
+        (b"links-app/.ci/platform-release.json", b'0', &release),
+        (
+            b"links-app/.ci/publish_artifact.py",
+            b'0',
+            b"# synthetic publisher\n",
+        ),
+        (
+            b"links-app/.ci/sdk_release.py",
+            b'0',
+            b"# synthetic selector\n",
+        ),
+        (b"links-app/.ci/README.md", b'0', b"prose\n"),
+        (
+            b"links-app/.gitea/workflows/roc.yml",
+            b'0',
+            b"name: synthetic\n",
+        ),
+        (b"links-app/app/main.roc", b'0', b"app [main!] {}\n"),
+    ];
+    let entries: Vec<(&[u8], u8, &[u8])> = own.into_iter().chain(extra.iter().copied()).collect();
+    tarball(&entries, &comment())
+}
+
+pub(crate) fn instance(sdk: &str) -> Instance {
     Instance {
         server: SERVER.into(),
         org: "tools".into(),
@@ -278,7 +283,7 @@ fn instance(sdk: &str) -> Instance {
 
 /// The binding deploy.py would build for the synthetic app, whose repository
 /// name is not the derived `tools/links`.
-fn binding(controls: &str) -> Value {
+pub(crate) fn binding(controls: &str) -> Value {
     let release = BlobIdentity::of(&manifest());
     json!({
         "app": "links",
@@ -295,21 +300,21 @@ fn binding(controls: &str) -> Value {
     })
 }
 
-fn controls_digest() -> String {
+pub(crate) fn controls_digest() -> String {
     Controls::read(&source(&roc_json(PLATFORM)))
         .unwrap()
         .digest()
 }
 
-struct Scenario {
-    fake: Fake,
-    directory: tempfile::TempDir,
-    binding: Value,
-    sdk: String,
+pub(crate) struct Scenario {
+    pub(crate) fake: Fake,
+    pub(crate) directory: tempfile::TempDir,
+    pub(crate) binding: Value,
+    pub(crate) sdk: String,
 }
 
 impl Scenario {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let fake = Fake::default();
         let release = manifest();
         let reference = BlobIdentity::of(&release);
@@ -329,11 +334,11 @@ impl Scenario {
         }
     }
 
-    fn path(&self, name: &str) -> PathBuf {
+    pub(crate) fn path(&self, name: &str) -> PathBuf {
         self.directory.path().join(name)
     }
 
-    fn effects(&self) -> Effects {
+    pub(crate) fn effects(&self) -> Effects {
         Effects {
             transport: Box::new(self.fake.clone()),
             clock: Box::new(self.fake.clone()),
@@ -464,9 +469,28 @@ fn the_binding_is_validated_as_python_did_then_against_day2_json() -> Result<()>
         &|value| value["extra"] = json!(1),
         "invalid candidate build binding",
     );
+    // The earlier controller's shapes without a checked main artifact, or also
+    // without a qualified SDK, compiled on the build host: not supported.
+    let unported = "builds without a qualified SDK release and a checked main artifact are not \
+                    supported: the binding must name qualified_release, verification and ci_artifact";
     refused(
         &|value| {
             value.as_object_mut().unwrap().remove("ci_artifact");
+        },
+        unported,
+    );
+    refused(
+        &|value| {
+            let object = value.as_object_mut().unwrap();
+            for field in ["ci_artifact", "verification", "qualified_release"] {
+                object.remove(field);
+            }
+        },
+        unported,
+    );
+    refused(
+        &|value| {
+            value.as_object_mut().unwrap().remove("verification");
         },
         "invalid candidate build binding",
     );
@@ -1124,12 +1148,12 @@ fn verify_controls_checks_the_approved_digest_before_reading_the_bucket() -> Res
 }
 
 /// The bytes of the checked app archive, and the ZIP Gitea serves them in.
-fn artifact() -> Vec<u8> {
+pub(crate) fn artifact() -> Vec<u8> {
     b"synthetic checked app archive".repeat(100)
 }
 
 #[derive(Clone, Copy)]
-struct Zip<'a> {
+pub(crate) struct Zip<'a> {
     name: &'a [u8],
     method: u16,
     flags: u16,
@@ -1139,7 +1163,7 @@ struct Zip<'a> {
     entries: u16,
 }
 
-const ZIP: Zip<'static> = Zip {
+pub(crate) const ZIP: Zip<'static> = Zip {
     name: b"app.tar.gz",
     method: 0,
     flags: 0x8,
@@ -1152,7 +1176,7 @@ const ZIP: Zip<'static> = Zip {
 /// A ZIP laid out as the upload transport writes one: a streamed entry whose
 /// local header has no CRC or sizes, a signed data descriptor, one central
 /// header and the end record.
-fn zip(data: &[u8], shape: Zip<'_>) -> Vec<u8> {
+pub(crate) fn zip(data: &[u8], shape: Zip<'_>) -> Vec<u8> {
     let mut checksum = flate2::Crc::new();
     checksum.update(data);
     let crc = shape.crc.unwrap_or(checksum.sum());
@@ -1427,7 +1451,7 @@ fn urlsplit_splits_as_python_does() {
 }
 
 /// The job receipt the synthetic main run's log carries.
-fn job_receipt(sdk: &BlobIdentity) -> Value {
+pub(crate) fn job_receipt(sdk: &BlobIdentity) -> Value {
     let archive = BlobIdentity::of(&artifact());
     json!({"version": 1, "repository": "tools/links-app", "source_commit": COMMIT,
         "source_inputs": inputs(), "artifact_id": "cd".repeat(32),
@@ -1438,14 +1462,14 @@ fn job_receipt(sdk: &BlobIdentity) -> Value {
         "examples": 12, "generated": 40, "upload_id": UPLOAD})
 }
 
-fn run_json(id: u64, attempt: u64, status: &str, conclusion: &str) -> Value {
+pub(crate) fn run_json(id: u64, attempt: u64, status: &str, conclusion: &str) -> Value {
     json!({"id": id, "head_sha": COMMIT, "event": "push", "path": "roc.yml@refs/heads/main",
         "workflow_repository_id": 42, "repository": {"id": 42, "full_name": "tools/links-app"},
         "workflow_commit_sha": COMMIT, "head_branch": "main", "run_attempt": attempt,
         "status": status, "conclusion": conclusion})
 }
 
-fn log(receipts: &[&Value]) -> Vec<u8> {
+pub(crate) fn log(receipts: &[&Value]) -> Vec<u8> {
     let mut log = String::from("2026-11-21T05:00:00.0000000Z Checking app\n");
     for receipt in receipts {
         log.push_str(&format!(
@@ -1456,20 +1480,24 @@ fn log(receipts: &[&Value]) -> Vec<u8> {
     log.into_bytes()
 }
 
-struct Main {
-    runs: String,
-    jobs: String,
-    logs: String,
-    metadata: String,
-    zip: String,
-    raw: String,
-    run: String,
+pub(crate) struct Main {
+    pub(crate) runs: String,
+    pub(crate) jobs: String,
+    pub(crate) logs: String,
+    pub(crate) metadata: String,
+    pub(crate) zip: String,
+    pub(crate) raw: String,
+    pub(crate) run: String,
 }
 
 /// Route a successful main run, job, upload and download for COMMIT.
-fn route_main(scenario: &Scenario) -> Main {
+pub(crate) fn route_main(scenario: &Scenario) -> Main {
     let sdk = BlobIdentity::of(&manifest());
-    let receipt = job_receipt(&sdk);
+    route_main_with(&scenario.fake, &job_receipt(&sdk), &artifact())
+}
+
+/// As route_main, for a job log carrying `receipt` and an upload of `data`.
+pub(crate) fn route_main_with(fake: &Fake, receipt: &Value, data: &[u8]) -> Main {
     let main = Main {
         runs: format!("{PREFIX}/actions/workflows/roc.yml/runs?branch=main&limit=50"),
         jobs: format!("{PREFIX}/actions/runs/7/jobs"),
@@ -1483,7 +1511,6 @@ fn route_main(scenario: &Scenario) -> Main {
     older["event"] = json!("pull_request");
     let mut other = run_json(9, 1, "completed", "success");
     other["head_sha"] = json!("f".repeat(40));
-    let fake = &scenario.fake;
     fake.route(
         &main.runs,
         vec![ok(json!({"total_count": 3, "workflow_runs": [other, run_json(7, 1, "completed", "success"), older]}))],
@@ -1493,8 +1520,8 @@ fn route_main(scenario: &Scenario) -> Main {
     let scope = json!({"id": 30, "name": "scope", "run_id": 7, "head_sha": COMMIT, "run_attempt": 1,
         "status": "completed", "conclusion": "success"});
     fake.route(&main.jobs, vec![ok(json!({"jobs": [scope, job]}))]);
-    fake.route(&main.logs, vec![bytes(log(&[&receipt]))]);
-    let raw = zip(&artifact(), ZIP);
+    fake.route(&main.logs, vec![bytes(log(&[receipt]))]);
+    let raw = zip(data, ZIP);
     fake.route(
         &main.metadata,
         vec![ok(json!({"id": UPLOAD, "name": receipt["artifact_name"], "expired": false,
@@ -1541,11 +1568,11 @@ fn checked_artifact_returns_pythons_proof_and_writes_the_archive_last() -> Resul
         ]
     );
     let binding = Binding::check(scenario.binding.clone(), &instance(&scenario.sdk))?;
-    proof(&receipt["proof"], &binding, COMMIT, &inputs())?;
+    proof(&receipt["proof"], &binding.value, COMMIT, &inputs())?;
     assert!(
         proof(
             &receipt["proof"],
-            &binding,
+            &binding.value,
             COMMIT,
             &format!("sha256:{}", "00".repeat(32))
         )

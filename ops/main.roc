@@ -5,6 +5,7 @@ package
 		InstanceRoots,
 		InstanceRelease,
 		InstanceSource,
+		InstanceCandidate,
 		Build,
 		Delegation,
 		Check,

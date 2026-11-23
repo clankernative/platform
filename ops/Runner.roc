@@ -11,6 +11,7 @@ import ops.LocalDev
 import ops.InstanceRoots
 import ops.InstanceRelease
 import ops.InstanceSource
+import ops.InstanceCandidate
 import ops.Build
 import ops.Delegation
 import ops.Check
@@ -70,6 +71,12 @@ run! = |args| match args {
 	["instance-source-controls-session", request] => InstanceSource.controls!(request, call!)
 	["instance-source-verify-controls-session", request] => InstanceSource.verify_controls!(request, call!)
 	["instance-source-checked-artifact-session", request] => InstanceSource.checked_artifact!(request, call!)
+	# Only the host starts these, for `day2 instance candidate`; they have no `platform` entry.
+	["instance-candidate-build-session", request] => InstanceCandidate.build!(request, call!)
+	["instance-candidate-preflight-session", request] => InstanceCandidate.preflight!(request, call!)
+	["instance-candidate-check-session", request] => InstanceCandidate.check!(request, call!)
+	["instance-candidate-native-build-session", request] => InstanceCandidate.native_build!(request, call!)
+	["instance-candidate-native-probe-session", request] => InstanceCandidate.native_probe!(request, call!)
 	["build-recipe"] => Build.recipe!(call!)
 	["build-delegation"] => Delegation.build!(call!)
 	["build-delegation-business"] => Delegation.business!(call!)

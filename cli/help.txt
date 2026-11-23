@@ -17,6 +17,12 @@ USAGE
   day2 instance source verify-controls <directory> <binding> <archive> [--agent]
   day2 instance source checked-artifact <directory> <binding> <commit>
                        <sha256:inputs> <new archive> [--agent]
+  day2 instance candidate build <directory> <binding> <commit>
+                       <new candidate> [--agent]
+  day2 instance candidate preflight <directory> <candidate> [--agent]
+  day2 instance candidate check <directory> <app> <candidate> [--agent]
+  day2 instance candidate native-build <job directory> [--agent]
+  day2 instance candidate native-probe <job directory> [--agent]
   day2 platform --help
 
 PLATFORM OPERATIONS
@@ -105,6 +111,25 @@ COMMANDS
                   They exit 6 when they refuse and 7 when a read failed
                   transiently: a 408, 429 or 5xx, a dropped connection, a
                   short body or a timeout.
+  instance candidate build
+                  The candidate for <binding> and <commit>: the stored
+                  candidate record, else the checked-inputs record for the
+                  same app inputs once the archive's CI controls verify,
+                  else a native build of the commit's checked main artifact
+                  on the build host. Records are created only while absent.
+                  The record's bytes are written to <new candidate>.
+  instance candidate preflight
+                  Validate <candidate>, then prove on the build host that
+                  its tooling image carries the maintenance protocol.
+  instance candidate check
+                  Validate <candidate> for <app> as the deploy controller
+                  validates candidates. Reads no network.
+  instance candidate native-build, native-probe
+                  On the build host, as root: the job directory's request
+                  and files, checked by identity, then the native build or
+                  the protocol probe. Run by build and preflight over IAP.
+                  Candidate commands exit 6 when they refuse and 7 only
+                  when a forge read failed transiently.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
@@ -141,9 +166,9 @@ FOR AGENTS
   Help/version JSON lists implemented_commands and explicit capability flags.
   Exit codes: 0 success/help; 2 usage; 3 context/read failure; 4 not found;
               5 invalid or unsupported metadata; 6 an instance root, a
-              release or a source command failed, or the platform host
-              could not run; 7 a source read failed transiently
-              (retryable); 1 output failure.
+              release, a source or a candidate command failed, or the
+              platform host could not run; 7 a source read failed
+              transiently (retryable); 1 output failure.
 
 PROTOTYPE SCOPE
   Local source distribution. Current artifact discovery uses shared runtime

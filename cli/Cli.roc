@@ -19,6 +19,7 @@ Cli :: [].{
 		Roots(Roots),
 		Release(Release),
 		Source(SourceRequest),
+		Candidate(CandidateRequest),
 	]
 
 	## The command a response reports, including failures before a request exists.
@@ -35,6 +36,11 @@ Cli :: [].{
 		InstanceSourceControls,
 		InstanceSourceVerifyControls,
 		InstanceSourceCheckedArtifact,
+		InstanceCandidateBuild,
+		InstanceCandidatePreflight,
+		InstanceCandidateCheck,
+		InstanceCandidateNativeBuild,
+		InstanceCandidateNativeProbe,
 	].{
 		name : Command -> Str
 		name = |command| match command {
@@ -50,6 +56,11 @@ Cli :: [].{
 			InstanceSourceControls => "instance.source.controls"
 			InstanceSourceVerifyControls => "instance.source.verify-controls"
 			InstanceSourceCheckedArtifact => "instance.source.checked-artifact"
+			InstanceCandidateBuild => "instance.candidate.build"
+			InstanceCandidatePreflight => "instance.candidate.preflight"
+			InstanceCandidateCheck => "instance.candidate.check"
+			InstanceCandidateNativeBuild => "instance.candidate.native-build"
+			InstanceCandidateNativeProbe => "instance.candidate.native-probe"
 		}
 	}
 
@@ -231,6 +242,73 @@ Cli :: [].{
 		}
 	}
 
+	## A candidate command and its paths. BINDING is the deploy controller's binding file for the app, COMMIT a full
+	## lowercase commit, CANDIDATE a candidate record file and JOB the build host's private job directory.
+	## - build DIRECTORY BINDING COMMIT NEW_CANDIDATE: the candidate for the binding and commit; its record's bytes are
+	##   written to NEW_CANDIDATE.
+	## - preflight DIRECTORY CANDIDATE: the candidate's tooling maintenance protocol, proven on the build host.
+	## - check DIRECTORY APP CANDIDATE: the candidate record, validated for APP.
+	## - native-build JOB and native-probe JOB: on the build host, as root.
+	CandidateAction := [
+		Build({ directory : Names.LocalPath, binding : Names.LocalPath, commit : Str, output : Names.LocalPath }),
+		Preflight({ directory : Names.LocalPath, candidate : Names.LocalPath }),
+		Check({ directory : Names.LocalPath, app_id : Str, candidate : Names.LocalPath }),
+		NativeBuild(Names.LocalPath),
+		NativeProbe(Names.LocalPath),
+	].{
+		verb : CandidateAction -> Str
+		verb = |action| match action {
+			Build(_) => "build"
+			Preflight(_) => "preflight"
+			Check(_) => "check"
+			NativeBuild(_) => "native-build"
+			NativeProbe(_) => "native-probe"
+		}
+
+		## The instance directory whose day2.json a command validates; the build host's commands read none.
+		directory : CandidateAction -> Try(Names.LocalPath, [Null])
+		directory = |action| match action {
+			Build(paths) => Ok(paths.directory)
+			Preflight(paths) => Ok(paths.directory)
+			Check(paths) => Ok(paths.directory)
+			NativeBuild(_) | NativeProbe(_) => Err(Null)
+		}
+
+		## The command's arguments after its verb.
+		arguments : CandidateAction -> List(Str)
+		arguments = |action| match action {
+			Build(paths) => [paths.directory.to_str(), paths.binding.to_str(), paths.commit, paths.output.to_str()]
+			Preflight(paths) => [paths.directory.to_str(), paths.candidate.to_str()]
+			Check(paths) => [paths.directory.to_str(), paths.app_id, paths.candidate.to_str()]
+			NativeBuild(job) | NativeProbe(job) => [job.to_str()]
+		}
+	}
+
+	CandidateRequest :: { action : CandidateAction, format : Format }.{
+		parts : CandidateRequest -> { action : CandidateAction, format : Format }
+		parts = |request| { action: request.action, format: request.format }
+
+		with_format : CandidateRequest, Format -> CandidateRequest
+		with_format = |request, format| { ..request, format }
+
+		## The command a response reports.
+		command : CandidateRequest -> Command
+		command = |request| match request.action {
+			CandidateAction.Build(_) => Command.InstanceCandidateBuild
+			CandidateAction.Preflight(_) => Command.InstanceCandidatePreflight
+			CandidateAction.Check(_) => Command.InstanceCandidateCheck
+			CandidateAction.NativeBuild(_) => Command.InstanceCandidateNativeBuild
+			CandidateAction.NativeProbe(_) => Command.InstanceCandidateNativeProbe
+		}
+
+		## The same instance, as `check` and `render` read it; the build host's commands have none.
+		instance : CandidateRequest -> Try(Instance, [Null])
+		instance = |request| match request.action.directory() {
+			Ok(directory) => Ok(Instance.{ directory, format: request.format })
+			Err(Null) => Err(Null)
+		}
+	}
+
 	## The scanner's optional fields and positionals never escape parsing.
 	Describe :: { app_name : Names.App, source : Source, filter : Filter, format : Format }.{
 		parts : Describe -> { app_name : Names.App, source : Source, filter : Filter, format : Format }
@@ -300,6 +378,7 @@ Cli :: [].{
 					["instance", "plan", ..] | ["instance", "apply", ..] => Ok(Request.Help(raw.format))
 					["instance", "release", ..] => Ok(Request.Help(raw.format))
 					["instance", "source", ..] => Ok(Request.Help(raw.format))
+					["instance", "candidate", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 						Ok(Request.Help(raw.format))
@@ -407,6 +486,61 @@ Cli :: [].{
 					})
 					Ok(Request.Source(source_request(action, raw)?))
 				}
+				["instance", "candidate"]
+				| ["instance", "candidate", "build"]
+				| ["instance", "candidate", "build", _]
+				| ["instance", "candidate", "build", _, _]
+				| ["instance", "candidate", "build", _, _, _]
+				| ["instance", "candidate", "preflight"]
+				| ["instance", "candidate", "preflight", _]
+				| ["instance", "candidate", "check"]
+				| ["instance", "candidate", "check", _]
+				| ["instance", "candidate", "check", _, _]
+				| ["instance", "candidate", "native-build"]
+				| ["instance", "candidate", "native-probe"] => Err(Problem.MissingArgument)
+				["instance", "candidate", "build", directory, binding, revision, output] => {
+					path = |value, role| candidate_path("build", value, role)
+					action = CandidateAction.Build({
+						directory: path(directory, "an instance directory")?,
+						binding: path(binding, "a binding file")?,
+						commit: candidate_commit(revision)?,
+						output: path(output, "a new candidate file")?,
+					})
+					Ok(Request.Candidate(candidate_request(action, raw)?))
+				}
+				["instance", "candidate", "preflight", directory, candidate] => {
+					path = |value, role| candidate_path("preflight", value, role)
+					action = CandidateAction.Preflight({
+						directory: path(directory, "an instance directory")?,
+						candidate: path(candidate, "a candidate file")?,
+					})
+					Ok(Request.Candidate(candidate_request(action, raw)?))
+				}
+				["instance", "candidate", "check", directory, id, candidate] => {
+					path = |value, role| candidate_path("check", value, role)
+					action = CandidateAction.Check({
+						directory: path(directory, "an instance directory")?,
+						app_id: candidate_app(id)?,
+						candidate: path(candidate, "a candidate file")?,
+					})
+					Ok(Request.Candidate(candidate_request(action, raw)?))
+				}
+				["instance", "candidate", "native-build", job] => Ok(
+					Request.Candidate(
+						candidate_request(
+							CandidateAction.NativeBuild(candidate_path("native-build", job, "a job directory")?),
+							raw,
+						)?,
+					),
+				)
+				["instance", "candidate", "native-probe", job] => Ok(
+					Request.Candidate(
+						candidate_request(
+							CandidateAction.NativeProbe(candidate_path("native-probe", job, "a job directory")?),
+							raw,
+						)?,
+					),
+				)
 				["instance", "check", value] => Ok(Request.Check(instance("check", value, raw)?))
 				["instance", "render", value] => Ok(Request.Render(instance("render", value, raw)?))
 				["app", "describe", name] => {
@@ -448,6 +582,7 @@ Cli :: [].{
 		Request.Roots(value) => value.format
 		Request.Release(value) => value.format
 		Request.Source(value) => value.parts().format
+		Request.Candidate(value) => value.parts().format
 	}
 
 	quote : Str -> Str
@@ -500,6 +635,8 @@ Cli :: [].{
 					},
 				)
 			Request.Source(value) => ["day2", "instance", "source", value.parts().action.verb()]
+				.concat(value.parts().action.arguments())
+			Request.Candidate(value) => ["day2", "instance", "candidate", value.parts().action.verb()]
 				.concat(value.parts().action.arguments())
 		}
 		base.concat(
@@ -640,6 +777,53 @@ source_inputs = |value| {
 	}
 }
 
+candidate_request : Cli.CandidateAction, Raw -> Try(Cli.CandidateRequest, Problem)
+candidate_request = |action, raw| {
+	if has_options(raw) {
+		return Err(Problem.ConflictingOptions("instance candidate ${action.verb()} accepts only --agent or --json."))
+	}
+	Ok(Cli.CandidateRequest.{ action, format: raw.format })
+}
+
+candidate_path : Str, Str, Str -> Try(Names.LocalPath, Problem)
+candidate_path = |verb, value, role|
+	Names.LocalPath.from_str(value)
+		.map_err(|_| Problem.InvalidArguments("instance candidate ${verb} requires ${role} of at most 4096 bytes"))
+
+## A full lowercase commit.
+candidate_commit : Str -> Try(Str, Problem)
+candidate_commit = |value| {
+	bytes = value.to_utf8()
+	if bytes.len() == 40 and lower_hex(bytes) {
+		Ok(value)
+	} else {
+		Err(Problem.InvalidArguments("instance candidate build requires the commit as 40 lowercase hex digits"))
+	}
+}
+
+## A deployment app ID: a lowercase letter, then at most 39 lowercase letters, digits and hyphens.
+candidate_app : Str -> Try(Str, Problem)
+candidate_app = |value| {
+	bytes = value.to_utf8()
+	valid = match bytes {
+		[first, ..] => {
+			first
+				>= 'a'
+				and first
+					<= 'z'
+					and bytes.len()
+						<= 40
+						and bytes.all(|byte| (byte >= 'a' and byte <= 'z') or decimal(byte) or byte == '-')
+		}
+		[] => Bool.False
+	}
+	if valid {
+		Ok(value)
+	} else {
+		Err(Problem.InvalidArguments("instance candidate check requires a deployment app ID"))
+	}
+}
+
 ## The instance verb follows the family, after any flags.
 instance_command : List(Str) -> Cli.Command
 instance_command = |args| match args {
@@ -649,6 +833,7 @@ instance_command = |args| match args {
 	["apply", ..] => Cli.Command.InstanceApply
 	["release", .. as rest] => release_command(rest)
 	["source", .. as rest] => source_command(rest)
+	["candidate", .. as rest] => candidate_command(rest)
 	[arg, .. as rest] if arg.starts_with("-") => instance_command(rest)
 	_ => Cli.Command.InstanceCheck
 }
@@ -672,6 +857,18 @@ source_command = |args| match args {
 	["checked-artifact", ..] => Cli.Command.InstanceSourceCheckedArtifact
 	[arg, .. as rest] if arg.starts_with("-") => source_command(rest)
 	_ => Cli.Command.InstanceSourceHead
+}
+
+## The candidate verb follows `candidate`, after any flags. An incomplete candidate command reports the read-only check.
+candidate_command : List(Str) -> Cli.Command
+candidate_command = |args| match args {
+	["--instance", _, .. as rest] | ["--operation", _, .. as rest] => candidate_command(rest)
+	["build", ..] => Cli.Command.InstanceCandidateBuild
+	["preflight", ..] => Cli.Command.InstanceCandidatePreflight
+	["native-build", ..] => Cli.Command.InstanceCandidateNativeBuild
+	["native-probe", ..] => Cli.Command.InstanceCandidateNativeProbe
+	[arg, .. as rest] if arg.starts_with("-") => candidate_command(rest)
+	_ => Cli.Command.InstanceCandidateCheck
 }
 
 has_options : Raw -> Bool

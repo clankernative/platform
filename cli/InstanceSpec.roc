@@ -108,6 +108,10 @@ InstanceSpec :: {
 		tofu_state_bucket : Str,
 		platform_state_prefixes : { project : Str, cluster : Str, tenancy : Str, app_edge : Str, day2 : Str },
 		cluster : { name : Str, kube_context : Str },
+
+		## The VM that builds app candidates: the qualification runner stack's, in the instance's zone, reached through
+		## IAP as the apply identity.
+		build_host : { name : Str, zone : Str },
 		app_namespace_prefix : Str,
 		apps : List(App),
 	}
@@ -155,6 +159,7 @@ InstanceSpec :: {
 			tofu_state_bucket,
 			platform_state_prefixes,
 			cluster: { name: cluster_name, kube_context: "gke_${spec.project}_${spec.zone}_${cluster_name}" },
+			build_host: { name: build_host_name, zone: spec.zone },
 			app_namespace_prefix,
 			apps: spec
 				.apps
@@ -178,6 +183,10 @@ platform_state_prefixes = {
 ## The one GKE cluster every instance runs.
 cluster_name : Str
 cluster_name = "day2"
+
+## The qualification runner stack's VM, which builds every app candidate.
+build_host_name : Str
+build_host_name = "day2-x86-qualify"
 
 ## Every app namespace is this prefix and the app ID; tenancy's admission policies match on it.
 app_namespace_prefix : Str
@@ -842,5 +851,11 @@ expect {
 
 expect match InstanceSpec.from_json(sample) {
 	Ok(spec) => spec.derived().artifact_registry == "us-central1-docker.pkg.dev/exampleco-tools"
+	Err(_) => Bool.False
+}
+
+# Every candidate is built on the qualification runner's VM, in the instance's zone.
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => spec.derived().build_host == { name: "day2-x86-qualify", zone: "us-central1-a" }
 	Err(_) => Bool.False
 }
