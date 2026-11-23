@@ -31,10 +31,7 @@ struct RootRecordData {
 }
 
 impl RootRecordData {
-    pub(in crate::security_epoch) fn new_data(
-        selected: &EpochStore,
-        binding: RootBindingData,
-    ) -> Result<Self> {
+    fn new_data(selected: &EpochStore, binding: RootBindingData) -> Result<Self> {
         selected.validate()?;
         ensure!(selected.scope == binding.scope, "backup_root_scope_changed");
         let EpochProvider::FirestoreNativeV1 { database_uid, .. } = &selected.provider;
@@ -97,10 +94,7 @@ pub(in crate::security_epoch) struct BirthTurn {
 }
 
 impl BirthTurn {
-    pub(in crate::security_epoch) fn new_data(
-        selected: &EpochStore,
-        binding: RootBindingData,
-    ) -> Result<Self> {
+    pub(super) fn new_data(selected: &EpochStore, binding: RootBindingData) -> Result<Self> {
         Ok(Self {
             name: document_data(selected, &binding)?,
             record: RootRecordData::new_data(selected, binding)?,

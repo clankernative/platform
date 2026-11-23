@@ -314,10 +314,10 @@ mod tests {
                     continue;
                 }
                 for member in item.items {
-                    if let syn::ImplItem::Fn(f) = member {
-                        if f.sig.ident == name {
-                            found.push(f.block.to_token_stream().to_string());
-                        }
+                    if let syn::ImplItem::Fn(f) = member
+                        && f.sig.ident == name
+                    {
+                        found.push(f.block.to_token_stream().to_string());
                     }
                 }
             }
@@ -485,10 +485,10 @@ mod writer_tests {
         for item in file.items {
             if let syn::Item::Impl(item) = item {
                 for member in item.items {
-                    if let syn::ImplItem::Fn(f) = member {
-                        if f.sig.ident == "create_scheduled_backup_root" {
-                            methods.push(f);
-                        }
+                    if let syn::ImplItem::Fn(f) = member
+                        && f.sig.ident == "create_scheduled_backup_root"
+                    {
+                        methods.push(f);
                     }
                 }
             }
@@ -521,11 +521,11 @@ mod writer_tests {
         for item in &parsed.items {
             if let syn::Item::Impl(item) = item {
                 for member in &item.items {
-                    if let syn::ImplItem::Fn(f) = member {
-                        if f.sig.ident == "create_scheduled_backup_root" {
-                            assert!(selected.is_none());
-                            selected = Some(f.to_token_stream().to_string());
-                        }
+                    if let syn::ImplItem::Fn(f) = member
+                        && f.sig.ident == "create_scheduled_backup_root"
+                    {
+                        assert!(selected.is_none());
+                        selected = Some(f.to_token_stream().to_string());
                     }
                 }
             }

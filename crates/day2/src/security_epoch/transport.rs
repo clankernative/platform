@@ -559,11 +559,11 @@ mod tests {
                 }
                 syn::Item::Impl(i) if i.self_ty.to_token_stream().to_string() == "NativeHttp" => {
                     for member in i.items {
-                        if let syn::ImplItem::Fn(f) = member {
-                            if f.sig.ident == "request_with_ceiling" {
-                                assert!(request.is_none());
-                                request = Some(f.block.to_token_stream().to_string());
-                            }
+                        if let syn::ImplItem::Fn(f) = member
+                            && f.sig.ident == "request_with_ceiling"
+                        {
+                            assert!(request.is_none());
+                            request = Some(f.block.to_token_stream().to_string());
                         }
                     }
                 }
