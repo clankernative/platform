@@ -6,7 +6,7 @@ Source predictions require actual configured-action and hosted qualification.
 
 CARGO_PRODUCTION_CONTEXTS = {
     "linux_aarch64": {
-        "cookie@0.18.2": {
+        "cookie@0.18.3": {
             "target": {
                 "aliases": {},
                 "build_aliases": {},
@@ -685,7 +685,7 @@ CARGO_PRODUCTION_CONTEXTS = {
         }
     },
     "linux_x86_64": {
-        "cookie@0.18.2": {
+        "cookie@0.18.3": {
             "target": {
                 "aliases": {},
                 "build_aliases": {},
@@ -1364,7 +1364,7 @@ CARGO_PRODUCTION_CONTEXTS = {
         }
     },
     "macos_aarch64": {
-        "cookie@0.18.2": {
+        "cookie@0.18.3": {
             "target": {
                 "aliases": {},
                 "build_aliases": {},
