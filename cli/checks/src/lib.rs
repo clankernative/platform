@@ -2513,8 +2513,12 @@ mod tests {
             (command.as_str(), code.as_str()),
             ("instance.candidate.native-build", "candidate_failed")
         );
+        // Off the build host the platform or root check refuses first. On a
+        // linux-x86_64 root runner (CI's container) those pass, and the next
+        // refusal, still before any job file is read, is the missing Docker CLI.
         assert!(
-            message.starts_with("native candidate commands run"),
+            message.starts_with("native candidate commands run")
+                || message == "docker is required on PATH",
             "{message}"
         );
     }
