@@ -210,3 +210,47 @@ fn new_wire_is_closed_comparison_data_without_a_stage_or_clock_constructor() -> 
     assert!(protocol::decode(&vec![b' '; protocol::MAX_PACKET + 1]).is_err());
     Ok(())
 }
+
+#[test]
+fn actual_linux_service_keeps_production_items_before_inline_test_modules() {
+    fn ordered(file: &syn::File) -> bool {
+        let mut test = false;
+        for item in &file.items {
+            let is_test = match item {
+                syn::Item::Mod(m) => {
+                    m.content.is_some()
+                        && m.attrs.iter().any(|a| {
+                            a.path().is_ident("cfg")
+                                && a.meta.to_token_stream().to_string() == "cfg (test)"
+                        })
+                }
+                _ => false,
+            };
+            if is_test {
+                test = true;
+            } else if test {
+                return false;
+            }
+        }
+        true
+    }
+    let mut actual = syn::parse_file(include_str!("service.rs")).unwrap();
+    assert!(ordered(&actual));
+    let mut moved = Vec::new();
+    for name in ["BackupObservationHello", "backup_observe"] {
+        let indices = actual
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| match item {
+                syn::Item::Struct(s) if s.ident == name => Some(i),
+                syn::Item::Fn(f) if f.sig.ident == name => Some(i),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(indices.len(), 1, "actual moved declaration {name}");
+        moved.push(actual.items.remove(indices[0]));
+    }
+    actual.items.extend(moved);
+    assert!(!ordered(&actual));
+}

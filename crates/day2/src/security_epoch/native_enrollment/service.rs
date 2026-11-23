@@ -1927,27 +1927,6 @@ fn restore_app_confirmation(
     Ok(())
 }
 
-#[cfg(test)]
-mod retained_restore_app_tests {
-    use super::RestoreAppAdmission;
-
-    #[test]
-    fn actual_app_admission_is_one_attempt_and_a_clock_repair_cannot_reopen_it() {
-        // State only, no synthetic native Role/Current or MessageProcess.
-        for attempts in 1..=32 {
-            let mut actual = RestoreAppAdmission::Available;
-            let mut expected_fresh = true;
-            for _ in 0..attempts {
-                let accepted = actual.begin().is_ok();
-                assert_eq!(accepted, expected_fresh);
-                expected_fresh = false;
-                // No observation or later request resets the actual state.
-                assert!(matches!(&actual, RestoreAppAdmission::Started));
-            }
-        }
-    }
-}
-
 // Fixed comparison-only purpose; no Job role, CREATE proof or source owner.
 struct BackupObservationHello {
     policy: day2_capabilities::Digest,
@@ -2124,4 +2103,25 @@ fn backup_observe(
         original.refuse();
     }
     requested
+}
+
+#[cfg(test)]
+mod retained_restore_app_tests {
+    use super::RestoreAppAdmission;
+
+    #[test]
+    fn actual_app_admission_is_one_attempt_and_a_clock_repair_cannot_reopen_it() {
+        // State only, no synthetic native Role/Current or MessageProcess.
+        for attempts in 1..=32 {
+            let mut actual = RestoreAppAdmission::Available;
+            let mut expected_fresh = true;
+            for _ in 0..attempts {
+                let accepted = actual.begin().is_ok();
+                assert_eq!(accepted, expected_fresh);
+                expected_fresh = false;
+                // No observation or later request resets the actual state.
+                assert!(matches!(&actual, RestoreAppAdmission::Started));
+            }
+        }
+    }
 }
