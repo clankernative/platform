@@ -125,47 +125,7 @@ impl CreateTurn {
             before == DispositionData::MayHaveBeenSent,
             "backup_attempt_reply_without_send"
         );
-        ensure!(
-            status == 200 && bytes.len() <= MAX_REPLY,
-            "backup_attempt_commit_unknown"
-        );
-        let value: Value = crate::json::decode(bytes)
-            .map_err(|_| anyhow::anyhow!("backup_attempt_commit_encoding"))?;
-        let object = value.as_object().context("backup_attempt_commit_map")?;
-        ensure!(
-            object.len() == 2
-                && object.contains_key("writeResults")
-                && object.contains_key("commitTime"),
-            "backup_attempt_commit_fields"
-        );
-        let results = object
-            .get("writeResults")
-            .and_then(Value::as_array)
-            .context("backup_attempt_commit_results")?;
-        ensure!(results.len() == 1, "backup_attempt_commit_count");
-        let result = results[0]
-            .as_object()
-            .context("backup_attempt_commit_result_map")?;
-        ensure!(
-            result.len() == 1 && result.contains_key("updateTime"),
-            "backup_attempt_commit_result_fields"
-        );
-        let updated: UpdateTime = result
-            .get("updateTime")
-            .and_then(Value::as_str)
-            .context("backup_attempt_commit_time")?
-            .to_owned()
-            .try_into()?;
-        let committed: UpdateTime = object
-            .get("commitTime")
-            .and_then(Value::as_str)
-            .context("backup_attempt_commit_time")?
-            .to_owned()
-            .try_into()?;
-        ensure!(
-            !updated.is_strictly_after_data(&committed)?,
-            "backup_attempt_commit_time_order"
-        );
+        let updated = single_write_ack_data(status, bytes)?;
         self.disposition = DispositionData::Created;
         Ok(updated)
     }
@@ -173,6 +133,53 @@ impl CreateTurn {
     fn lose_result_data(&mut self) {
         self.disposition = DispositionData::Unknown;
     }
+}
+
+/// Strict single-create acknowledgement DATA shared by the two fixed private
+/// namespaces. It creates no request, writer, birth or source permission.
+pub(super) fn single_write_ack_data(status: u16, bytes: &[u8]) -> Result<UpdateTime> {
+    ensure!(
+        status == 200 && bytes.len() <= MAX_REPLY,
+        "backup_attempt_commit_unknown"
+    );
+    let value: Value = crate::json::decode(bytes)
+        .map_err(|_| anyhow::anyhow!("backup_attempt_commit_encoding"))?;
+    let object = value.as_object().context("backup_attempt_commit_map")?;
+    ensure!(
+        object.len() == 2
+            && object.contains_key("writeResults")
+            && object.contains_key("commitTime"),
+        "backup_attempt_commit_fields"
+    );
+    let results = object
+        .get("writeResults")
+        .and_then(Value::as_array)
+        .context("backup_attempt_commit_results")?;
+    ensure!(results.len() == 1, "backup_attempt_commit_count");
+    let result = results[0]
+        .as_object()
+        .context("backup_attempt_commit_result_map")?;
+    ensure!(
+        result.len() == 1 && result.contains_key("updateTime"),
+        "backup_attempt_commit_result_fields"
+    );
+    let updated: UpdateTime = result
+        .get("updateTime")
+        .and_then(Value::as_str)
+        .context("backup_attempt_commit_time")?
+        .to_owned()
+        .try_into()?;
+    let committed: UpdateTime = object
+        .get("commitTime")
+        .and_then(Value::as_str)
+        .context("backup_attempt_commit_time")?
+        .to_owned()
+        .try_into()?;
+    ensure!(
+        !updated.is_strictly_after_data(&committed)?,
+        "backup_attempt_commit_time_order"
+    );
+    Ok(updated)
 }
 
 /// A stored row can only establish that the slot is already spent. It cannot

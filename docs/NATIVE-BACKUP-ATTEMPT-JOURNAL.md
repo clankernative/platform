@@ -66,3 +66,31 @@ generated histories and twice replay with private source-bound failure bundles.
 These do not establish power-loss durability, native original/physical admission,
 cross-container locks, protected Kubernetes CREATE provenance or live provider
 completion. Those remain separate Linux/native F qualification obligations.
+
+
+## External root-binding codec (non-operational)
+
+The separate fixed control-store namespace is
+`day2_scheduled_backup_roots_v1/<scope-and-CronJob-key>`. A root record binds the
+exact canonical header, physical disk and public creator nonce, plus the
+immutable control database UID. The create uses exactly one write with
+`currentDocument.exists=false`. The shared strict single-write acknowledgement
+parser returns comparison time DATA only; it is not native completion or local
+activation. Root and attempt records have different fixed namespaces and purposes.
+
+Existing records must have exact name/fields, canonical payload, expected full
+binding/digest and equal creation/update times. Key rotation does not choose a
+fresh address. A changed disk/creator/header/database incarnation cannot be
+adopted from an existing row. A missing or matching row cannot resume a local
+unknown turn. No reset, delete, update, retry, activation or positive reboot
+constructor is supplied.
+
+A later sealed creator must use the actual fully admitted physical continuity,
+current Controller/lineage/conditional writer and the same ordinary five-second
+original. The warm full-durability refusal remains intact; no bootstrap clock is
+substituted. Pending metadata written before final posts is not positive
+settlement. If a later release proof is added, its secret must be distinct from
+public creator nonces and released only by consuming Known after every creator
+post; it proves neither the receiver's later persistence nor a fresh role/source.
+Positive recovery remains closed pending that complete proof and qualified
+nonrollback history. This codec has no runtime/native accepting caller.
