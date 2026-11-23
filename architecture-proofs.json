@@ -22059,6 +22059,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/storage_authority/persistent_disk.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority.rs",
@@ -22756,6 +22763,13 @@
             "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
             "module": "restore_approval"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
+          }
         }
       ],
       "methods": [
@@ -22818,6 +22832,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
             "module": "restore_approval"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
           }
         }
       ],
@@ -22892,6 +22913,13 @@
             "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
             "module": "restore_approval"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
+          }
         }
       ],
       "methods": [
@@ -22935,6 +22963,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
             "module": "restore_approval"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
           }
         }
       ],
