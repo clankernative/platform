@@ -1332,9 +1332,14 @@ mod tests {
             "wrong rejection: {diagnostic}"
         );
         let rejection = check(fixture.path(), &packages).unwrap_err().to_string();
+        // Either the fresh console warning or the exact declared JSON output
+        // can detect this same real invalid policy first. The declared reader
+        // intentionally returns a fixed category, without foreign message text.
         assert!(
-            rejection.contains("misspelled_now"),
-            "wrong supervised rejection: {rejection}"
+            rejection == "strict compiler diagnostic"
+                || (rejection.starts_with("strict platform Clippy emitted a warning:")
+                    && rejection.contains("misspelled_now")),
+            "wrong supervised refusal category"
         );
         fixture.close()
     }
