@@ -32,7 +32,9 @@ const MAX_RECORDS: usize = 4_096;
 const MAX_LINE: usize = 1_024;
 const MAX_BYTES: usize = 2_097_152;
 
-mod birth;
+pub(in crate::security_epoch) mod birth;
+mod root_files;
+pub(in crate::security_epoch) use root_files::PendingRootFiles;
 
 #[cfg(test)]
 mod tests;

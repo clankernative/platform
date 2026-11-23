@@ -22,6 +22,8 @@ use day2_capabilities::security_epoch::{EpochStore, bootstrap::InitialBootstrapP
 use serde_json::Value;
 use std::{fs::File, io::Read};
 
+mod scheduled_backup;
+pub(in crate::security_epoch) use scheduled_backup::PendingBackupRoot;
 mod authentication_store;
 pub(crate) use authentication_store::AuthenticationStoreFiles;
 mod restore_approval;

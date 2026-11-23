@@ -24,6 +24,37 @@ fn require_ordinary_storage_body(body: &Body) -> Result<()> {
 }
 
 impl EnrolledStorageStage<'_, '_> {
+    /// Selection from THIS checked enrolled Controller, never an incoming DTO.
+    /// This is metadata preparation only, not protected requester provenance.
+    pub(in crate::security_epoch) fn scheduled_backup_root_selection(
+        &mut self,
+    ) -> Result<crate::security_epoch::scheduled_backup::requester::RequesterPolicy> {
+        let requested: Result<crate::security_epoch::scheduled_backup::requester::RequesterPolicy> =
+            (|| {
+                self.stage.require_current_role()?;
+                let scope = self.stage.owner.policy.bootstrap.scope.clone();
+                self.stage.check_for(&scope, NativeRole::EpochController)?;
+                let selected = self
+                    .stage
+                    .owner
+                    .policy
+                    .scheduled_backup
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("scheduled_backup_policy_absent"))?;
+                selected.validate_data()?;
+                ensure!(selected.scope == scope, "scheduled_backup_scope_changed");
+                Ok(selected)
+            })();
+        let checked = self.stage.check();
+        if requested.is_err() || checked.is_err() {
+            self.stage.owner.refused = true;
+            self.stage.acquisition.refuse();
+        }
+        let selected = requested?;
+        checked?;
+        Ok(selected)
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn begin_initial_holder_attempt(
         &mut self,
     ) -> Result<()> {

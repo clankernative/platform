@@ -75,6 +75,7 @@ pub(super) enum Route<'a> {
     EpochRead,
     EpochRollback,
     EpochCommit,
+    ScheduledBackupRootCommit,
 }
 
 // Admission telemetry classifies the actual provider request, not a role
@@ -103,7 +104,10 @@ fn admission_kind(route: &Route<'_>) -> Option<Work> {
         | Route::Project
         | Route::Database => Some(Work::WorkloadAdmission),
         Route::GoogleMint(_) => Some(Work::CredentialAdmission),
-        Route::EpochRead | Route::EpochRollback | Route::EpochCommit => None,
+        Route::EpochRead
+        | Route::EpochRollback
+        | Route::EpochCommit
+        | Route::ScheduledBackupRootCommit => None,
     }
 }
 
@@ -391,7 +395,10 @@ impl NativeHttp {
                 Method::GET,
                 false,
             ),
-            Route::EpochRead | Route::EpochRollback | Route::EpochCommit => {
+            Route::EpochRead
+            | Route::EpochRollback
+            | Route::EpochCommit
+            | Route::ScheduledBackupRootCommit => {
                 let operation = match route {
                     Route::EpochRead => "batchGet",
                     Route::EpochRollback => "rollback",
@@ -485,7 +492,7 @@ impl NativeHttp {
             })?;
             acquisition.remaining()?;
             ensure!(
-                response.status().is_success()
+                response_status_accepted(&route, response.status())
                     && response
                         .content_length()
                         .is_none_or(|bytes| bytes <= MAX_BYTES as u64),
@@ -516,6 +523,16 @@ impl NativeHttp {
     }
 }
 
+// The fixed root-birth codec requires a known HTTP 200 ACK. Preserve that
+// status at the actual transport boundary before returning body bytes; another
+// 2xx must not be relabelled as 200 by its consuming metadata codec.
+fn response_status_accepted(route: &Route<'_>, status: reqwest::StatusCode) -> bool {
+    match route {
+        Route::ScheduledBackupRootCommit => status == reqwest::StatusCode::OK,
+        _ => status.is_success(),
+    }
+}
+
 fn request_timeout(remaining: Duration, ceiling: Duration) -> Result<Duration> {
     ensure!(
         !remaining.is_zero() && !ceiling.is_zero() && ceiling <= Duration::from_secs(5),
@@ -527,7 +544,92 @@ fn request_timeout(remaining: Duration, ceiling: Duration) -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quote::ToTokens;
     use serde_json::json;
+
+    fn root_status_wiring(source: &str) -> bool {
+        let parsed = syn::parse_file(source).unwrap();
+        let mut predicate = None;
+        let mut request = None;
+        for item in parsed.items {
+            match item {
+                syn::Item::Fn(f) if f.sig.ident == "response_status_accepted" => {
+                    assert!(predicate.is_none());
+                    predicate = Some(f.block);
+                }
+                syn::Item::Impl(i) if i.self_ty.to_token_stream().to_string() == "NativeHttp" => {
+                    for member in i.items {
+                        if let syn::ImplItem::Fn(f) = member {
+                            if f.sig.ident == "request_with_ceiling" {
+                                assert!(request.is_none());
+                                request = Some(f.block.to_token_stream().to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let expected: syn::Block = syn::parse_quote!({
+            match route {
+                Route::ScheduledBackupRootCommit => status == reqwest::StatusCode::OK,
+                _ => status.is_success(),
+            }
+        });
+        let Some(predicate) = predicate else {
+            return false;
+        };
+        let Some(request) = request else { return false };
+        predicate.to_token_stream().to_string() == expected.to_token_stream().to_string()
+            && request
+                .matches("response_status_accepted (& route , response . status ())")
+                .count()
+                == 1
+            && request.find("response_status_accepted") < request.find("let mut bytes")
+            && !request.contains("response . status () . is_success")
+    }
+
+    #[test]
+    fn actual_root_transport_requires_200_before_erasing_status_even_with_a_valid_ack() {
+        // Identical strict ACK bytes do not convert another success status to
+        // known root birth. The actual consuming codec's 200/ACK controls live
+        // in journal::birth; this pins the real transport boundary it relies on.
+        let ack = br#"{"writeResults":[{"updateTime":"2026-11-23T17:00:00.000001Z"}],"commitTime":"2026-11-23T17:00:00.000001Z"}"#;
+        for status in 100..600 {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            let body = response_status_accepted(&Route::ScheduledBackupRootCommit, status)
+                .then_some(ack.as_slice());
+            assert_eq!(body.is_some(), status == reqwest::StatusCode::OK);
+            assert_eq!(
+                response_status_accepted(&Route::EpochCommit, status),
+                status.is_success()
+            );
+        }
+        let http = fixture();
+        assert_eq!(
+            http.address(&Route::ScheduledBackupRootCommit).unwrap(),
+            http.address(&Route::EpochCommit).unwrap()
+        );
+        let source = include_str!("transport.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(root_status_wiring(source));
+        for (old, new) in [
+            (
+                "response_status_accepted(&route, response.status())",
+                "response.status().is_success()",
+            ),
+            ("status == reqwest::StatusCode::OK", "status.is_success()"),
+            (
+                "Route::ScheduledBackupRootCommit => status",
+                "Route::EpochCommit => status",
+            ),
+        ] {
+            assert_eq!(source.matches(old).count(), 1);
+            assert!(!root_status_wiring(&source.replacen(old, new, 1)));
+        }
+    }
 
     #[test]
     fn storage_admission_routes_keep_physical_calls_and_counter_traffic_distinct() {

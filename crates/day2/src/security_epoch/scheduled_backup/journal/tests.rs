@@ -403,6 +403,15 @@ fn source() -> Result<Digest> {
         ("journal.rs", include_bytes!("../journal.rs")),
         ("journal/birth.rs", include_bytes!("birth.rs")),
         ("journal/birth/tests.rs", include_bytes!("birth/tests.rs")),
+        ("journal/root_files.rs", include_bytes!("root_files.rs")),
+        (
+            "bootstrap/scheduled_backup.rs",
+            include_bytes!("../../bootstrap/scheduled_backup.rs"),
+        ),
+        (
+            "native_volume/scheduled_backup.rs",
+            include_bytes!("../../storage_authority/native_volume/scheduled_backup.rs"),
+        ),
         ("reservation.rs", include_bytes!("../reservation.rs")),
         ("tests.rs", include_bytes!("tests.rs")),
         (

@@ -1212,6 +1212,38 @@ impl<'role> CurrentControllerStoragePhase<'_, 'role> {
         Ok(files)
     }
 
+    pub(in crate::security_epoch) fn prepare_scheduled_backup_root(
+        &mut self,
+    ) -> Result<super::PendingBackupRoot> {
+        self.check()?;
+        ensure!(
+            matches!(self.peer, PeerFence::Retained(_)),
+            "backup_root_requires_controller_only_phase"
+        );
+        let requested = self.file.prepare_scheduled_backup_root();
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let pending = requested?;
+        checked?;
+        Ok(pending)
+    }
+
+    pub(in crate::security_epoch) fn check_scheduled_backup_root(
+        &mut self,
+        pending: &mut super::PendingBackupRoot,
+    ) -> Result<()> {
+        self.check()?;
+        let requested = self.file.check_scheduled_backup_root(pending);
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     /// Fixed pre-creation admission through the actual retained physical owner.
     /// The restore-loan facade must bind its own Fenced target before this call.
     pub(in crate::security_epoch) fn admit_restore_creator_root(

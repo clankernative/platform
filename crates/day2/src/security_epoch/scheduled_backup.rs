@@ -9,7 +9,7 @@ use day2_capabilities::{
 };
 use serde::{Deserialize, Serialize};
 
-mod journal;
+pub(in crate::security_epoch) mod journal;
 pub(in crate::security_epoch) mod requester;
 mod reservation;
 

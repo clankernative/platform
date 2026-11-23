@@ -744,6 +744,55 @@ impl CounterRequest<'_> {
         Ok(snapshot)
     }
 
+    /// One fixed create-only root record on the genuine Controller connection.
+    /// The outer fixed creator retains actual physical/lineage fencing and the
+    /// SAME original; generic counter read ports still refuse every write.
+    pub(in crate::security_epoch) fn create_scheduled_backup_root(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        pending: &mut crate::security_epoch::storage_authority::PendingBackupRoot,
+        permit: crate::security_epoch::bootstrap::RootBirthWritePermit<'_, '_, '_>,
+    ) -> Result<()> {
+        let requested: Result<()> = (|| {
+            permit.require_actual(self, stage, pending)?;
+            ensure!(
+                self.connection.purpose == NativeRole::EpochController,
+                "backup_root_writer_controller_required"
+            );
+            self.check(stage)?;
+            stage.storage()?.scheduled_backup_root_selection()?;
+            let body = serde_json::to_vec(&pending.submit_birth_data(&self.connection.store)?)?;
+            ensure!(body.len() <= 65_536, "backup_root_write_bound");
+            self.check(stage)?;
+            let authorization = self.connection.credential.authorization(
+                &mut self.request.acquisition,
+                self.connection.store.max_lease_seconds,
+            )?;
+            let timeout = self
+                .request
+                .acquisition
+                .remaining()?
+                .min(Duration::from_secs(5));
+            let bytes = self.connection.http.request_with_ceiling(
+                Route::ScheduledBackupRootCommit,
+                &authorization,
+                Some(&body),
+                &mut self.request.acquisition,
+                timeout,
+            )?;
+            pending.observe_birth_data(&bytes)
+        })();
+        // A real independent post is required even on request/codec error.
+        // Never replace an earlier primary or infer an unapplied write.
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            pending.refuse();
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch) fn finish(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
