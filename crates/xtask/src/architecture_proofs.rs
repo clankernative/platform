@@ -2777,7 +2777,7 @@ mod tests {
         let policy: Policy = day2::json::decode_evidence(bytes)?;
         validate_policy(&policy)?;
         ensure!(
-            policy.proofs.len() == 348,
+            policy.proofs.len() == 349,
             "reviewed repository proof count"
         );
         let mut changed: serde_json::Value = day2::json::decode_evidence(bytes)?;
