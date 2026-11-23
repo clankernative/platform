@@ -119,3 +119,31 @@ the writer was current at the instant of commit. Positive reboot/recovery stays
 closed, and no row/file/marker supplies a constructor. Runtime installation,
 protected CREATE provenance, native execution and five-second fitness remain
 unqualified. No scheduling or deployment is enabled.
+
+## Retained attempt image (mechanical continuation)
+
+The held root keeps the exact previously verified canonical image. A bounded
+canonical Intent can advance it only through the existing real append, file
+sync, directory sync, complete readback and held/named identity checks. A new
+`AttemptFile::hold` uses that expected image and the same locked open description;
+it never adopts current disk bytes as its expectation. The image moves only
+after the actual append returns known. A separate sticky refusal bit is set
+before fallible work, survives every temporary hold and is also set by the
+actual native parent's refusal. No later valid image or absent remote row can
+clear it. Recreating an existing named root still refuses.
+
+These are filesystem mechanics and historical DATA, not an authenticated
+scheduled request, native counter May, source loan or completion. The accepting
+request factory remains closed while protected persisted-CREATE provenance is
+unavailable. Any later actual adapter must retain the same whole parent through
+local durability, reservation, source, transfer and final consuming posts.
+
+Portable histories join actual retained-file appends to the actual create-only
+reservation codec, with an independent numeric-slot oracle and twice replay.
+They model pre-send post failure, lost/absent remote outcome, strict non200 ACK,
+post-ACK failure, malformed tail and process-drop/recreation refusal. Complete
+attempted failure prefixes and source-bound programs are saved as bounded
+private DATA. Modeled posts and codec send-encoding transitions are not real
+native/provider effects. Process drop/reopen is not a power-loss durability
+qualification; genuine admission, crash cuts, nonrollback retention and five-
+second fitness remain obligations for the approved F execution.

@@ -15,7 +15,7 @@ const COLLECTION: &str = "day2_scheduled_backup_attempts_v1";
 const MAX_REPLY: usize = 4_096;
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 /// Immutable spent-attempt record, not a captured archive or grant. There is
 /// intentionally no status field, CAS, reset, delete or retry transition.
@@ -77,14 +77,14 @@ enum DispositionData {
 /// retain its genuine authenticated action and permanent uncertainty discipline.
 /// In particular an absent remote row after an ambiguous create is NOT proof
 /// that a new turn may be authorized. No rehydration/resume API exists here.
-struct CreateTurn {
+pub(super) struct CreateTurn {
     name: String,
     record: AttemptRecord,
     disposition: DispositionData,
 }
 
 impl CreateTurn {
-    fn new_data(selected: &EpochStore, intent: Intent) -> Result<Self> {
+    pub(super) fn new_data(selected: &EpochStore, intent: Intent) -> Result<Self> {
         intent.require_selection_data(selected)?;
         let name = document_name_data(selected, &intent.slot)?;
         let record = AttemptRecord::new_data(intent)?;
@@ -101,7 +101,7 @@ impl CreateTurn {
 
     /// Encodes once; the actual writer must independently authorize and guard
     /// dispatch. No key/generation/recipient can be replaced after this point.
-    fn submit_data(&mut self) -> Result<Value> {
+    pub(super) fn submit_data(&mut self) -> Result<Value> {
         let before = std::mem::replace(&mut self.disposition, DispositionData::Unknown);
         ensure!(before == DispositionData::Fresh, "backup_attempt_spent");
         let payload = serde_json::to_string(&self.record)?;
@@ -119,7 +119,7 @@ impl CreateTurn {
 
     /// An acknowledgement is comparison DATA, never source permission. Unknown,
     /// malformed, non-success or duplicate outcomes permanently poison this turn.
-    fn observe_commit_data(&mut self, status: u16, bytes: &[u8]) -> Result<UpdateTime> {
+    pub(super) fn observe_commit_data(&mut self, status: u16, bytes: &[u8]) -> Result<UpdateTime> {
         let before = std::mem::replace(&mut self.disposition, DispositionData::Unknown);
         ensure!(
             before == DispositionData::MayHaveBeenSent,
@@ -130,7 +130,7 @@ impl CreateTurn {
         Ok(updated)
     }
 
-    fn lose_result_data(&mut self) {
+    pub(super) fn lose_result_data(&mut self) {
         self.disposition = DispositionData::Unknown;
     }
 }
