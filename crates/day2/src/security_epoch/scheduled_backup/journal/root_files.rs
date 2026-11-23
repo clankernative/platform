@@ -95,34 +95,39 @@ impl PendingRootFiles {
     }
 
     pub(in crate::security_epoch) fn check_pending(&mut self) -> Result<()> {
-        ensure!(!std::mem::replace(&mut self.refused, true), "backup_root_files_refused");
+        ensure!(
+            !std::mem::replace(&mut self.refused, true),
+            "backup_root_files_refused"
+        );
         let checked = (|| {
-        ensure!(
-            CreatorData::of(&self.parent.metadata()?) == self.parent_identity
-                && CreatorData::of(&self.directory.metadata()?) == self.directory_identity
-                && CreatorData::of(&self.file.metadata()?) == self.file_identity,
-            "backup_root_held_changed"
-        );
-        let named =
-            rustix::fs::statat(&self.parent, self.name.as_str(), AtFlags::SYMLINK_NOFOLLOW)?;
-        ensure!(
-            super::number(named.st_dev)? == self.directory_identity.device
-                && super::number(named.st_ino)? == self.directory_identity.inode
-                && super::number(named.st_mode)? == u64::from(self.directory_identity.mode)
-                && super::number(named.st_uid)? == u64::from(self.directory_identity.uid)
-                && super::number(named.st_nlink)? == self.directory_identity.links,
-            "backup_root_named_changed"
-        );
-        let mut file = AttemptFile::hold(
-            &self.directory,
-            self.file.try_clone()?,
-            super::ImageData::decode_data(&self.image.bytes, &self.image.binding)?,
-        )?;
-        file.require_identity()?;
-        file.require_image()?;
-        file.require_identity()
+            ensure!(
+                CreatorData::of(&self.parent.metadata()?) == self.parent_identity
+                    && CreatorData::of(&self.directory.metadata()?) == self.directory_identity
+                    && CreatorData::of(&self.file.metadata()?) == self.file_identity,
+                "backup_root_held_changed"
+            );
+            let named =
+                rustix::fs::statat(&self.parent, self.name.as_str(), AtFlags::SYMLINK_NOFOLLOW)?;
+            ensure!(
+                super::number(named.st_dev)? == self.directory_identity.device
+                    && super::number(named.st_ino)? == self.directory_identity.inode
+                    && super::number(named.st_mode)? == u64::from(self.directory_identity.mode)
+                    && super::number(named.st_uid)? == u64::from(self.directory_identity.uid)
+                    && super::number(named.st_nlink)? == self.directory_identity.links,
+                "backup_root_named_changed"
+            );
+            let mut file = AttemptFile::hold(
+                &self.directory,
+                self.file.try_clone()?,
+                super::ImageData::decode_data(&self.image.bytes, &self.image.binding)?,
+            )?;
+            file.require_identity()?;
+            file.require_image()?;
+            file.require_identity()
         })();
-        if checked.is_ok() { self.refused = false; }
+        if checked.is_ok() {
+            self.refused = false;
+        }
         checked
     }
 
@@ -139,7 +144,10 @@ impl PendingRootFiles {
         intent_bytes: &[u8],
     ) -> Result<Digest> {
         self.check_pending()?;
-        ensure!(!std::mem::replace(&mut self.refused, true), "backup_root_files_refused");
+        ensure!(
+            !std::mem::replace(&mut self.refused, true),
+            "backup_root_files_refused"
+        );
         let intent: super::Intent = super::super::decode_canonical(intent_bytes)?;
         let expected = super::ImageData::decode_data(&self.image.bytes, &self.image.binding)?;
         let mut held = AttemptFile::hold(&self.directory, self.file.try_clone()?, expected)?;
@@ -220,27 +228,48 @@ mod tests {
         let mut selected = std::collections::BTreeMap::new();
         for item in file.items {
             if let syn::Item::Impl(item) = item
-                && item.self_ty.to_token_stream().to_string() == "PendingRootFiles" {
+                && item.self_ty.to_token_stream().to_string() == "PendingRootFiles"
+            {
                 for member in item.items {
                     if let syn::ImplItem::Fn(f) = member {
-                        selected.insert(f.sig.ident.to_string(), f.block.to_token_stream().to_string());
+                        selected.insert(
+                            f.sig.ident.to_string(),
+                            f.block.to_token_stream().to_string(),
+                        );
                     }
                 }
             }
         }
-        let Some(body) = selected.get("append_attempt_data") else { return false };
-        let Some(check) = selected.get("check_pending") else { return false };
+        let Some(body) = selected.get("append_attempt_data") else {
+            return false;
+        };
+        let Some(check) = selected.get("check_pending") else {
+            return false;
+        };
         let mut tail = body.as_str();
-        for target in ["self . check_pending () ? ;", "std :: mem :: replace (& mut self . refused , true)",
+        for target in [
+            "self . check_pending () ? ;",
+            "std :: mem :: replace (& mut self . refused , true)",
             "let intent : super :: Intent = super :: super :: decode_canonical (intent_bytes) ? ;",
             "ImageData :: decode_data (& self . image . bytes , & self . image . binding)",
-            "AttemptFile :: hold", "held . require_identity", "held . require_image",
-            "held . refused . set (false)", "held . append (& intent)", "self . image = held . image",
-            "self . refused = false", "self . check_pending () ? ;", "Ok (commitment)"] {
-            let Some((_, rest)) = tail.split_once(target) else { return false };
+            "AttemptFile :: hold",
+            "held . require_identity",
+            "held . require_image",
+            "held . refused . set (false)",
+            "held . append (& intent)",
+            "self . image = held . image",
+            "self . refused = false",
+            "self . check_pending () ? ;",
+            "Ok (commitment)",
+        ] {
+            let Some((_, rest)) = tail.split_once(target) else {
+                return false;
+            };
             tail = rest;
         }
-        let refused: syn::Block = syn::parse_quote!({ self.refused = true; });
+        let refused: syn::Block = syn::parse_quote!({
+            self.refused = true;
+        });
         selected.get("refuse") == Some(&refused.to_token_stream().to_string())
             && check.contains("std :: mem :: replace (& mut self . refused , true)")
             && check.contains("if checked . is_ok () { self . refused = false ; }")
@@ -250,11 +279,20 @@ mod tests {
     #[test]
     fn actual_retained_append_keeps_sticky_guard_durability_image_and_negative_native_bridge() {
         use quote::ToTokens;
-        let source = include_str!("root_files.rs").split("#[cfg(test)]").next().unwrap();
+        let source = include_str!("root_files.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
         assert!(append_wiring(source));
         for (old, new) in [
-            ("let commitment = held.append(&intent)?;", "let commitment = self.image.tail.clone();"),
-            ("self.image = held.image;", "self.image = super::ImageData::new_data(self.image.binding.clone())?;"),
+            (
+                "let commitment = held.append(&intent)?;",
+                "let commitment = self.image.tail.clone();",
+            ),
+            (
+                "self.image = held.image;",
+                "self.image = super::ImageData::new_data(self.image.binding.clone())?;",
+            ),
             ("if checked.is_ok()", "if checked.is_err()"),
         ] {
             assert_eq!(source.matches(old).count(), 1);
@@ -264,10 +302,12 @@ mod tests {
         let mut parsed = syn::parse_file(source).unwrap();
         for item in &mut parsed.items {
             if let syn::Item::Impl(item) = item
-                && item.self_ty.to_token_stream().to_string() == "PendingRootFiles" {
+                && item.self_ty.to_token_stream().to_string() == "PendingRootFiles"
+            {
                 for member in &mut item.items {
                     if let syn::ImplItem::Fn(f) = member
-                        && f.sig.ident == "append_attempt_data" {
+                        && f.sig.ident == "append_attempt_data"
+                    {
                         f.block.stmts.remove(0);
                     }
                 }
@@ -278,17 +318,20 @@ mod tests {
         let mut changed = 0;
         for item in &mut parsed.items {
             if let syn::Item::Impl(item) = item
-                && item.self_ty.to_token_stream().to_string() == "PendingRootFiles" {
+                && item.self_ty.to_token_stream().to_string() == "PendingRootFiles"
+            {
                 for member in &mut item.items {
                     if let syn::ImplItem::Fn(f) = member
-                        && f.sig.ident == "append_attempt_data" {
+                        && f.sig.ident == "append_attempt_data"
+                    {
                         for statement in &mut f.block.stmts {
                             if let syn::Stmt::Local(local) = statement
                                 && matches!(&local.pat, syn::Pat::Ident(name) if name.ident == "held")
                                 && let Some(init) = &mut local.init
                                 && let syn::Expr::Try(tried) = &mut *init.expr
-                                && let syn::Expr::Call(call) = &mut *tried.expr {
-                                call.func = Box::new(syn::parse_quote!(AttemptFile::open_existing));
+                                && let syn::Expr::Call(call) = &mut *tried.expr
+                            {
+                                *call.func = syn::parse_quote!(AttemptFile::open_existing);
                                 changed += 1;
                             }
                         }
@@ -304,10 +347,12 @@ mod tests {
             let mut bodies = Vec::new();
             for item in parsed.items {
                 if let syn::Item::Impl(item) = item
-                && item.self_ty.to_token_stream().to_string() == "PendingBackupRoot" {
+                    && item.self_ty.to_token_stream().to_string() == "PendingBackupRoot"
+                {
                     for member in item.items {
                         if let syn::ImplItem::Fn(f) = member
-                            && f.sig.ident == "refuse" {
+                            && f.sig.ident == "refuse"
+                        {
                             bodies.push(f.block.to_token_stream().to_string());
                         }
                     }
@@ -317,11 +362,16 @@ mod tests {
         };
         assert!(native_bridge(native));
         assert_eq!(native.matches("self.files.refuse();").count(), 1);
-        assert!(!native_bridge(&native.replacen("self.files.refuse();", "", 1)));
+        assert!(!native_bridge(&native.replacen(
+            "self.files.refuse();",
+            "",
+            1
+        )));
     }
 
     #[test]
-    fn retained_image_advances_only_after_actual_append_and_never_repairs_a_refused_root() -> Result<()> {
+    fn retained_image_advances_only_after_actual_append_and_never_repairs_a_refused_root()
+    -> Result<()> {
         let temp = Temp::new()?;
         let parent = temp.open()?;
         let mut root = PendingRootFiles::create_binding(&parent, binding())?;
@@ -333,16 +383,23 @@ mod tests {
         root.check_pending()?;
         assert_eq!(root.image.slots.len(), 2);
         // Changing policy, epoch, Job and operation cannot rearm slot zero.
-        assert!(root.append_attempt_data(&serde_json::to_vec(&super::super::tests::intent(0, 4))?).is_err());
+        assert!(
+            root.append_attempt_data(&serde_json::to_vec(&super::super::tests::intent(0, 4))?)
+                .is_err()
+        );
         assert!(root.check_pending().is_err());
-        assert!(root.append_attempt_data(&serde_json::to_vec(&super::super::tests::intent(2, 0))?).is_err());
+        assert!(
+            root.append_attempt_data(&serde_json::to_vec(&super::super::tests::intent(2, 0))?)
+                .is_err()
+        );
         drop(root);
         assert!(PendingRootFiles::create_binding(&parent, binding()).is_err());
         Ok(())
     }
 
     #[test]
-    fn explicit_post_refusal_and_partial_disk_tail_cannot_be_cleared_by_a_temporary_hold() -> Result<()> {
+    fn explicit_post_refusal_and_partial_disk_tail_cannot_be_cleared_by_a_temporary_hold()
+    -> Result<()> {
         for partial in [false, true] {
             let temp = Temp::new()?;
             let parent = temp.open()?;
@@ -360,7 +417,12 @@ mod tests {
             }
             for _ in 0..3 {
                 assert!(root.check_pending().is_err());
-                assert!(root.append_attempt_data(&serde_json::to_vec(&super::super::tests::intent(1, 0))?).is_err());
+                assert!(
+                    root.append_attempt_data(&serde_json::to_vec(&super::super::tests::intent(
+                        1, 0
+                    ))?)
+                    .is_err()
+                );
             }
         }
         Ok(())
@@ -436,52 +498,109 @@ mod tests {
             reservation::{CreateTurn, tests as remote_fixtures},
         };
         use serde::{Deserialize, Serialize};
-        use std::{collections::BTreeSet, io::{Read, Write}, os::unix::fs::OpenOptionsExt};
+        use std::{
+            collections::BTreeSet,
+            io::{Read, Write},
+            os::unix::fs::OpenOptionsExt,
+        };
 
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
-        enum Cut { Known, BeforeMayPost, LostAck, UnappliedUnknown, AfterAckPost, WrongStatus, PartialTail, Crash }
+        enum Cut {
+            Known,
+            BeforeMayPost,
+            LostAck,
+            UnappliedUnknown,
+            AfterAckPost,
+            WrongStatus,
+            PartialTail,
+            Crash,
+        }
 
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Event { minute: u8, revision: u8, cut: Cut }
+        struct Event {
+            minute: u8,
+            revision: u8,
+            cut: Cut,
+        }
 
         #[derive(Clone, Debug, Serialize, Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Program { version: u8, source: Digest, events: Vec<Event>, wrong: Option<usize> }
+        struct Program {
+            version: u8,
+            source: Digest,
+            events: Vec<Event>,
+            wrong: Option<usize>,
+        }
 
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(deny_unknown_fields)]
         // `may` records the DATA codec's send-encoding transition. No real
         // counter/provider dispatch, native post or source permission is tested.
-        struct Observation { append: bool, may: bool, ack: bool, open: bool, disk_valid: bool, spent: Option<usize>, intents: Option<Vec<Digest>>, remote: usize }
+        struct Observation {
+            append: bool,
+            may: bool,
+            ack: bool,
+            open: bool,
+            disk_valid: bool,
+            spent: Option<usize>,
+            intents: Option<Vec<Digest>>,
+            remote: usize,
+        }
 
         #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
-        enum FailureKind { Setup, Step, Panic, Mismatch }
+        enum FailureKind {
+            Setup,
+            Step,
+            Panic,
+            Mismatch,
+        }
 
         #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Failure { step: Option<usize>, kind: FailureKind }
+        struct Failure {
+            step: Option<usize>,
+            kind: FailureKind,
+        }
 
         #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Run { observations: Vec<Observation>, failure: Option<Failure> }
+        struct Run {
+            observations: Vec<Observation>,
+            failure: Option<Failure>,
+        }
 
         #[derive(Serialize, Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Bundle { program: Program, first: Run, second: Run }
+        struct Bundle {
+            program: Program,
+            first: Run,
+            second: Run,
+        }
 
         fn validate(program: &Program) -> Result<()> {
-            ensure!(program.version == 1 && program.source == fixtures::source()?
-                && !program.events.is_empty() && program.events.len() <= 40
-                && program.events.iter().all(|e| e.minute < 8 && e.revision < 12)
-                && program.wrong.is_none_or(|n| n < program.events.len()), "backup_held_history_program");
+            ensure!(
+                program.version == 1
+                    && program.source == fixtures::source()?
+                    && !program.events.is_empty()
+                    && program.events.len() <= 40
+                    && program
+                        .events
+                        .iter()
+                        .all(|e| e.minute < 8 && e.revision < 12)
+                    && program.wrong.is_none_or(|n| n < program.events.len()),
+                "backup_held_history_program"
+            );
             Ok(())
         }
 
         fn run(program: &Program) -> Run {
-            let mut run = Run { observations: Vec::new(), failure: None };
+            let mut run = Run {
+                observations: Vec::new(),
+                failure: None,
+            };
             let setup = (|| -> Result<_> {
                 let temp = Temp::new()?;
                 let parent = temp.open()?;
@@ -489,10 +608,16 @@ mod tests {
                 Ok((temp, parent, root))
             })();
             let Ok((temp, parent, first)) = setup else {
-                run.failure = Some(Failure { step: None, kind: FailureKind::Setup });
+                run.failure = Some(Failure {
+                    step: None,
+                    kind: FailureKind::Setup,
+                });
                 return run;
             };
-            let path = temp.0.join(&first.name).join(super::super::super::FILE_NAME);
+            let path = temp
+                .0
+                .join(&first.name)
+                .join(super::super::super::FILE_NAME);
             let mut root = Some(first);
             let selection = remote_fixtures::selection();
             let mut actual_remote = BTreeSet::new();
@@ -513,84 +638,161 @@ mod tests {
                     input.source.store = Digest::of(&selection).unwrap();
                     // Independent literal domain and complete fixture input,
                     // not Intent::commitment_data or any observed journal row.
-                    intent_commitments.push(Digest::of(&("day2-scheduled-backup-intent-v1", &input)).unwrap());
+                    intent_commitments
+                        .push(Digest::of(&("day2-scheduled-backup-intent-v1", &input)).unwrap());
                 }
-                if may && event.cut != Cut::UnappliedUnknown { remote.insert(event.minute); }
+                if may && event.cut != Cut::UnappliedUnknown {
+                    remote.insert(event.minute);
+                }
                 malformed |= append && event.cut == Cut::PartialTail;
                 closed |= event.cut == Cut::Crash || !append || event.cut != Cut::Known;
-                let mut expected = Observation { append, may, ack, open: !closed, disk_valid: !malformed,
-                    spent: (!malformed).then_some(spent.len()), intents: (!malformed).then(|| intent_commitments.clone()), remote: remote.len() };
-                if program.wrong == Some(step) { expected.open = !expected.open; }
-                let mut actual = Observation { append: false, may: false, ack: false, open: false,
-                    disk_valid: false, spent: None, intents: None, remote: actual_remote.len() };
-                let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-                    if event.cut == Cut::Crash {
-                        drop(root.take());
-                        ensure!(PendingRootFiles::create_binding(&parent, binding()).is_err(), "backup_held_history_recreated");
-                    } else if let Some(held) = &mut root {
-                        let mut intent = fixtures::intent(event.minute, event.revision);
-                        intent.source.store = Digest::of(&selection)?;
-                        actual.append = held.append_attempt_data(&serde_json::to_vec(&intent)?).is_ok();
-                        if actual.append {
-                            match event.cut {
-                                Cut::BeforeMayPost => held.refuse(),
-                                Cut::PartialTail => {
-                                    held.file.write_all(b"{")?;
-                                    held.file.sync_all()?;
-                                    ensure!(held.check_pending().is_err(), "backup_held_history_tail_accepted");
-                                }
-                                _ => {
-                                    let mut turn = CreateTurn::new_data(&selection, intent)?;
-                                    let write = turn.submit_data()?;
-                                    actual.may = true;
-                                    let payload = write["writes"][0]["update"]["fields"]["attempt_json"]["stringValue"].as_str()
-                                        .ok_or_else(|| anyhow::anyhow!("backup_held_history_payload"))?;
-                                    let row: serde_json::Value = crate::json::decode(payload.as_bytes())?;
-                                    let mut input = fixtures::intent(event.minute, event.revision);
-                                    input.source.store = Digest::of(&selection)?;
-                                    ensure!(row["intent"] == serde_json::to_value(&input)?
-                                        && row["commitment"] == serde_json::to_value(Digest::of(&("day2-scheduled-backup-intent-v1", &input))?)?, "backup_held_history_intent_binding");
-                                    let name = write["writes"][0]["update"]["name"].as_str()
-                                        .ok_or_else(|| anyhow::anyhow!("backup_held_history_name"))?;
-                                    if event.cut != Cut::UnappliedUnknown {
-                                        ensure!(actual_remote.insert(name.to_owned()), "backup_held_history_remote_collision");
+                let mut expected = Observation {
+                    append,
+                    may,
+                    ack,
+                    open: !closed,
+                    disk_valid: !malformed,
+                    spent: (!malformed).then_some(spent.len()),
+                    intents: (!malformed).then(|| intent_commitments.clone()),
+                    remote: remote.len(),
+                };
+                if program.wrong == Some(step) {
+                    expected.open = !expected.open;
+                }
+                let mut actual = Observation {
+                    append: false,
+                    may: false,
+                    ack: false,
+                    open: false,
+                    disk_valid: false,
+                    spent: None,
+                    intents: None,
+                    remote: actual_remote.len(),
+                };
+                let attempted =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                        if event.cut == Cut::Crash {
+                            drop(root.take());
+                            ensure!(
+                                PendingRootFiles::create_binding(&parent, binding()).is_err(),
+                                "backup_held_history_recreated"
+                            );
+                        } else if let Some(held) = &mut root {
+                            let mut intent = fixtures::intent(event.minute, event.revision);
+                            intent.source.store = Digest::of(&selection)?;
+                            actual.append = held
+                                .append_attempt_data(&serde_json::to_vec(&intent)?)
+                                .is_ok();
+                            if actual.append {
+                                match event.cut {
+                                    Cut::BeforeMayPost => held.refuse(),
+                                    Cut::PartialTail => {
+                                        held.file.write_all(b"{")?;
+                                        held.file.sync_all()?;
+                                        ensure!(
+                                            held.check_pending().is_err(),
+                                            "backup_held_history_tail_accepted"
+                                        );
                                     }
-                                    match event.cut {
-                                        Cut::Known | Cut::AfterAckPost => {
-                                            actual.ack = turn.observe_commit_data(200, &remote_fixtures::ack()).is_ok();
-                                            if event.cut == Cut::AfterAckPost { held.refuse(); }
+                                    _ => {
+                                        let mut turn = CreateTurn::new_data(&selection, intent)?;
+                                        let write = turn.submit_data()?;
+                                        actual.may = true;
+                                        let payload =
+                                            write["writes"][0]["update"]["fields"]["attempt_json"]
+                                                ["stringValue"]
+                                                .as_str()
+                                                .ok_or_else(|| {
+                                                    anyhow::anyhow!("backup_held_history_payload")
+                                                })?;
+                                        let row: serde_json::Value =
+                                            crate::json::decode(payload.as_bytes())?;
+                                        let mut input =
+                                            fixtures::intent(event.minute, event.revision);
+                                        input.source.store = Digest::of(&selection)?;
+                                        ensure!(
+                                            row["intent"] == serde_json::to_value(&input)?
+                                                && row["commitment"]
+                                                    == serde_json::to_value(Digest::of(&(
+                                                        "day2-scheduled-backup-intent-v1",
+                                                        &input
+                                                    ))?)?,
+                                            "backup_held_history_intent_binding"
+                                        );
+                                        let name = write["writes"][0]["update"]["name"]
+                                            .as_str()
+                                            .ok_or_else(|| {
+                                                anyhow::anyhow!("backup_held_history_name")
+                                            })?;
+                                        if event.cut != Cut::UnappliedUnknown {
+                                            ensure!(
+                                                actual_remote.insert(name.to_owned()),
+                                                "backup_held_history_remote_collision"
+                                            );
                                         }
-                                        Cut::WrongStatus => {
-                                            ensure!(turn.observe_commit_data(201, &remote_fixtures::ack()).is_err(), "backup_held_history_status");
-                                            held.refuse();
-                                        }
-                                        _ => {
-                                            turn.lose_result_data();
-                                            ensure!(turn.submit_data().is_err()
-                                                && turn.observe_commit_data(200, &remote_fixtures::ack()).is_err(), "backup_held_history_unknown_reopened");
-                                            held.refuse();
+                                        match event.cut {
+                                            Cut::Known | Cut::AfterAckPost => {
+                                                actual.ack = turn
+                                                    .observe_commit_data(
+                                                        200,
+                                                        &remote_fixtures::ack(),
+                                                    )
+                                                    .is_ok();
+                                                if event.cut == Cut::AfterAckPost {
+                                                    held.refuse();
+                                                }
+                                            }
+                                            Cut::WrongStatus => {
+                                                ensure!(
+                                                    turn.observe_commit_data(
+                                                        201,
+                                                        &remote_fixtures::ack()
+                                                    )
+                                                    .is_err(),
+                                                    "backup_held_history_status"
+                                                );
+                                                held.refuse();
+                                            }
+                                            _ => {
+                                                turn.lose_result_data();
+                                                ensure!(
+                                                    turn.submit_data().is_err()
+                                                        && turn
+                                                            .observe_commit_data(
+                                                                200,
+                                                                &remote_fixtures::ack()
+                                                            )
+                                                            .is_err(),
+                                                    "backup_held_history_unknown_reopened"
+                                                );
+                                                held.refuse();
+                                            }
                                         }
                                     }
                                 }
                             }
+                            actual.open = held.check_pending().is_ok();
                         }
-                        actual.open = held.check_pending().is_ok();
-                    }
-                    let bytes = std::fs::read(&path)?;
-                    let image = super::super::super::ImageData::decode_data(&bytes, &binding());
-                    actual.disk_valid = image.is_ok();
-                    actual.spent = image.ok().map(|image| image.slots.len());
-                    if actual.disk_valid {
-                        let mut commitments = Vec::new();
-                        for line in bytes.split(|byte| *byte == b'\n').skip(1).filter(|line| !line.is_empty()) {
-                            let record: super::super::super::RecordData = crate::json::decode(line)?;
-                            commitments.push(record.intent);
+                        let bytes = std::fs::read(&path)?;
+                        let image = super::super::super::ImageData::decode_data(&bytes, &binding());
+                        actual.disk_valid = image.is_ok();
+                        actual.spent = image.ok().map(|image| image.slots.len());
+                        if actual.disk_valid {
+                            let mut commitments = Vec::new();
+                            for line in bytes
+                                .split(|byte| *byte == b'\n')
+                                .skip(1)
+                                .filter(|line| !line.is_empty())
+                            {
+                                let record: super::super::super::RecordData =
+                                    crate::json::decode(line)?;
+                                commitments.push(record.intent);
+                            }
+                            actual.intents = Some(commitments);
                         }
-                        actual.intents = Some(commitments);
-                    }
-                    actual.remote = actual_remote.len();
-                    Ok(())
-                }));
+                        actual.remote = actual_remote.len();
+                        Ok(())
+                    }));
                 let failure = match attempted {
                     Err(_) => Some(FailureKind::Panic),
                     Ok(Err(_)) => Some(FailureKind::Step),
@@ -599,7 +801,13 @@ mod tests {
                 };
                 // Retain the attempted failing event in both replay prefixes.
                 run.observations.push(actual);
-                if let Some(kind) = failure { run.failure = Some(Failure { step: Some(step), kind }); break; }
+                if let Some(kind) = failure {
+                    run.failure = Some(Failure {
+                        step: Some(step),
+                        kind,
+                    });
+                    break;
+                }
             }
             run
         }
@@ -607,10 +815,14 @@ mod tests {
         const MAX_BUNDLE: usize = 262_144;
         struct Saved(PathBuf);
         impl std::fmt::Display for Saved {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("backup_held_history_saved") }
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("backup_held_history_saved")
+            }
         }
         impl std::fmt::Debug for Saved {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { std::fmt::Display::fmt(self, f) }
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                std::fmt::Display::fmt(self, f)
+            }
         }
         impl std::error::Error for Saved {}
 
@@ -620,9 +832,18 @@ mod tests {
 
         fn retained_prefix(program: &Program, run: &Run) -> bool {
             match &run.failure {
-                Some(Failure { step: None, kind: FailureKind::Setup }) => run.observations.is_empty(),
-                Some(Failure { step: Some(step), kind }) => *kind != FailureKind::Setup
-                    && *step < program.events.len() && run.observations.len() == step + 1,
+                Some(Failure {
+                    step: None,
+                    kind: FailureKind::Setup,
+                }) => run.observations.is_empty(),
+                Some(Failure {
+                    step: Some(step),
+                    kind,
+                }) => {
+                    *kind != FailureKind::Setup
+                        && *step < program.events.len()
+                        && run.observations.len() == step + 1
+                }
                 Some(_) => false,
                 None => complete(program, run),
             }
@@ -632,15 +853,32 @@ mod tests {
             validate(&program)?;
             let first = run(&program);
             let second = run(&program);
-            if first == second && complete(&program, &first) && complete(&program, &second) { return Ok(()); }
-            let bytes = serde_json::to_vec(&Bundle { program, first, second })?;
-            ensure!(bytes.len() <= MAX_BUNDLE, "backup_held_history_bundle_bound");
-            let parent = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/control-slot-replays");
+            if first == second && complete(&program, &first) && complete(&program, &second) {
+                return Ok(());
+            }
+            let bytes = serde_json::to_vec(&Bundle {
+                program,
+                first,
+                second,
+            })?;
+            ensure!(
+                bytes.len() <= MAX_BUNDLE,
+                "backup_held_history_bundle_bound"
+            );
+            let parent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../artifacts/control-slot-replays");
             std::fs::create_dir_all(&parent)?;
-            let dir = tempfile::Builder::new().prefix("backup-held-")
-                .permissions(std::fs::Permissions::from_mode(0o700)).tempdir_in(parent)?.keep();
+            let dir = tempfile::Builder::new()
+                .prefix("backup-held-")
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir_in(parent)?
+                .keep();
             let path = dir.join("replay.json.gz");
-            let file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)?;
             let mut encoded = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
             encoded.write_all(&bytes)?;
             encoded.finish()?.sync_all()?;
@@ -648,40 +886,104 @@ mod tests {
         }
 
         #[test]
-        fn generated_durable_and_remote_cuts_replay_twice_without_rearming_or_reconstructing_owners() -> Result<()> {
-            let cuts = [Cut::Known, Cut::BeforeMayPost, Cut::LostAck, Cut::UnappliedUnknown,
-                Cut::AfterAckPost, Cut::WrongStatus, Cut::PartialTail, Cut::Crash];
+        fn generated_durable_and_remote_cuts_replay_twice_without_rearming_or_reconstructing_owners()
+        -> Result<()> {
+            let cuts = [
+                Cut::Known,
+                Cut::BeforeMayPost,
+                Cut::LostAck,
+                Cut::UnappliedUnknown,
+                Cut::AfterAckPost,
+                Cut::WrongStatus,
+                Cut::PartialTail,
+                Cut::Crash,
+            ];
             for seed in 0..16u64 {
                 let mut state = seed;
-                let mut events = vec![Event { minute: 0, revision: 0, cut: Cut::Known },
-                    Event { minute: 1, revision: 1, cut: Cut::Known },
-                    Event { minute: 2, revision: 2, cut: cuts[seed as usize % cuts.len()] }];
+                let mut events = vec![
+                    Event {
+                        minute: 0,
+                        revision: 0,
+                        cut: Cut::Known,
+                    },
+                    Event {
+                        minute: 1,
+                        revision: 1,
+                        cut: Cut::Known,
+                    },
+                    Event {
+                        minute: 2,
+                        revision: 2,
+                        cut: cuts[seed as usize % cuts.len()],
+                    },
+                ];
                 for _ in 0..29 {
-                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                    events.push(Event { minute: ((state >> 9) % 8) as u8,
-                        revision: ((state >> 17) % 12) as u8, cut: cuts[(state >> 25) as usize % cuts.len()] });
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    events.push(Event {
+                        minute: ((state >> 9) % 8) as u8,
+                        revision: ((state >> 17) % 12) as u8,
+                        cut: cuts[(state >> 25) as usize % cuts.len()],
+                    });
                 }
-                check(Program { version: 1, source: fixtures::source()?, events, wrong: None })?;
+                check(Program {
+                    version: 1,
+                    source: fixtures::source()?,
+                    events,
+                    wrong: None,
+                })?;
             }
             Ok(())
         }
 
         #[test]
-        fn failed_history_bundle_is_private_strict_source_bound_and_keeps_both_attempted_prefixes() -> Result<()> {
-            let program = Program { version: 1, source: fixtures::source()?,
-                events: (0..3).map(|minute| Event { minute, revision: minute, cut: Cut::Known }).collect(), wrong: Some(2) };
+        fn failed_history_bundle_is_private_strict_source_bound_and_keeps_both_attempted_prefixes()
+        -> Result<()> {
+            let program = Program {
+                version: 1,
+                source: fixtures::source()?,
+                events: (0..3)
+                    .map(|minute| Event {
+                        minute,
+                        revision: minute,
+                        cut: Cut::Known,
+                    })
+                    .collect(),
+                wrong: Some(2),
+            };
             let error = check(program).unwrap_err();
             let path = &error.downcast_ref::<Saved>().unwrap().0;
             assert_eq!(error.to_string(), "backup_held_history_saved");
-            assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o7777, 0o600);
-            assert_eq!(std::fs::metadata(path.parent().unwrap())?.permissions().mode() & 0o7777, 0o700);
+            assert_eq!(
+                std::fs::metadata(path)?.permissions().mode() & 0o7777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(path.parent().unwrap())?
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o700
+            );
             let mut bytes = Vec::new();
             let mut encoded = Vec::new();
-            File::open(path)?.take((MAX_BUNDLE + 1_025) as u64).read_to_end(&mut encoded)?;
-            ensure!(encoded.len() <= MAX_BUNDLE + 1_024, "backup_held_history_encoded_bound");
+            File::open(path)?
+                .take((MAX_BUNDLE + 1_025) as u64)
+                .read_to_end(&mut encoded)?;
+            ensure!(
+                encoded.len() <= MAX_BUNDLE + 1_024,
+                "backup_held_history_encoded_bound"
+            );
             let mut decoder = flate2::bufread::GzDecoder::new(&encoded[..]);
-            decoder.by_ref().take((MAX_BUNDLE + 1) as u64).read_to_end(&mut bytes)?;
-            ensure!(bytes.len() <= MAX_BUNDLE && decoder.into_inner().is_empty(), "backup_held_history_bundle_bound");
+            decoder
+                .by_ref()
+                .take((MAX_BUNDLE + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() <= MAX_BUNDLE && decoder.into_inner().is_empty(),
+                "backup_held_history_bundle_bound"
+            );
             let bundle: Bundle = crate::json::decode(&bytes)?;
             validate(&bundle.program)?;
             assert_eq!(bundle.first, run(&bundle.program));
@@ -690,8 +992,18 @@ mod tests {
             assert_eq!(bundle.second.observations.len(), 3);
             assert!(retained_prefix(&bundle.program, &bundle.first));
             assert!(retained_prefix(&bundle.program, &bundle.second));
-            assert!(bundle.first.observations[..2].iter().all(|o| o.append && o.may && o.ack));
-            assert!(matches!(bundle.first.failure, Some(Failure { step: Some(2), kind: FailureKind::Mismatch })));
+            assert!(
+                bundle.first.observations[..2]
+                    .iter()
+                    .all(|o| o.append && o.may && o.ack)
+            );
+            assert!(matches!(
+                bundle.first.failure,
+                Some(Failure {
+                    step: Some(2),
+                    kind: FailureKind::Mismatch
+                })
+            ));
             let mut stale = bundle.program;
             stale.source = Digest::new(b"different source");
             assert!(validate(&stale).is_err());
@@ -699,10 +1011,25 @@ mod tests {
             let mut duplicate = bytes.clone();
             duplicate.splice(wrong + 1..wrong + 1, b"\"program\":null,".iter().copied());
             assert!(crate::json::decode::<Bundle>(&duplicate).is_err());
-            let empty = Program { version: 1, source: fixtures::source()?, events: Vec::new(), wrong: None };
+            let empty = Program {
+                version: 1,
+                source: fixtures::source()?,
+                events: Vec::new(),
+                wrong: None,
+            };
             assert!(validate(&empty).is_err());
-            let normal = Program { version: 1, source: fixtures::source()?,
-                events: (0..3).map(|minute| Event { minute, revision: minute, cut: Cut::Known }).collect(), wrong: None };
+            let normal = Program {
+                version: 1,
+                source: fixtures::source()?,
+                events: (0..3)
+                    .map(|minute| Event {
+                        minute,
+                        revision: minute,
+                        cut: Cut::Known,
+                    })
+                    .collect(),
+                wrong: None,
+            };
             let mut truncated = run(&normal);
             assert!(complete(&normal, &truncated));
             truncated.observations.pop();

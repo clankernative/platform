@@ -21690,10 +21690,12 @@
       "type_name": "PendingRootFiles",
       "owning_children": [],
       "methods": [
+        "pub (in crate :: security_epoch) fn append_attempt_data (& mut self , intent_bytes : & [u8]) -> Result < Digest >",
         "pub (in crate :: security_epoch) fn birth_turn_data (& self , selection : & EpochStore) -> Result < super :: birth :: BirthTurn >",
         "pub (in crate :: security_epoch) fn check_pending (& mut self) -> Result < () >",
         "fn create_binding (parent : & File , binding : RootBindingData) -> Result < Self >",
-        "pub (in crate :: security_epoch) fn create_pending (parent : & File , policy : & RequesterPolicy , physical_disk : Digest , creator_nonce : Digest) -> Result < Self >"
+        "pub (in crate :: security_epoch) fn create_pending (parent : & File , policy : & RequesterPolicy , physical_disk : Digest , creator_nonce : Digest) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)"
       ],
       "factories": [
         {
@@ -21708,11 +21710,19 @@
       "material_uses": [
         {
           "owner": "PendingRootFiles",
+          "signature": "pub (in crate :: security_epoch) fn append_attempt_data (& mut self , intent_bytes : & [u8]) -> Result < Digest >"
+        },
+        {
+          "owner": "PendingRootFiles",
           "signature": "pub (in crate :: security_epoch) fn birth_turn_data (& self , selection : & EpochStore) -> Result < super :: birth :: BirthTurn >"
         },
         {
           "owner": "PendingRootFiles",
           "signature": "pub (in crate :: security_epoch) fn check_pending (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PendingRootFiles",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
         }
       ],
       "proof_uses": [],

@@ -413,7 +413,10 @@ pub(super) fn source() -> Result<Digest> {
             include_bytes!("../../storage_authority/native_volume/scheduled_backup.rs"),
         ),
         ("reservation.rs", include_bytes!("../reservation.rs")),
-        ("reservation/tests.rs", include_bytes!("../reservation/tests.rs")),
+        (
+            "reservation/tests.rs",
+            include_bytes!("../reservation/tests.rs"),
+        ),
         ("tests.rs", include_bytes!("tests.rs")),
         (
             "scheduled_backup.rs",
