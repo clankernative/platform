@@ -11,7 +11,83 @@ use crate::security_epoch::native_enrollment::{
 };
 use anyhow::{Result, ensure};
 use day2_capabilities::Digest;
-use std::rc::{Rc, Weak};
+use std::{
+    rc::{Rc, Weak},
+    time::Duration,
+};
+
+/// Exact negative Submit clock guard, never a native original or permission.
+/// A shared observation alone cannot preserve a narrower captured ceiling.
+pub(in crate::security_epoch::native_enrollment) struct BackupSubmitOriginal {
+    original: NativeOriginalRefusal,
+    domain: Digest,
+    origin: Duration,
+    deadline: Duration,
+}
+
+impl BackupSubmitOriginal {
+    pub(in crate::security_epoch::native_enrollment) fn capture(
+        original: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        let retained = original.retained_refusal();
+        original.remaining()?;
+        let (domain, origin, deadline, _) = original.historical_interval_observation();
+        Ok(Self {
+            original: retained,
+            domain,
+            origin,
+            deadline,
+        })
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn check(
+        &mut self,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.original.require_same(&original.retained_refusal())?;
+            let now = original.sample()?;
+            let (domain, origin, deadline, _) = original.historical_interval_observation();
+            ensure!(
+                domain == self.domain
+                    && origin == self.origin
+                    && deadline <= self.deadline
+                    && now.elapsed < self.deadline,
+                "backup_submit_original_interval_changed"
+            );
+            self.deadline = deadline;
+            Ok(())
+        })();
+        if requested.is_err() {
+            self.original.refuse();
+            original.refuse();
+        }
+        requested
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn check_intent(
+        &mut self,
+        original: &mut NativeAcquisition,
+        intent: &[u8],
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check(original)?;
+            crate::security_epoch::scheduled_backup::requester::require_submit_original_data(
+                intent,
+                &self.domain,
+            )
+        })();
+        if requested.is_err() {
+            self.original.refuse();
+            original.refuse();
+        }
+        requested
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn refuse(&self) {
+        self.original.refuse();
+    }
+}
 
 struct Frame<G> {
     original: NativeAcquisition,
@@ -81,6 +157,7 @@ const _: () = {
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <EnrolledRequestFrame as Ambiguous<_>>::check;
             let _ = <EnrolledStageFrame<'static> as Ambiguous<_>>::check;
+            let _ = <BackupSubmitOriginal as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);

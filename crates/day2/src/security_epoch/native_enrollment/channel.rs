@@ -24,6 +24,7 @@ use rustix::{
 use std::{fs::File, io::IoSliceMut, marker::PhantomData, rc::Rc};
 
 mod protected_restore;
+mod scheduled_backup;
 mod serving;
 mod storage;
 pub(super) use protected_restore::{

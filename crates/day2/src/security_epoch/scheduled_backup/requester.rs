@@ -16,6 +16,58 @@ const CRON_UID: &str = "day2.dev/scheduled-backup-cron-uid";
 const SLOT: &str = "batch.kubernetes.io/cronjob-scheduled-timestamp";
 const MAX_RESPONSE: usize = 65_536;
 
+// Canonical nested Intent contributes at most MAX_PAYLOAD bytes; this fixed
+// wrapper adds only its literal tag/key punctuation (no escaped second copy).
+pub(in crate::security_epoch) const MAX_SUBMIT_BYTES: usize =
+    super::MAX_PAYLOAD + b"{\"type\":\"submit_backup_v1\",\"intent\":}".len();
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum SubmitData {
+    #[serde(rename = "submit_backup_v1")]
+    Submit { intent: Intent },
+}
+
+/// Closed wire DATA, not authenticated admission or an original constructor.
+pub(in crate::security_epoch) fn decode_submit_data(bytes: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        bytes.len() <= MAX_SUBMIT_BYTES,
+        "backup_submit_payload_bound"
+    );
+    let packet: SubmitData = crate::json::decode(bytes)
+        .map_err(|_| anyhow::anyhow!("backup_submit_payload_encoding"))?;
+    ensure!(
+        serde_json::to_vec(&packet)? == bytes,
+        "backup_submit_noncanonical_payload"
+    );
+    let SubmitData::Submit { intent } = packet;
+    intent.validate_data()?;
+    Ok(serde_json::to_vec(&intent)?)
+}
+
+pub(in crate::security_epoch) fn encode_submit_data(intent: &[u8]) -> Result<Vec<u8>> {
+    let intent = Intent::decode_data(intent)?;
+    let bytes = serde_json::to_vec(&SubmitData::Submit { intent })?;
+    ensure!(
+        bytes.len() <= MAX_SUBMIT_BYTES,
+        "backup_submit_payload_bound"
+    );
+    Ok(bytes)
+}
+
+/// Compare only the declared request-domain DATA; the real resource guard
+/// separately requires the identical retained original observation and clock.
+pub(in crate::security_epoch) fn require_submit_original_data(
+    intent: &[u8],
+    domain: &Digest,
+) -> Result<()> {
+    ensure!(
+        Intent::decode_data(intent)?.transport.original == *domain,
+        "backup_submit_intent_original_changed"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
 

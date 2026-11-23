@@ -9,7 +9,7 @@ use crate::security_epoch::native_enrollment::{
     process::{MessageProcess, SelfSnapshot},
     protocol::{self, IssuerCertificate, IssuerData, KeyOwner, Packet},
     root_kms::RootKms,
-    storage_socket_directory::StorageSocketDirectory,
+    storage_socket_directory::{ScheduledBackupSocketDirectory, StorageSocketDirectory},
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -218,6 +218,7 @@ struct IssuerBirthOwner {
     _listener: Listener,
     socket_identity: (u64, u64),
     storage: StorageSocketDirectory,
+    scheduled_backup: Option<ScheduledBackupSocketDirectory>,
 }
 
 impl Drop for IssuerBirthOwner {
@@ -276,6 +277,13 @@ pub(super) fn start() -> Result<Provisioner> {
     acquisition.remaining()?;
     let storage = StorageSocketDirectory::prepare(&directory)
         .context("native_enrollment_storage_directory")?;
+    // Disabled policy creates no requester endpoint directory. This fixed
+    // sibling is never the storage directory and grants no requester authority.
+    let scheduled_backup = if policy.scheduled_backup.is_some() {
+        Some(ScheduledBackupSocketDirectory::prepare(&directory)?)
+    } else {
+        None
+    };
     acquisition.remaining()?;
     let (listener, listener_child) =
         Listener::create(&mut acquisition).context("native_enrollment_listener")?;
@@ -297,6 +305,7 @@ pub(super) fn start() -> Result<Provisioner> {
         _listener: listener,
         socket_identity: (metadata.dev(), metadata.ino()),
         storage,
+        scheduled_backup,
     };
     birth.peer = Some(
         grant_child(
@@ -321,6 +330,9 @@ impl Provisioner {
         );
         let mut check = NativeAcquisition::begin(5)?;
         self.birth.storage.check(&self.directory)?;
+        if let Some(directory) = &self.birth.scheduled_backup {
+            directory.check(&self.directory)?;
+        }
         check.remaining()?;
         self.birth
             .peer
