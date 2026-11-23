@@ -3064,7 +3064,7 @@
       "LICENSE-MIT"
     ],
     "repository": "https://github.com/bytecodealliance/rustix",
-    "source": "git+https://github.com/clankernative/rustix?rev=6f3845cfc5b1ac7f490e6fe9641eed720c99f6d0#6f3845cfc5b1ac7f490e6fe9641eed720c99f6d0",
+    "source": "git+https://github.com/clankernative/rustix?rev=a7834e0edace258dc42f344f2401a2d21349460f#a7834e0edace258dc42f344f2401a2d21349460f",
     "version": "1.1.5"
   },
   {
