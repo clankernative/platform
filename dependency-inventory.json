@@ -364,7 +364,7 @@
     ],
     "repository": "https://github.com/SergioBenitez/cookie-rs",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "0.18.2"
+    "version": "0.18.3"
   },
   {
     "license": "MIT OR Apache-2.0",

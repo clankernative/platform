@@ -7,7 +7,7 @@ Only the three declared native host architectures are supported.
 
 CARGO_CONTEXTS = {
     "linux_aarch64": {
-        "cookie@0.18.2": {
+        "cookie@0.18.3": {
             "target": {
                 "aliases": {},
                 "build_aliases": {},
@@ -413,7 +413,7 @@ CARGO_CONTEXTS = {
         "reqwest@0.12.28": {
             "target": {
                 "aliases": {
-                    "@crates__cookie-0.18.2//:cookie": "cookie_crate"
+                    "@crates__cookie-0.18.3//:cookie": "cookie_crate"
                 },
                 "build_aliases": {},
                 "build_deps": [],
@@ -421,7 +421,7 @@ CARGO_CONTEXTS = {
                 "deps": [
                     "@crates__base64-0.22.1//:base64",
                     "@crates__bytes-1.12.1//:bytes",
-                    "@crates__cookie-0.18.2//:cookie",
+                    "@crates__cookie-0.18.3//:cookie",
                     "@crates__cookie_store-0.22.1//:cookie_store",
                     "@crates__futures-channel-0.3.34//:futures_channel",
                     "@crates__futures-core-0.3.34//:futures_core",
@@ -710,7 +710,7 @@ CARGO_CONTEXTS = {
         }
     },
     "linux_x86_64": {
-        "cookie@0.18.2": {
+        "cookie@0.18.3": {
             "target": {
                 "aliases": {},
                 "build_aliases": {},
@@ -1116,7 +1116,7 @@ CARGO_CONTEXTS = {
         "reqwest@0.12.28": {
             "target": {
                 "aliases": {
-                    "@crates__cookie-0.18.2//:cookie": "cookie_crate"
+                    "@crates__cookie-0.18.3//:cookie": "cookie_crate"
                 },
                 "build_aliases": {},
                 "build_deps": [],
@@ -1124,7 +1124,7 @@ CARGO_CONTEXTS = {
                 "deps": [
                     "@crates__base64-0.22.1//:base64",
                     "@crates__bytes-1.12.1//:bytes",
-                    "@crates__cookie-0.18.2//:cookie",
+                    "@crates__cookie-0.18.3//:cookie",
                     "@crates__cookie_store-0.22.1//:cookie_store",
                     "@crates__futures-channel-0.3.34//:futures_channel",
                     "@crates__futures-core-0.3.34//:futures_core",
@@ -1413,7 +1413,7 @@ CARGO_CONTEXTS = {
         }
     },
     "macos_aarch64": {
-        "cookie@0.18.2": {
+        "cookie@0.18.3": {
             "target": {
                 "aliases": {},
                 "build_aliases": {},
@@ -1793,7 +1793,7 @@ CARGO_CONTEXTS = {
         "reqwest@0.12.28": {
             "target": {
                 "aliases": {
-                    "@crates__cookie-0.18.2//:cookie": "cookie_crate"
+                    "@crates__cookie-0.18.3//:cookie": "cookie_crate"
                 },
                 "build_aliases": {},
                 "build_deps": [],
@@ -1801,7 +1801,7 @@ CARGO_CONTEXTS = {
                 "deps": [
                     "@crates__base64-0.22.1//:base64",
                     "@crates__bytes-1.12.1//:bytes",
-                    "@crates__cookie-0.18.2//:cookie",
+                    "@crates__cookie-0.18.3//:cookie",
                     "@crates__cookie_store-0.22.1//:cookie_store",
                     "@crates__futures-channel-0.3.34//:futures_channel",
                     "@crates__futures-core-0.3.34//:futures_core",
