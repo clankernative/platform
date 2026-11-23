@@ -1967,10 +1967,78 @@ mod tests {
 
     #[test]
     fn a_second_replica_cannot_open_the_same_state_volume() -> Result<()> {
+        // A concurrently spawned process in the broad harness can inherit
+        // the lock until exec, even though this thread dropped its File.
+        // Exercise the real lock in an exec'd singleton, not amid other tests'
+        // forks. This is isolation, not a retry of a refused reacquisition.
+        struct ChildOwner(Option<std::process::Child>);
+        impl Drop for ChildOwner {
+            fn drop(&mut self) {
+                if let Some(child) = &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let child_case = "deployment::tests::replica_lock_singleton_child";
+        let mut child = ChildOwner(Some(
+            std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", child_case, "--ignored", "--nocapture"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?,
+        ));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if child
+                .0
+                .as_mut()
+                .context("replica_lock_singleton_missing")?
+                .try_wait()?
+                .is_some()
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("replica_lock_singleton_deadline");
+            }
+            std::thread::yield_now();
+        }
+        let output = child
+            .0
+            .take()
+            .context("replica_lock_singleton_missing")?
+            .wait_with_output()?;
+        let stdout = std::str::from_utf8(&output.stdout)?;
+        ensure!(
+            output.status.success()
+                && stdout
+                    .lines()
+                    .filter(|line| *line == format!("test {child_case} ... ok"))
+                    .count()
+                    == 1
+                && stdout
+                    .lines()
+                    .filter(
+                        |line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")
+                    )
+                    .count()
+                    == 1,
+            "replica_lock_singleton_failed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "exec'd singleton for actual replica-lock exclusion"]
+    fn replica_lock_singleton_child() -> Result<()> {
         let root = tempfile::tempdir()?;
         let first = replica_lock(root.path(), "reports")?;
         assert!(replica_lock(root.path(), "reports").is_err());
+        let last = first.try_clone()?;
         drop(first);
+        assert!(replica_lock(root.path(), "reports").is_err());
+        drop(last);
         replica_lock(root.path(), "reports")?;
         assert!(replica_lock(root.path(), "../escape").is_err());
         Ok(())
