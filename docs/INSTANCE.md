@@ -99,8 +99,11 @@ derivation; there is no second schema.
 - App IDs are 2–20 lowercase letters or digits, starting with a letter. They
   have no separators, so the same string is valid as a repository name, DNS
   label, Kubernetes namespace suffix, bucket component and Roc identifier.
-  `instance`, `day2` and `tofu` are reserved because derived names already use
-  them.
+  `tofu` and every ID starting with `day2` are reserved. Wherever an app ID
+  names something, the platform's own name beside it starts with `day2` (the
+  `day2-<name>` repositories and the SDK image repository `<registry>/day2`),
+  and the shared state bucket `<project>-tofu-state` sits beside each app's
+  `<project>-<id>-state`.
 
 ## Derived names
 
@@ -109,9 +112,9 @@ Nothing below can be configured, restated or overridden.
 | Name | Value |
 | --- | --- |
 | Apply identity | `<org>-infra@<project>.iam.gserviceaccount.com` |
-| Instance repository | `<org>/instance` |
-| App CI repository | `<org>/app-ci` |
-| Required app check | `<org>/app-ci: day2 / verification (pull_request)` |
+| Instance repository | `<org>/day2-instance` |
+| CI repository | `<org>/day2-ci` |
+| Required app check | `<org>/day2-ci: day2 / verification (pull_request)` |
 | Artifact registry | `<region>-docker.pkg.dev/<project>` |
 | SDK image registry | `<region>-docker.pkg.dev/<project>/day2` |
 | Shared OpenTofu state bucket | `<project>-tofu-state` |
@@ -143,7 +146,7 @@ No two apps may pin the same `extension`: an extension ID is one key, one
 update URL and one Admin policy entry.
 
 The required app check is the status Gitea posts for the required org-scoped
-workflow in `<org>/app-ci`. The derived name is the required pattern of that
+workflow in `<org>/day2-ci`. The derived name is the required pattern of that
 workflow's registration in the org's Actions settings, not a branch protection
 status context: a protection context matches any status by name, so anyone who
 can post a status could satisfy it. Through the registration, Gitea counts the
@@ -154,8 +157,10 @@ its own status checks off; a branch with no rule is not gated. Gitea exposes
 scoped-workflow registration only in its web settings, so until it has an API,
 apply cannot set or read the registration and it is a manual precondition.
 
-The forge org belongs to the instance: its repositories are exactly `instance`,
-`app-ci` and one repository per app.
+The forge org belongs to the instance: its repositories are exactly
+`day2-instance`, `day2-ci` and one repository per app. Every repository the
+platform owns is named `day2-<name>`, and no app ID starts with `day2`, so an
+app can never take a platform name.
 
 ## Rendered inputs
 
@@ -679,7 +684,7 @@ identity's credentials and the forge token of [`instance source`](#source).
    the check.
 4. **Fixed forge layout.** Apply reconciles the forge org: the fixed
    repositories, a protection rule on every app's default branch (which is what
-   subjects it to the required org workflow) and webhooks. App CI is the required org-scoped workflow in `<org>/app-ci`, so an
+   subjects it to the required org workflow) and webhooks. App CI is the required org-scoped workflow in `<org>/day2-ci`, so an
    app repository can neither edit, skip nor impersonate it. App repositories
    keep only their own `day2.json` (`"kind": "app"`).
 5. **Closed world.** The check rejects any file outside the fixed layout and

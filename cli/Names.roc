@@ -102,8 +102,11 @@ valid_identifier = |value| {
 	}
 }
 
-# Derived resources already use instance, day2 and tofu: the instance
-# repository, the SDK registry and the shared OpenTofu state bucket.
+# Where an app ID names something, the platform's own name beside it starts with
+# day2: the day2-<name> repositories beside <org>/<id> and the SDK image repository
+# <registry>/day2 beside <registry>/<id>. The shared OpenTofu state bucket
+# <project>-tofu-state sits beside <project>-<id>-state. So no app ID may start with
+# day2 or be tofu.
 valid_app_id : Str -> Bool
 valid_app_id = |value| match value.to_utf8() {
 	[first, .. as rest] => rest.len()
@@ -115,7 +118,8 @@ valid_app_id = |value| match value.to_utf8() {
 				and first
 					<= 'z'
 					and rest.all(|byte| (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9'))
-						and !["instance", "day2", "tofu"].contains(value)
+						and !value.starts_with("day2")
+							and value != "tofu"
 	[] => Bool.False
 }
 
@@ -152,9 +156,21 @@ expect match Names.Identifier.from_str("sqlite_table") {
 	Err(InvalidName) => Bool.True
 	_ => Bool.False
 }
-expect ["go", "home", "inyourface", "a1"].all(|value| Names.AppId.from_str(value).is_ok())
+expect ["go", "home", "inyourface", "a1", "instance", "dayii"].all(|value| Names.AppId.from_str(value).is_ok())
 expect
-	["", "g", "golinks-v2", "rwo_release", "Home", "1app", "instance", "day2", "tofu", "abcdefghijklmnopqrstu"]
+	[
+		"",
+		"g",
+		"golinks-v2",
+		"rwo_release",
+		"Home",
+		"1app",
+		"day2",
+		"day2ci",
+		"day2instance",
+		"tofu",
+		"abcdefghijklmnopqrstu",
+	]
 		.all(|value| Names.AppId.from_str(value).is_err())
 expect match Names.Operation.from_str("links..list") {
 	Err(InvalidName) => Bool.True
