@@ -122,7 +122,10 @@ fn socket_resource_source(source: &str) -> String {
         true
     });
     assert_eq!(removed, 3, "exact separately checked client/check/drop");
-    assert_eq!(admission_removed, 2, "exact independently checked request impl/drop");
+    assert_eq!(
+        admission_removed, 2,
+        "exact independently checked request impl/drop"
+    );
     canonical(file.to_token_stream()).to_string()
 }
 
@@ -270,29 +273,64 @@ fn selected_method(source: &str, owner: &str, name: &str) -> String {
 
 fn admission_post(source: &str, owner: &str, method: &str, local: &str, expected: &str) -> bool {
     let file = syn::parse_file(source).unwrap();
-    let mut bodies = file.items.iter().filter_map(|item| match item {
-        syn::Item::Impl(item) if item.self_ty.to_token_stream().to_string() == owner => Some(item),
-        _ => None,
-    }).flat_map(|item| &item.items).filter_map(|item| match item {
-        syn::ImplItem::Fn(item) if item.sig.ident == method => Some(&item.block),
-        _ => None,
-    });
-    let Some(body) = bodies.next() else { return false; };
-    if bodies.next().is_some() { return false; }
+    let mut bodies = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) if item.self_ty.to_token_stream().to_string() == owner => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(item) if item.sig.ident == method => Some(&item.block),
+            _ => None,
+        });
+    let Some(body) = bodies.next() else {
+        return false;
+    };
+    if bodies.next().is_some() {
+        return false;
+    }
     let Some(init) = body.stmts.iter().find_map(|statement| match statement {
-        syn::Stmt::Local(item) if matches!(&item.pat, syn::Pat::Ident(p) if p.ident == local) => item.init.as_ref(),
+        syn::Stmt::Local(item) if matches!(&item.pat, syn::Pat::Ident(p) if p.ident == local) => {
+            item.init.as_ref()
+        }
         _ => None,
-    }) else { return false; };
-    let syn::Expr::Call(catch) = init.expr.as_ref() else { return false; };
-    if catch.func.to_token_stream().to_string() != "std :: panic :: catch_unwind" || catch.args.len() != 1 { return false; }
-    let Some(syn::Expr::Call(safe)) = catch.args.first() else { return false; };
-    if safe.func.to_token_stream().to_string() != "std :: panic :: AssertUnwindSafe" || safe.args.len() != 1 { return false; }
-    let Some(syn::Expr::Closure(closure)) = safe.args.first() else { return false; };
-    if !closure.inputs.is_empty() { return false; }
+    }) else {
+        return false;
+    };
+    let syn::Expr::Call(catch) = init.expr.as_ref() else {
+        return false;
+    };
+    if catch.func.to_token_stream().to_string() != "std :: panic :: catch_unwind"
+        || catch.args.len() != 1
+    {
+        return false;
+    }
+    let Some(syn::Expr::Call(safe)) = catch.args.first() else {
+        return false;
+    };
+    if safe.func.to_token_stream().to_string() != "std :: panic :: AssertUnwindSafe"
+        || safe.args.len() != 1
+    {
+        return false;
+    }
+    let Some(syn::Expr::Closure(closure)) = safe.args.first() else {
+        return false;
+    };
+    if !closure.inputs.is_empty() {
+        return false;
+    }
     let mut actual = closure.body.as_ref();
     while let syn::Expr::Block(block) = actual {
-        if !block.attrs.is_empty() || block.label.is_some() { return false; }
-        let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice() else { return false; };
+        if !block.attrs.is_empty() || block.label.is_some() {
+            return false;
+        }
+        let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice() else {
+            return false;
+        };
         actual = inner;
     }
     canonical(actual.to_token_stream()).to_string() == fragment(expected)
@@ -301,95 +339,201 @@ fn admission_post(source: &str, owner: &str, method: &str, local: &str, expected
 fn closed_admission_contract(source: &str) -> bool {
     let file = syn::parse_file(source).unwrap();
     for (name, fields) in [
-        ("ProtectedScheduledCreate", vec![("_unavailable", "std::convert::Infallible"),
-            ("_local", "std::marker::PhantomData<Rc<()>>")]),
-        ("AdmittedScheduledBackupRequest", vec![("observation", "ObservedScheduledBackupSubmit"),
-            ("create", "ProtectedScheduledCreate"), ("refused", "bool")]),
+        (
+            "ProtectedScheduledCreate",
+            vec![
+                ("_unavailable", "std::convert::Infallible"),
+                ("_local", "std::marker::PhantomData<Rc<()>>"),
+            ],
+        ),
+        (
+            "AdmittedScheduledBackupRequest",
+            vec![
+                ("observation", "ObservedScheduledBackupSubmit"),
+                ("create", "ProtectedScheduledCreate"),
+                ("refused", "bool"),
+            ],
+        ),
     ] {
-        let structs = file.items.iter().filter_map(|item| match item {
-            syn::Item::Struct(item) if item.ident == name => Some(item), _ => None,
-        }).collect::<Vec<_>>();
-        if structs.len() != 1 || structs[0].fields.len() != fields.len()
-            || structs[0].attrs.iter().any(|attribute| !attribute.path().is_ident("doc")) { return false; }
-        if structs[0].fields.iter().zip(fields).any(|(actual, (name, ty))|
-            !matches!(actual.vis, syn::Visibility::Inherited) || !actual.attrs.is_empty()
-            || actual.ident.as_ref().is_none_or(|id| id != name)
-            || canonical(actual.ty.to_token_stream()).to_string() != fragment(ty)) { return false; }
+        let structs = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == name => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if structs.len() != 1
+            || structs[0].fields.len() != fields.len()
+            || structs[0]
+                .attrs
+                .iter()
+                .any(|attribute| !attribute.path().is_ident("doc"))
+        {
+            return false;
+        }
+        if structs[0]
+            .fields
+            .iter()
+            .zip(fields)
+            .any(|(actual, (name, ty))| {
+                !matches!(actual.vis, syn::Visibility::Inherited)
+                    || !actual.attrs.is_empty()
+                    || actual.ident.as_ref().is_none_or(|id| id != name)
+                    || canonical(actual.ty.to_token_stream()).to_string() != fragment(ty)
+            })
+        {
+            return false;
+        }
     }
     let refused = "Err(anyhow::anyhow!(\"scheduled_backup_create_source_unqualified\"))";
     let acquire = selected_method(source, "ProtectedScheduledCreate", "acquire");
     let proof_check = selected_method(source, "ProtectedScheduledCreate", "check");
     if acquire != fragment(&format!("fn acquire() -> Result<Self> {{ {refused} }}"))
-        || proof_check != fragment(&format!("fn check(&self) -> Result<()> {{ {refused} }}")) { return false; }
+        || proof_check != fragment(&format!("fn check(&self) -> Result<()> {{ {refused} }}"))
+    {
+        return false;
+    }
     let factory = selected_method(source, "ObservedScheduledBackupSubmit", "try_admit_request");
     let check = selected_method(source, "AdmittedScheduledBackupRequest", "check");
     let ordered = |text: &str, pieces: &[&str]| {
         let mut tail = text;
         for piece in pieces {
             let token = fragment(piece);
-            let Some((_, rest)) = tail.split_once(&token) else { return false; };
+            let Some((_, rest)) = tail.split_once(&token) else {
+                return false;
+            };
             tail = rest;
         }
         true
     };
-    ordered(&factory, &[
-        "self.check(stage, original)?;", "ProtectedScheduledCreate::acquire()",
-        "let checked", "let stage_checked", "self.refuse();", "stage.refuse_serving();",
-        "original.refuse();", "finish_checked(requested, checked)",
-        "finish_checked(Ok(create), stage_checked)?", "AdmittedScheduledBackupRequest { observation: self, create, refused: false }",
-    ]) && admission_post(source, "ObservedScheduledBackupSubmit", "try_admit_request", "checked", "self.check(stage, original)")
-        && admission_post(source, "ObservedScheduledBackupSubmit", "try_admit_request", "stage_checked", "stage.check_serving_acquisition(original)")
-        && ordered(&check, &["self.observation.check(stage, original)?;", "self.create.check()?;",
-            "self.observation.check(stage, original)", "let checked", "self.refuse();",
-            "stage.refuse_serving();", "original.refuse();", "finish_checked(requested, checked)"])
-        && admission_post(source, "AdmittedScheduledBackupRequest", "check", "checked", "stage.check_serving_acquisition(original)")
-        && !factory.contains(&fragment("NativeAcquisition::begin"))
+    ordered(
+        &factory,
+        &[
+            "self.check(stage, original)?;",
+            "ProtectedScheduledCreate::acquire()",
+            "let checked",
+            "let stage_checked",
+            "self.refuse();",
+            "stage.refuse_serving();",
+            "original.refuse();",
+            "finish_checked(requested, checked)",
+            "finish_checked(Ok(create), stage_checked)?",
+            "AdmittedScheduledBackupRequest { observation: self, create, refused: false }",
+        ],
+    ) && admission_post(
+        source,
+        "ObservedScheduledBackupSubmit",
+        "try_admit_request",
+        "checked",
+        "self.check(stage, original)",
+    ) && admission_post(
+        source,
+        "ObservedScheduledBackupSubmit",
+        "try_admit_request",
+        "stage_checked",
+        "stage.check_serving_acquisition(original)",
+    ) && ordered(
+        &check,
+        &[
+            "self.observation.check(stage, original)?;",
+            "self.create.check()?;",
+            "self.observation.check(stage, original)",
+            "let checked",
+            "self.refuse();",
+            "stage.refuse_serving();",
+            "original.refuse();",
+            "finish_checked(requested, checked)",
+        ],
+    ) && admission_post(
+        source,
+        "AdmittedScheduledBackupRequest",
+        "check",
+        "checked",
+        "stage.check_serving_acquisition(original)",
+    ) && !factory.contains(&fragment("NativeAcquisition::begin"))
         && !factory.contains(&fragment("BackupSubmitOriginal::capture"))
         && !factory.contains(&fragment("identity_domain"))
-        && selected_method(source, "AdmittedScheduledBackupRequest", "refuse") == fragment("fn refuse(&mut self) { self.refused = true; self.observation.refuse(); }")
-        && selected_method(source, "AdmittedScheduledBackupRequest", "drop") == fragment("fn drop(&mut self) { self.refuse(); }")
+        && selected_method(source, "AdmittedScheduledBackupRequest", "refuse")
+            == fragment("fn refuse(&mut self) { self.refused = true; self.observation.refuse(); }")
+        && selected_method(source, "AdmittedScheduledBackupRequest", "drop")
+            == fragment("fn drop(&mut self) { self.refuse(); }")
 }
 
 #[test]
 fn actual_request_admission_has_an_uninhabited_create_gate_and_same_whole_observation() {
-    let source = include_str!("channel/scheduled_backup.rs").split("#[cfg(test)]").next().unwrap();
+    let source = include_str!("channel/scheduled_backup.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap();
     assert!(closed_admission_contract(source));
     for (old, new) in [
-        ("_unavailable: std::convert::Infallible", "_unavailable: bool"),
+        (
+            "_unavailable: std::convert::Infallible",
+            "_unavailable: bool",
+        ),
         ("_local: std::marker::PhantomData<Rc<()>>", "_local: ()"),
-        ("observation: ObservedScheduledBackupSubmit", "observation: NativeOriginalRefusal"),
+        (
+            "observation: ObservedScheduledBackupSubmit",
+            "observation: NativeOriginalRefusal",
+        ),
         ("observation: self", "observation: fresh_request()"),
     ] {
         assert_eq!(source.matches(old).count(), 1);
         assert!(!closed_admission_contract(&source.replacen(old, new, 1)));
     }
     for method in ["acquire", "check"] {
-        let mut file = syn::parse_file(source).unwrap(); let mut changed = 0;
+        let mut file = syn::parse_file(source).unwrap();
+        let mut changed = 0;
         for item in &mut file.items {
-            if let syn::Item::Impl(item) = item && item.self_ty.to_token_stream().to_string() == "ProtectedScheduledCreate" {
+            if let syn::Item::Impl(item) = item
+                && item.self_ty.to_token_stream().to_string() == "ProtectedScheduledCreate"
+            {
                 for item in &mut item.items {
-                    if let syn::ImplItem::Fn(item) = item && item.sig.ident == method {
-                        item.block = syn::parse_quote!({ Ok(unqualified_value()) }); changed += 1;
+                    if let syn::ImplItem::Fn(item) = item
+                        && item.sig.ident == method
+                    {
+                        item.block = syn::parse_quote!({ Ok(unqualified_value()) });
+                        changed += 1;
                     }
                 }
             }
         }
         assert_eq!(changed, 1);
-        assert!(!closed_admission_contract(&file.to_token_stream().to_string()));
+        assert!(!closed_admission_contract(
+            &file.to_token_stream().to_string()
+        ));
     }
     for (owner, method, local) in [
-        ("ObservedScheduledBackupSubmit", "try_admit_request", "checked"),
-        ("ObservedScheduledBackupSubmit", "try_admit_request", "stage_checked"),
+        (
+            "ObservedScheduledBackupSubmit",
+            "try_admit_request",
+            "checked",
+        ),
+        (
+            "ObservedScheduledBackupSubmit",
+            "try_admit_request",
+            "stage_checked",
+        ),
         ("AdmittedScheduledBackupRequest", "check", "checked"),
     ] {
-        let mut file = syn::parse_file(source).unwrap();let mut changed = 0;
+        let mut file = syn::parse_file(source).unwrap();
+        let mut changed = 0;
         for item in &mut file.items {
-            if let syn::Item::Impl(item) = item && item.self_ty.to_token_stream().to_string() == owner {
+            if let syn::Item::Impl(item) = item
+                && item.self_ty.to_token_stream().to_string() == owner
+            {
                 for member in &mut item.items {
-                    if let syn::ImplItem::Fn(member) = member && member.sig.ident == method {
+                    if let syn::ImplItem::Fn(member) = member
+                        && member.sig.ident == method
+                    {
                         for statement in &mut member.block.stmts {
-                            if let syn::Stmt::Local(statement) = statement && matches!(&statement.pat, syn::Pat::Ident(id) if id.ident == local) {
-                                *statement.init.as_mut().unwrap().expr = syn::parse_quote!(Ok(Ok(())));changed += 1;
+                            if let syn::Stmt::Local(statement) = statement
+                                && matches!(&statement.pat, syn::Pat::Ident(id) if id.ident == local)
+                            {
+                                *statement.init.as_mut().unwrap().expr =
+                                    syn::parse_quote!(Ok(Ok(())));
+                                changed += 1;
                             }
                         }
                     }
@@ -397,7 +541,9 @@ fn actual_request_admission_has_an_uninhabited_create_gate_and_same_whole_observ
             }
         }
         assert_eq!(changed, 1);
-        assert!(!closed_admission_contract(&file.to_token_stream().to_string()));
+        assert!(!closed_admission_contract(
+            &file.to_token_stream().to_string()
+        ));
     }
 }
 

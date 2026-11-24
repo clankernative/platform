@@ -762,9 +762,8 @@ impl ObservedScheduledBackupSubmit {
             self.check(stage, original)?;
             ProtectedScheduledCreate::acquire()
         }));
-        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.check(stage, original)
-        }));
+        let checked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check(stage, original)));
         let stage_checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             stage.check_serving_acquisition(original)
         }));
@@ -781,7 +780,11 @@ impl ObservedScheduledBackupSubmit {
         // supplier and conveys no authority from a comparison or a boolean.
         let create = finish_checked(requested, checked);
         let create = finish_checked(Ok(create), stage_checked)?;
-        Ok(AdmittedScheduledBackupRequest { observation: self, create, refused: false })
+        Ok(AdmittedScheduledBackupRequest {
+            observation: self,
+            create,
+            refused: false,
+        })
     }
 
     pub(in crate::security_epoch::native_enrollment) fn check(
@@ -851,11 +854,15 @@ impl Drop for ObservedScheduledBackupSubmit {
 
 impl ProtectedScheduledCreate {
     fn acquire() -> Result<Self> {
-        Err(anyhow::anyhow!("scheduled_backup_create_source_unqualified"))
+        Err(anyhow::anyhow!(
+            "scheduled_backup_create_source_unqualified"
+        ))
     }
 
     fn check(&self) -> Result<()> {
-        Err(anyhow::anyhow!("scheduled_backup_create_source_unqualified"))
+        Err(anyhow::anyhow!(
+            "scheduled_backup_create_source_unqualified"
+        ))
     }
 }
 
