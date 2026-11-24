@@ -259,6 +259,11 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/scheduled_backup/journal.rs",
+      "scope": "const",
+      "fingerprint": "sha256:c7702966aa32edf55e27b64e9a08d786e0648629971df1f9cf3fdb1918d68c4b"
+    },
+    {
       "source": "crates/day2/src/security_epoch/serving/restored.rs",
       "scope": "const",
       "fingerprint": "sha256:bcf5b9bdca66b29026bd50432577116ad52af0bed977c697b5fee3465b17bb0d",
