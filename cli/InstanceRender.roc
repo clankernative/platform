@@ -15,6 +15,15 @@ import "JsonValue.roc" as json_value_source : Str
 ## deploy/integrations/ such as gitea-instance-ci, optional stacks such as
 ## qualification-runner, and roots an instance owns itself.
 InstanceRender :: [].{
+	RootRequest : {
+		label : Str,
+		stack : Str,
+		app_id : Try(Str, [Null]),
+		bucket : Str,
+		prefix : Str,
+		inputs : Str,
+		variables : Str,
+	}
 
 	## One OpenTofu invocation. A per-app root carries the app it renders, so a
 	## per-app root without its app, or a platform root with one, cannot exist.
@@ -172,15 +181,15 @@ InstanceRender :: [].{
 		}
 
 		## The root as the request names it to the host.
-		as_request : Root, InstanceSpec.Derived -> _
+		as_request : Root, InstanceSpec.Derived -> RootRequest
 		as_request = |root, names| {
-			backend = root.backend(names)
+			root_backend = root.backend(names)
 			{
 				label: root.label(),
 				stack: root.name(),
 				app_id: root.app_id(),
-				bucket: backend.bucket,
-				prefix: backend.prefix,
+				bucket: root_backend.bucket,
+				prefix: root_backend.prefix,
 				inputs: root.committed_inputs(),
 				variables: root.tfvars_json(names),
 			}
@@ -369,7 +378,7 @@ rendered :
 	InstanceSpec,
 	InstanceRender.Mode,
 	{ instance : Str, checkout : Str, output : Str },
-	List(_),
+	List(InstanceRender.RootRequest),
 	Try(Str, [Null]) ->
 		Str
 rendered = |spec, mode, paths, selected, candidate| {
