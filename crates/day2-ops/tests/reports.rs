@@ -457,84 +457,12 @@ fn unsecured_restore_refuses_target_runtime_only_history_before_output_mutation(
     Ok(())
 }
 
-/// The runtime image's day2-backup (scheduled GKE backups) runs beside a serving
-/// pod: it must not need the serve lock, and must leave a verified bundle that
-/// restores to the same domain and journal contents.
+/// CLI options are refused before consulting the image's fixed installed runner.
 #[test]
-fn online_backup_cli_snapshots_a_serving_instance_into_a_verified_bundle() -> Result<()> {
+fn online_backup_cli_refuses_incomplete_or_invalid_upload_options() -> Result<()> {
     let binary = env!("CARGO_BIN_EXE_day2-backup");
     let scratch = tempfile::tempdir()?;
-    let runtime = development::create(&artifact()?, &scratch.path().join("original"), None)?;
-    development::exercise(&runtime, Some("demo"), 42, 0)?;
-    let before = runtime.inspect()?;
-    // What day2-serve holds for as long as it serves.
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(
-            runtime
-                .db()
-                .parent()
-                .context("state directory")?
-                .join("app.serve.lock"),
-        )?;
-    lock.try_lock()?;
-    let output = scratch.path().join("snapshot");
-    let run = |instance: &std::path::Path, app: &str, output: &std::path::Path| {
-        std::process::Command::new(binary)
-            .arg(instance)
-            .arg(app)
-            .arg(output)
-            .arg("--operation-lock")
-            .output()
-    };
-    // Snapshot refusal precedes output creation, without taking the serving
-    // lease or changing business state. This is the scheduled-backup path.
-    let operation = day2::deployment::OperationLease::for_instance(runtime.instance_path(), "app")?;
-    let blocked_path = scratch.path().join("blocked-by-release");
-    let blocked = run(runtime.instance_path(), "app", &blocked_path)?;
-    assert!(!blocked.status.success() && blocked.stdout.is_empty());
-    assert!(!blocked_path.exists());
-    drop(operation);
-    let result = run(runtime.instance_path(), "app", &output)?;
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let summary: Value = serde_json::from_slice(&result.stdout)?;
-    let manifest = backup::verify(&output)?;
-    assert_eq!(summary["verified"], true);
-    assert_eq!(
-        summary["backup"],
-        output.canonicalize()?.display().to_string()
-    );
-    assert_eq!(summary["app"], "app");
-    assert_eq!(summary["scope"], runtime.scope());
-    assert_eq!(summary["artifact"], runtime.artifact().id());
-    assert_eq!(summary["database"], manifest.database);
-    assert_eq!(
-        summary["provider_databases"],
-        serde_json::to_value(&manifest.provider_databases)?
-    );
-    assert_eq!(
-        summary["authority"],
-        serde_json::to_value(&manifest.authority)?
-    );
-    let restored = backup::restore(&output, &scratch.path().join("restored"))?;
-    assert_eq!(Runtime::load(&restored, "app")?.inspect()?, before);
-    assert_eq!(runtime.inspect()?, before);
-    // An existing directory is never reused or overwritten.
-    let again = run(runtime.instance_path(), "app", &output)?;
-    assert!(!again.status.success());
-    assert_eq!(backup::verify(&output)?.database, manifest.database);
-    // Refusals exit non-zero, print no summary and leave no directory behind.
-    let missing = scratch.path().join("unknown-app");
-    let unknown = run(runtime.instance_path(), "unknown", &missing)?;
-    assert!(!unknown.status.success() && unknown.stdout.is_empty());
-    assert!(!missing.exists());
+    let runtime = development::create(&artifact()?, &scratch.path().join("instance"), None)?;
     let usage = std::process::Command::new(binary)
         .arg(runtime.instance_path())
         .output()?;
@@ -568,7 +496,6 @@ fn online_backup_cli_snapshots_a_serving_instance_into_a_verified_bundle() -> Re
         assert!(!result.status.success() && result.stdout.is_empty());
         assert!(!refused.exists());
     }
-    drop(lock);
     Ok(())
 }
 

@@ -4,7 +4,7 @@
 //!       [--upload-gcs <bucket> --object-prefix <prefix>]
 //!
 //! The same native operations as `day2 platform backup` (ops/Backup.roc), with
-//! no backup logic of its own: `backup::take` snapshots the app database and
+//! no backup logic of its own: the retained-lease snapshot primitive snapshots the app database and
 //! its local provider stores through SQLite's online backup API over read-only
 //! connections, each copied inside one read transaction (a consistent snapshot
 //! that the app's concurrent commits cannot restart) and failing after 15 s
@@ -20,15 +20,16 @@
 //! and `<...>/COMPLETE` is written last (see `day2_ops::offsite`). The binary
 //! appends the timestamp itself, so every run has a fresh prefix.
 //!
-//! This binary ships in the distroless runtime image, which has no shell and no
-//! Roc workflow runner, so it calls the capabilities directly in the order the
-//! Roc recipe does. On success it prints one JSON summary line; any failure
-//! exits non-zero.
+//! The distroless runtime contains the fixed, source/toolchain-checked Roc
+//! workflow executable and its matching JSON pin. The Backup recipe owns the
+//! operation order; its closed Rust broker retains the actual lease and full
+//! manifests through verification, upload and child-process closure. On success
+//! this binary prints the broker's JSON summary, never a child's claimed result.
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, bail, ensure};
 use day2_ops::{backup, offsite};
-use serde_json::{Value, json};
-use std::{ffi::OsString, path::PathBuf, process::ExitCode, time::SystemTime};
+use serde_json::Value;
+use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
 const USAGE: &str = "usage: day2-backup INSTANCE_JSON APP OUTPUT_DIR --operation-lock [--include-state-subpath PATH]... [--include-state-sqlite PATH]... [--upload-gcs BUCKET --object-prefix PREFIX]";
 
@@ -107,54 +108,18 @@ fn run() -> Result<Value> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     // Arguments are checked before any snapshot is taken.
     let options = parse(&arguments)?;
-    // Retain exclusion through verification and COMPLETE publication, not just
-    // through SQLite copying. A release refuses while upload is still pending.
-    let lease = day2::deployment::OperationLease::for_instance(&options.instance, &options.app)?;
-    let taken = backup::take_with_lease(
+    // No PATH, sibling executable or source-distribution fallback in the Job.
+    backup::run_scheduled(
         &options.instance,
         &options.app,
         &options.output,
         &options.state_subpaths,
         &options.sqlite_paths,
-        &lease,
-    )?;
-    let verified = backup::verify(&options.output)?;
-    ensure!(
-        verified.database == taken.database
-            && verified.artifact == taken.artifact
-            && verified.provider_databases == taken.provider_databases
-            && verified.companion_state == taken.companion_state
-            && verified.authority == taken.authority,
-        "verified backup differs from the snapshot taken"
-    );
-    let mut summary = json!({
-        "backup": options.output.canonicalize()?,
-        "format": verified.format,
-        "app": verified.app,
-        "installation": verified.instance.installation,
-        "environment": verified.instance.environment,
-        "scope": verified.scope,
-        "artifact": verified.artifact,
-        "database": verified.database,
-        "provider_databases": verified.provider_databases,
-        "companion_state": verified.companion_state,
-        "authority": verified.authority,
-        "verified": true,
-    });
-    if let Some(upload) = options.upload {
-        let prefix = format!(
-            "{}/{}",
-            upload.prefix,
-            offsite::utc_stamp(SystemTime::now())?
-        );
-        summary["upload"] = offsite::upload_gcs(
-            &options.output,
-            &upload.bucket,
-            &prefix,
-            &offsite::Endpoints::google(),
-        )?;
-    }
-    Ok(summary)
+        options
+            .upload
+            .as_ref()
+            .map(|upload| (upload.bucket.as_str(), upload.prefix.as_str())),
+    )
 }
 
 fn main() -> ExitCode {
