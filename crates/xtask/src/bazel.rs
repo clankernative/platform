@@ -1273,6 +1273,211 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ci_mac_public_git_fetch_ignores_global_and_system_configuration() -> Result<()> {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        struct GitChild {
+            child: std::process::Child,
+            reaped: bool,
+        }
+
+        impl Drop for GitChild {
+            fn drop(&mut self) {
+                if !self.reaped {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                }
+            }
+        }
+
+        fn git_output(
+            git: &mut Command,
+            deadline: std::time::Instant,
+        ) -> Result<(bool, Vec<u8>, Vec<u8>)> {
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "Git fixture child deadline"
+            );
+            let stdout = tempfile::NamedTempFile::new()?;
+            let stderr = tempfile::NamedTempFile::new()?;
+            git.stdout(stdout.as_file().try_clone()?)
+                .stderr(stderr.as_file().try_clone()?);
+            let mut child = GitChild {
+                child: git.spawn()?,
+                reaped: false,
+            };
+            let status = loop {
+                ensure!(
+                    std::time::Instant::now() < deadline,
+                    "Git fixture child deadline"
+                );
+                ensure!(
+                    stdout.as_file().metadata()?.len() <= 8192
+                        && stderr.as_file().metadata()?.len() <= 8192,
+                    "Git fixture output bound"
+                );
+                if let Some(status) = child.child.try_wait()? {
+                    child.reaped = true;
+                    break status;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            let read = |file: &Path| -> Result<Vec<u8>> {
+                let mut bytes = Vec::new();
+                fs::File::open(file)?.take(8193).read_to_end(&mut bytes)?;
+                ensure!(bytes.len() <= 8192, "Git fixture output bound");
+                Ok(bytes)
+            };
+            Ok((status.success(), read(stdout.path())?, read(stderr.path())?))
+        }
+
+        let home = tempfile::tempdir()?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let origin = format!("http://{}", listener.local_addr()?);
+        // A synthetic ambient rewrite turns an anonymous public endpoint into
+        // a challenged endpoint. No real config, helper or credential is read.
+        let poisoned = format!("[url \"{origin}/denied/\"]\n insteadOf = {origin}/public/\n");
+        fs::write(home.path().join(".gitconfig"), &poisoned)?;
+        let system = home.path().join("system.config");
+        fs::write(&system, poisoned)?;
+        let stopped = Arc::new(AtomicBool::new(false));
+        let server_stopped = Arc::clone(&stopped);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let server = std::thread::spawn(move || -> Result<()> {
+            while !server_stopped.load(Ordering::Relaxed) {
+                ensure!(std::time::Instant::now() < deadline, "Git fixture budget");
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        ensure!(std::time::Instant::now() < deadline, "Git fixture budget");
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                stream.set_nonblocking(false)?;
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let remaining = deadline
+                        .checked_duration_since(std::time::Instant::now())
+                        .context("Git fixture read deadline")?;
+                    stream.set_read_timeout(Some(remaining.min(Duration::from_secs(2))))?;
+                    let mut bytes = [0; 256];
+                    let received = stream.read(&mut bytes)?;
+                    ensure!(received > 0, "Git fixture request incomplete");
+                    request.extend_from_slice(&bytes[..received]);
+                    ensure!(request.len() <= 4096, "Git fixture request bound");
+                }
+                let request = std::str::from_utf8(&request)?;
+                let path = request.split_whitespace().nth(1).unwrap_or("");
+                let (status, body) = if path.starts_with("/denied/") {
+                    (401, "")
+                } else if path.starts_with("/public/info/refs") {
+                    (
+                        200,
+                        "1111111111111111111111111111111111111111\trefs/heads/main\n",
+                    )
+                } else if path == "/public/HEAD" {
+                    (200, "ref: refs/heads/main\n")
+                } else {
+                    (404, "")
+                };
+                let challenge = if status == 401 {
+                    "WWW-Authenticate: Basic realm=\"synthetic\"\r\n"
+                } else {
+                    ""
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} Fixture\r\n{challenge}Content-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let mut remaining_response = response.as_bytes();
+                while !remaining_response.is_empty() {
+                    let remaining = deadline
+                        .checked_duration_since(std::time::Instant::now())
+                        .context("Git fixture write deadline")?;
+                    stream.set_write_timeout(Some(remaining.min(Duration::from_secs(2))))?;
+                    let written = stream.write(remaining_response)?;
+                    ensure!(written > 0, "Git fixture response incomplete");
+                    remaining_response = &remaining_response[written..];
+                }
+            }
+            Ok(())
+        });
+        let result = (|| -> Result<()> {
+            // Read the actual CI profile; removing either production setting
+            // must make the positive anonymous-Git control fail.
+            let settings = include_str!("../../../.bazelrc")
+                .lines()
+                .filter_map(|line| line.strip_prefix("common:ci-mac --repo_env="))
+                .filter_map(|line| line.split_once('='))
+                .collect::<Vec<_>>();
+            for removed in [
+                Some("all"),
+                None,
+                Some("GIT_CONFIG_GLOBAL"),
+                Some("GIT_CONFIG_NOSYSTEM"),
+            ] {
+                let mut git = Command::new("git");
+                git.args([
+                    "-c",
+                    "http.lowSpeedLimit=1",
+                    "-c",
+                    "http.lowSpeedTime=2",
+                    "ls-remote",
+                ])
+                .arg(format!("{origin}/public/"))
+                .current_dir(home.path())
+                .env_clear()
+                .env(
+                    "PATH",
+                    std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+                )
+                .env("HOME", home.path())
+                .env("GIT_CONFIG_SYSTEM", &system)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("LANG", "C")
+                .env("LC_ALL", "C")
+                .stdin(std::process::Stdio::null());
+                for (key, value) in &settings {
+                    if removed != Some("all") && removed != Some(*key) {
+                        git.env(key, value);
+                    }
+                }
+                let (success, stdout, stderr) = git_output(&mut git, deadline)?;
+                if removed.is_none() {
+                    ensure!(success, "isolated public Git fetch must succeed");
+                    ensure!(
+                        stdout
+                            .windows(b"refs/heads/main".len())
+                            .any(|bytes| bytes == b"refs/heads/main"),
+                        "actual public reference required"
+                    );
+                } else {
+                    ensure!(!success, "ambient Git rewrite must refuse");
+                    ensure!(
+                        stderr
+                            .windows(b"could not read Username".len())
+                            .any(|bytes| bytes == b"could not read Username"),
+                        "actual Git authentication refusal required"
+                    );
+                }
+            }
+            Ok(())
+        })();
+        stopped.store(true, Ordering::Relaxed);
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("Git fixture thread panicked"))??;
+        result
+    }
+
+    #[test]
     fn failed_restore_disables_disk_reads_and_writes_but_preserves_source_downloads() {
         use std::ffi::OsStr;
         for disabled in [false, true] {
