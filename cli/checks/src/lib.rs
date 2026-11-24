@@ -403,26 +403,15 @@ mod tests {
         }
         fs::copy(root().join("help.txt"), scratch.0.join("help.txt")).unwrap();
         fs::create_dir(scratch.0.join("fixtures")).unwrap();
-        fs::copy(
-            root().join("fixtures/links-artifact.json"),
-            scratch.0.join("fixtures/links-artifact.json"),
-        )
-        .unwrap();
-        fs::copy(
-            root().join("fixtures/release-receipt.json"),
-            scratch.0.join("fixtures/release-receipt.json"),
-        )
-        .unwrap();
-        fs::copy(
-            root().join("fixtures/source-receipt.json"),
-            scratch.0.join("fixtures/source-receipt.json"),
-        )
-        .unwrap();
-        fs::copy(
-            root().join("fixtures/candidate-receipt.json"),
-            scratch.0.join("fixtures/candidate-receipt.json"),
-        )
-        .unwrap();
+        for fixture in [
+            "fixtures/links-artifact.json",
+            "fixtures/release-receipt.json",
+            "fixtures/source-receipt.json",
+            "fixtures/candidate-receipt.json",
+            "fixtures/deploy-receipt.json",
+        ] {
+            fs::copy(root().join(fixture), scratch.0.join(fixture)).unwrap();
+        }
         let check = || {
             compiler()
                 .args(["check", "--no-cache", "main.roc"])
@@ -434,8 +423,9 @@ mod tests {
         let positive = check();
         assert!(
             positive.status.success(),
-            "positive compile control failed: {}",
-            String::from_utf8_lossy(&positive.stdout)
+            "positive compile control failed: {}{}",
+            String::from_utf8_lossy(&positive.stdout),
+            String::from_utf8_lossy(&positive.stderr)
         );
         let original = fs::read_to_string(scratch.0.join("main.roc")).unwrap();
         let (header, _) = original
@@ -1051,7 +1041,8 @@ mod tests {
                     "instance.candidate.preflight",
                     "instance.candidate.check",
                     "instance.candidate.native-build",
-                    "instance.candidate.native-probe"
+                    "instance.candidate.native-probe",
+                    "instance.deploy"
                 ])
             );
             assert_eq!(value["result"]["supports_authentication"], false);
