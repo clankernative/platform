@@ -227,6 +227,11 @@ fn confirmation_response(write: &Value) -> Value {
     json!([{"found": stored(write), "readTime":"2026-11-23T17:00:00.000002Z"}])
 }
 
+fn missing_confirmation_response(write: &Value) -> Value {
+    json!([{"missing":write["writes"][0]["update"]["name"],
+        "readTime":"2026-11-23T17:00:00.000002Z"}])
+}
+
 fn acknowledged_turn() -> Result<(EpochStore, BirthTurn, Value)> {
     // Only local codec DATA. This cannot construct a genuine native root.
     let root = binding(0, 1, 0);
@@ -288,7 +293,7 @@ fn confirmation_stream_is_exact_bounded_and_provider_time_does_not_renew_native_
     let (_, _, write) = acknowledged_turn()?;
     let good = confirmation_response(&write);
     let mut invalid = vec![Value::Null, json!({}), json!([]), json!([good[0],good[0]]),
-        json!([{"transaction":"not-started"}]), json!([{"missing":good[0]["found"]["name"],"readTime":good[0]["readTime"]}])];
+        json!([{"transaction":"not-started"}]), missing_confirmation_response(&write)];
     for (path, replacement) in [
         (vec!["extra"],json!(true)), (vec!["readTime"],Value::Null),
         (vec!["readTime"],json!("2026-11-23T16:59:59.999999Z")),
@@ -397,6 +402,7 @@ fn replay_confirmation(program: &ConfirmationProgramData) -> Result<Vec<(bool,bo
     let root = binding(0,1,0); let selected = selection(&root);
     let (_,_,write) = acknowledged_turn()?;
     let found = serde_json::to_vec(&confirmation_response(&write))?;
+    let missing = serde_json::to_vec(&missing_confirmation_response(&write))?;
     let mut recreated = confirmation_response(&write);
     recreated[0]["found"]["createTime"] = json!("2026-11-23T17:00:00.000002Z");
     recreated[0]["found"]["updateTime"] = recreated[0]["found"]["createTime"].clone();
@@ -410,7 +416,7 @@ fn replay_confirmation(program: &ConfirmationProgramData) -> Result<Vec<(bool,bo
             ConfirmationEventData::BeginRead => actual.as_mut().is_some_and(|t| t.begin_confirmation_data(&selected).is_ok()),
             ConfirmationEventData::Found | ConfirmationEventData::Recreated | ConfirmationEventData::Missing => {
                 let body = match event { ConfirmationEventData::Found => found.as_slice(),
-                    ConfirmationEventData::Recreated => recreated.as_slice(), _ => b"[]" };
+                    ConfirmationEventData::Recreated => recreated.as_slice(), _ => missing.as_slice() };
                 actual.as_mut().is_some_and(|t| t.observe_confirmation_data(&selected,200,body).is_ok())
             }
             ConfirmationEventData::Lose => { if let Some(t) = &mut actual { t.lose_data(); } true }
@@ -450,11 +456,12 @@ fn independent_confirmation_histories_replay_twice_through_uncertainty_and_lost_
     use ConfirmationEventData::*;
     let kinds=[Submit,Ack,BeginRead,Found,Recreated,Missing,Lose,CrashReopen];
     for seed in 0..32u64 {
-        let mut events=match seed%4 {
+        let mut events=match seed%5 {
             0=>vec![Submit,Ack,BeginRead,Found],
             1=>vec![Submit,Lose,BeginRead,Found],
             2=>vec![Submit,Ack,BeginRead,Recreated],
-            _=>vec![Submit,Ack,BeginRead,CrashReopen,Found],
+            3=>vec![Submit,Ack,BeginRead,CrashReopen,Found],
+            _=>vec![Submit,Ack,BeginRead,Missing,Found],
         };
         let mut random=seed+1;
         for _ in 0..24 { random=random.wrapping_mul(6364136223846793005).wrapping_add(1);events.push(kinds[((random>>32)%8)as usize]); }
@@ -472,5 +479,35 @@ fn independent_confirmation_histories_replay_twice_through_uncertainty_and_lost_
         let mut wrong=decoded.clone();wrong.events.resize(65,Found);
         assert!(replay_confirmation(&wrong).is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn failed_confirmation_bundle_keeps_the_complete_source_bound_program_and_both_prefixes() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use ConfirmationEventData::*;
+    let program=ConfirmationProgramData { format:1,seed:17,sources:confirmation_sources(),
+        events:vec![Submit,Ack,BeginRead,Found] };
+    let expected=confirmation_reference(&program.events);
+    let mut actual=expected.clone();actual[2]=(false,false);
+    let path=retain_confirmation_failure(&program,&expected,&actual)?;
+    let parent=path.parent().unwrap();
+    assert_eq!(std::fs::metadata(parent)?.permissions().mode()&0o777,0o700);
+    assert_eq!(std::fs::metadata(&path)?.permissions().mode()&0o777,0o600);
+    let bytes=std::fs::read(&path)?;
+    assert!(bytes.len()<=65_536);
+    let record:Value=crate::json::decode_evidence(&bytes)?;
+    assert_eq!(record.as_object().unwrap().len(),4);
+    assert_eq!(record["failed_at"],json!(2));
+    assert_eq!(record["expected_prefix"],json!(&expected[..3]));
+    assert_eq!(record["actual_prefix"],json!(&actual[..3]));
+    let retained:ConfirmationProgramData=crate::json::decode_evidence(&serde_json::to_vec(&record["program"])?)?;
+    assert_eq!(retained,program);
+    assert_eq!(replay_confirmation(&retained)?,expected);
+    assert_eq!(replay_confirmation(&retained)?,expected);
+    let mut changed=retained;changed.sources.insert("counter".into(),digest("changed-counter"));
+    assert!(replay_confirmation(&changed).is_err());
+    std::fs::remove_file(&path)?;
+    std::fs::remove_dir(parent)?;
     Ok(())
 }
