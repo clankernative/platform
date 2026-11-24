@@ -380,7 +380,7 @@ fn actual_request_admission_has_an_uninhabited_create_gate_and_same_whole_observ
                     if let syn::ImplItem::Fn(member) = member && member.sig.ident == method {
                         for statement in &mut member.block.stmts {
                             if let syn::Stmt::Local(statement) = statement && matches!(&statement.pat, syn::Pat::Ident(id) if id.ident == local) {
-                                statement.init.as_mut().unwrap().expr = Box::new(syn::parse_quote!(Ok(Ok(()))));changed += 1;
+                                *statement.init.as_mut().unwrap().expr = syn::parse_quote!(Ok(Ok(())));changed += 1;
                             }
                         }
                     }
