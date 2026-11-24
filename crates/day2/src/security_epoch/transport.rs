@@ -76,6 +76,7 @@ pub(super) enum Route<'a> {
     EpochRollback,
     EpochCommit,
     ScheduledBackupRootCommit,
+    ScheduledBackupRootRead,
 }
 
 // Admission telemetry classifies the actual provider request, not a role
@@ -107,7 +108,8 @@ fn admission_kind(route: &Route<'_>) -> Option<Work> {
         Route::EpochRead
         | Route::EpochRollback
         | Route::EpochCommit
-        | Route::ScheduledBackupRootCommit => None,
+        | Route::ScheduledBackupRootCommit
+        | Route::ScheduledBackupRootRead => None,
     }
 }
 
@@ -398,9 +400,10 @@ impl NativeHttp {
             Route::EpochRead
             | Route::EpochRollback
             | Route::EpochCommit
-            | Route::ScheduledBackupRootCommit => {
+            | Route::ScheduledBackupRootCommit
+            | Route::ScheduledBackupRootRead => {
                 let operation = match route {
-                    Route::EpochRead => "batchGet",
+                    Route::EpochRead | Route::ScheduledBackupRootRead => "batchGet",
                     Route::EpochRollback => "rollback",
                     _ => "commit",
                 };
@@ -528,7 +531,7 @@ impl NativeHttp {
 // 2xx must not be relabelled as 200 by its consuming metadata codec.
 fn response_status_accepted(route: &Route<'_>, status: reqwest::StatusCode) -> bool {
     match route {
-        Route::ScheduledBackupRootCommit => status == reqwest::StatusCode::OK,
+        Route::ScheduledBackupRootCommit | Route::ScheduledBackupRootRead => status == reqwest::StatusCode::OK,
         _ => status.is_success(),
     }
 }
@@ -572,7 +575,7 @@ mod tests {
         }
         let expected: syn::Block = syn::parse_quote!({
             match route {
-                Route::ScheduledBackupRootCommit => status == reqwest::StatusCode::OK,
+                Route::ScheduledBackupRootCommit | Route::ScheduledBackupRootRead => status == reqwest::StatusCode::OK,
                 _ => status.is_success(),
             }
         });
@@ -597,9 +600,10 @@ mod tests {
         let ack = br#"{"writeResults":[{"updateTime":"2026-11-23T17:00:00.000001Z"}],"commitTime":"2026-11-23T17:00:00.000001Z"}"#;
         for status in 100..600 {
             let status = reqwest::StatusCode::from_u16(status).unwrap();
-            let body = response_status_accepted(&Route::ScheduledBackupRootCommit, status)
-                .then_some(ack.as_slice());
-            assert_eq!(body.is_some(), status == reqwest::StatusCode::OK);
+            for route in [Route::ScheduledBackupRootCommit, Route::ScheduledBackupRootRead] {
+                let body = response_status_accepted(&route, status).then_some(ack.as_slice());
+                assert_eq!(body.is_some(), status == reqwest::StatusCode::OK);
+            }
             assert_eq!(
                 response_status_accepted(&Route::EpochCommit, status),
                 status.is_success()
@@ -610,6 +614,8 @@ mod tests {
             http.address(&Route::ScheduledBackupRootCommit).unwrap(),
             http.address(&Route::EpochCommit).unwrap()
         );
+        assert_eq!(http.address(&Route::ScheduledBackupRootRead).unwrap(), http.address(&Route::EpochRead).unwrap());
+        assert!(admission_kind(&Route::ScheduledBackupRootRead).is_none());
         let source = include_str!("transport.rs")
             .split("\n#[cfg(test)]\nmod tests")
             .next()
@@ -622,8 +628,8 @@ mod tests {
             ),
             ("status == reqwest::StatusCode::OK", "status.is_success()"),
             (
-                "Route::ScheduledBackupRootCommit => status",
-                "Route::EpochCommit => status",
+                "Route::ScheduledBackupRootCommit | Route::ScheduledBackupRootRead => status",
+                "Route::EpochCommit | Route::ScheduledBackupRootRead => status",
             ),
         ] {
             assert_eq!(source.matches(old).count(), 1);

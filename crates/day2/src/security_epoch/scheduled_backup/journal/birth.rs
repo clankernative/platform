@@ -80,6 +80,8 @@ enum DispositionData {
     Fresh,
     May,
     Known,
+    Confirming,
+    Confirmed,
     Unknown,
 }
 
@@ -91,6 +93,9 @@ pub(in crate::security_epoch) struct BirthTurn {
     name: String,
     record: RootRecordData,
     disposition: DispositionData,
+    // Only the real strict single-write ACK supplies this version. A matching
+    // row or caller argument can never manufacture the original creation time.
+    known_update: Option<UpdateTime>,
 }
 
 impl BirthTurn {
@@ -99,6 +104,7 @@ impl BirthTurn {
             name: document_data(selected, &binding)?,
             record: RootRecordData::new_data(selected, binding)?,
             disposition: DispositionData::Fresh,
+            known_update: None,
         })
     }
 
@@ -126,10 +132,62 @@ impl BirthTurn {
             "backup_root_ack_without_send"
         );
         let updated = single_write_ack_data(status, bytes)?;
+        self.known_update = Some(updated.clone());
         self.disposition = DispositionData::Known;
         // Strict metadata ACK only. Real postchecks, local activation and final
         // consuming settlement have NOT happened and cannot be inferred here.
         Ok(updated)
+    }
+
+    /// Fixed one-document, default-strong request DATA. This is not recovery,
+    /// a source grant or a new native original. Unknown is set before work.
+    pub(in crate::security_epoch) fn begin_confirmation_data(
+        &mut self,
+        selected: &EpochStore,
+    ) -> Result<Value> {
+        let before = std::mem::replace(&mut self.disposition, DispositionData::Unknown);
+        ensure!(before == DispositionData::Known && self.known_update.is_some(),
+            "backup_root_confirmation_requires_known_create");
+        ensure!(self.name == document_data(selected, &self.record.binding)?
+            && self.record == RootRecordData::new_data(selected, self.record.binding.clone())?,
+            "backup_root_confirmation_selection_changed");
+        // No mask hides added fields, and no transaction/readTime selector
+        // can request an old snapshot or start an unfinished transaction.
+        let body = json!({"documents":[self.name]});
+        self.disposition = DispositionData::Confirming;
+        Ok(body)
+    }
+
+    pub(in crate::security_epoch) fn observe_confirmation_data(
+        &mut self,
+        selected: &EpochStore,
+        status: u16,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let before = std::mem::replace(&mut self.disposition, DispositionData::Unknown);
+        ensure!(before == DispositionData::Confirming && status == 200
+            && bytes.len() <= MAX_PAYLOAD * 2, "backup_root_confirmation_unknown");
+        let known = self.known_update.as_ref().context("backup_root_known_version_missing")?;
+        let value: Value = crate::json::decode(bytes)
+            .map_err(|_| anyhow::anyhow!("backup_root_confirmation_encoding"))?;
+        let entries = value.as_array().context("backup_root_confirmation_array")?;
+        ensure!(entries.len() == 1, "backup_root_confirmation_count");
+        let entry = entries[0].as_object().context("backup_root_confirmation_map")?;
+        ensure!(entry.len() == 2 && entry.contains_key("found") && entry.contains_key("readTime"),
+            "backup_root_confirmation_fields");
+        let read: UpdateTime = entry.get("readTime").and_then(Value::as_str)
+            .context("backup_root_confirmation_read_time")?.to_owned().try_into()?;
+        ensure!(!known.is_strictly_after_data(&read)?, "backup_root_confirmation_before_create");
+        compare_existing_data(selected, &self.record.binding, known,
+            &serde_json::to_vec(entry.get("found").context("backup_root_confirmation_found")?)?)?;
+        self.disposition = DispositionData::Confirmed;
+        Ok(())
+    }
+
+    pub(in crate::security_epoch) fn require_confirmed_data(&self) -> Result<()> {
+        ensure!(self.disposition == DispositionData::Confirmed && self.known_update.is_some(),
+            "backup_root_confirmation_incomplete");
+        Ok(())
     }
 
     pub(in crate::security_epoch) fn lose_data(&mut self) {
@@ -142,6 +200,7 @@ impl BirthTurn {
 fn compare_existing_data(
     selected: &EpochStore,
     binding: &RootBindingData,
+    known_update: &UpdateTime,
     bytes: &[u8],
 ) -> Result<()> {
     ensure!(bytes.len() <= MAX_PAYLOAD * 2, "backup_root_document_bound");
@@ -196,7 +255,7 @@ fn compare_existing_data(
             .try_into()
     };
     ensure!(
-        time("createTime")? == time("updateTime")?,
+        time("createTime")? == *known_update && time("updateTime")? == *known_update,
         "backup_root_record_mutated"
     );
     Ok(())

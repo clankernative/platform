@@ -105,6 +105,7 @@ impl PendingScheduledRootBirth<'_, '_> {
         }
         requested?;
         checked?;
+        self.confirm_birth()?;
         // Check the OLD observation before the fresh strong read; no refreshed
         // read can repair expired/refused native/observation state.
         let physical = self
@@ -117,6 +118,8 @@ impl PendingScheduledRootBirth<'_, '_> {
             physical.controller_stage()?,
         )?;
         self.check()?;
+        self.pending.as_ref().ok_or_else(|| anyhow::anyhow!("backup_root_files_missing"))?
+            .require_confirmed_data()?;
         let pending = self
             .pending
             .take()
@@ -131,6 +134,38 @@ impl PendingScheduledRootBirth<'_, '_> {
         *self.continuation = true;
         self.known = true;
         Ok(KnownScheduledBackupRoot { pending })
+    }
+
+    fn confirm_birth(&mut self) -> Result<()> {
+        let confirmation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+            self.check()?;
+            let physical = self.physical.as_mut()
+                .ok_or_else(|| anyhow::anyhow!("backup_root_phase_missing"))?;
+            let pending = self.pending.as_mut()
+                .ok_or_else(|| anyhow::anyhow!("backup_root_files_missing"))?;
+            let stage = physical.controller_stage()?;
+            // A second one-use lexical permit from the SAME actual creator,
+            // never a returned/public token or a reconstructed native parent.
+            let permit = RootBirthWritePermit {
+                _identity: &self.write_identity,
+                reads: std::ptr::from_ref(&self.reads),
+                stage: std::ptr::from_ref(stage),
+                pending: std::ptr::from_ref(pending),
+            };
+            self.reads.confirm_scheduled_backup_root_creation(stage, pending, permit)
+        }));
+        let confirmation_post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check()));
+        if !matches!(&confirmation, Ok(Ok(()))) || !matches!(&confirmation_post, Ok(Ok(()))) {
+            self.refuse();
+        }
+        match confirmation {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(())) => match confirmation_post {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(result) => result,
+            },
+        }
     }
 
     fn check(&mut self) -> Result<()> {
@@ -363,8 +398,10 @@ mod tests {
                     "let checked = self . check",
                     "requested ?",
                     "checked ?",
+                    "self . confirm_birth () ?",
                     "self . lineage . read",
                     "self . check",
+                    "require_confirmed_data",
                     "self . pending . take",
                     "self . reads . finish",
                     "physical . finish_controller_known",
@@ -575,53 +612,67 @@ mod seal_tests {
     use syn::visit::Visit;
     fn guarded(source: &str) -> bool {
         let parsed = syn::parse_file(source).unwrap();
-        struct Constructions(Vec<String>);
+        struct Constructions {
+            owner: Option<String>, method: Option<String>,
+            all: Vec<(Option<String>, Option<String>, String)>,
+        }
         impl<'a> Visit<'a> for Constructions {
-            fn visit_expr_struct(&mut self, s: &'a syn::ExprStruct) {
-                if s.path
-                    .segments
-                    .last()
-                    .is_some_and(|p| p.ident == "RootBirthWritePermit")
-                {
-                    self.0.push(s.to_token_stream().to_string());
+            fn visit_item_impl(&mut self, item: &'a syn::ItemImpl) {
+                let before = self.owner.take();
+                self.owner = match item.self_ty.as_ref() {
+                    syn::Type::Path(t) => t.path.segments.last().map(|s| s.ident.to_string()),
+                    _ => None,
+                };
+                syn::visit::visit_item_impl(self, item);
+                self.owner = before;
+            }
+            fn visit_impl_item_fn(&mut self, item: &'a syn::ImplItemFn) {
+                let before = self.method.replace(item.sig.ident.to_string());
+                syn::visit::visit_impl_item_fn(self, item);
+                self.method = before;
+            }
+            fn visit_expr_struct(&mut self, value: &'a syn::ExprStruct) {
+                if value.path.segments.last().is_some_and(|p| p.ident == "RootBirthWritePermit") {
+                    self.all.push((self.owner.clone(), self.method.clone(), value.to_token_stream().to_string()));
                 }
-                syn::visit::visit_expr_struct(self, s);
+                syn::visit::visit_expr_struct(self, value);
             }
         }
-        let mut all = Constructions(Vec::new());
-        all.visit_file(&parsed);
-        if all.0.len() != 1 {
-            return false;
-        }
+        let mut found = Constructions { owner: None, method: None, all: Vec::new() };
+        found.visit_file(&parsed);
         let expected: syn::Expr = syn::parse_quote!(RootBirthWritePermit {
             _identity: &self.write_identity,
             reads: std::ptr::from_ref(&self.reads),
             stage: std::ptr::from_ref(stage),
             pending: std::ptr::from_ref(pending),
         });
-        if all.0[0] != expected.to_token_stream().to_string() {
+        let expected = expected.to_token_stream().to_string();
+        if found.all.len() != 2 || found.all.iter().any(|(owner, _, value)|
+            owner.as_deref() != Some("PendingScheduledRootBirth") || *value != expected) {
             return false;
         }
-        let mut constructor = None;
+        let names = found.all.iter().map(|(_, name, _)| name.as_deref()).collect::<std::collections::BTreeSet<_>>();
+        if names != [Some("create_known"), Some("confirm_birth")].into_iter().collect() { return false; }
+        let mut create = None;
+        let mut confirm = None;
         let mut binding = None;
         for item in parsed.items {
             if let syn::Item::Impl(item) = item {
                 for item in item.items {
                     if let syn::ImplItem::Fn(f) = item {
-                        if f.sig.ident == "create_known" {
-                            constructor = Some(f.block.to_token_stream().to_string());
-                        } else if f.sig.ident == "require_actual" {
-                            binding = Some(f.block.to_token_stream().to_string());
+                        let text = f.block.to_token_stream().to_string();
+                        match f.sig.ident.to_string().as_str() {
+                            "create_known" => create = Some(text),
+                            "confirm_birth" => confirm = Some(text),
+                            "require_actual" => binding = Some(text),
+                            _ => (),
                         }
                     }
                 }
             }
         }
-        let Some(body) = constructor else {
-            return false;
-        };
-        let Some(bound) = binding else { return false };
-        let expected: syn::Block = syn::parse_quote!({
+        let (Some(create), Some(confirm), Some(bound)) = (create, confirm, binding) else { return false; };
+        let expected_binding: syn::Block = syn::parse_quote!({
             ensure!(
                 std::ptr::addr_eq(self.reads, std::ptr::from_ref(reads))
                     && std::ptr::addr_eq(self.stage, std::ptr::from_ref(stage))
@@ -630,12 +681,13 @@ mod seal_tests {
             );
             Ok(())
         });
-        bound == expected.to_token_stream().to_string()
-            && body.contains(&all.0[0])
-            && body.contains("create_scheduled_backup_root (stage , pending , permit)")
+        bound == expected_binding.to_token_stream().to_string()
+            && create.contains(&expected) && confirm.contains(&expected)
+            && create.contains("create_scheduled_backup_root (stage , pending , permit)")
+            && confirm.contains("confirm_scheduled_backup_root_creation (stage , pending , permit)")
     }
     #[test]
-    fn actual_lexical_seal_has_one_whole_parent_constructor_and_binds_every_actual_input() {
+    fn actual_lexical_seal_has_only_write_and_confirmation_in_the_same_whole_parent() {
         let source = include_str!("scheduled_backup.rs")
             .split("#[cfg(test)]")
             .next()
@@ -667,11 +719,12 @@ mod seal_tests {
                 "true",
             ),
         ] {
-            assert_eq!(source.matches(old).count(), 1, "seal mutation {old}");
-            assert!(
-                !guarded(&source.replacen(old, new, 1)),
-                "seal mutation {old}"
-            );
+            let expected_count = if old.starts_with("std::ptr::addr_eq") { 1 } else { 2 };
+            assert_eq!(source.matches(old).count(), expected_count, "seal mutation {old}");
+            for (at, _) in source.match_indices(old) {
+                let changed = format!("{}{}{}", &source[..at], new, &source[at + old.len()..]);
+                assert!(!guarded(&changed), "seal mutation {old} at {at}");
+            }
         }
         let duplicate = format!(
             "{source} fn other() {{ let x=RootBirthWritePermit {{_identity:&identity, reads:std::ptr::null(),stage:std::ptr::null(),pending:std::ptr::null()}}; }}"
