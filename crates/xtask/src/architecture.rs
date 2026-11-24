@@ -1212,6 +1212,7 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
             "set_socket_passpidfd",
             "socket_passcred",
             "socket_passpidfd",
+            "socket_cookie",
             "socket_type",
             "socket_domain",
             "socket_acceptconn",
@@ -6356,6 +6357,7 @@ fn hazard(target: &str) -> Option<&'static str> {
             | "rustix::net::sockopt::set_socket_passpidfd"
             | "rustix::net::sockopt::socket_passcred"
             | "rustix::net::sockopt::socket_passpidfd"
+            | "rustix::net::sockopt::socket_cookie"
             | "rustix::net::sockopt::socket_type"
             | "rustix::net::sockopt::socket_domain"
             | "rustix::net::sockopt::socket_acceptconn"
@@ -7916,6 +7918,7 @@ mod tests {
             ("rustix::net", "recv_pidfd_rights_packet", "network"),
             ("rustix::net::sockopt", "socket_passcred", "network"),
             ("rustix::net::sockopt", "socket_passpidfd", "network"),
+            ("rustix::net::sockopt", "socket_cookie", "network"),
             ("rustix::fs", "fcntl_getfl", "filesystem"),
             ("rustix::net", "socketpair", "network"),
             ("rustix::net::sockopt", "set_socket_passpidfd", "network"),
@@ -7964,7 +7967,7 @@ mod tests {
         for source in [
             "fn f() { nix::poll::PollFlags::POLLIN; nix::poll::PollTimeout::ZERO; nix::sys::socket::SockType::Stream; }",
             "mod local { pub fn poll() {} pub fn getsockopt() {} } fn f() { local::poll(); local::getsockopt(); }",
-            "mod local { pub fn sendmsg() {} pub fn recvmsg() {} pub fn recv_pidfd_rights_packet() {} pub fn socket_passcred() {} pub fn socket_passpidfd() {} pub fn fcntl_getfl() {} } fn f() { local::sendmsg(); local::recvmsg(); local::recv_pidfd_rights_packet(); local::socket_passcred(); local::socket_passpidfd(); local::fcntl_getfl(); }",
+            "mod local { pub fn sendmsg() {} pub fn recvmsg() {} pub fn recv_pidfd_rights_packet() {} pub fn socket_passcred() {} pub fn socket_passpidfd() {} pub fn socket_cookie() {} pub fn fcntl_getfl() {} } fn f() { local::sendmsg(); local::recvmsg(); local::recv_pidfd_rights_packet(); local::socket_passcred(); local::socket_passpidfd(); local::socket_cookie(); local::fcntl_getfl(); }",
         ] {
             assert!(scan(source).is_empty(), "{source}");
         }

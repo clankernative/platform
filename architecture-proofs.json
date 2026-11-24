@@ -8699,7 +8699,7 @@
       "factories": [
         {
           "owner": "ScheduledBackupConnection",
-          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn receive_submit (self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < CapturedScheduledBackupSubmit >"
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn receive_submit (mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < CapturedScheduledBackupSubmit >"
         }
       ],
       "material_uses": [
@@ -8796,7 +8796,7 @@
       "consuming_methods": [],
       "methods": [
         "fn check_resources (& self) -> Result < () >",
-        "pub (in crate :: security_epoch :: native_enrollment) fn receive_submit (self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < CapturedScheduledBackupSubmit >"
+        "pub (in crate :: security_epoch :: native_enrollment) fn receive_submit (mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < CapturedScheduledBackupSubmit >"
       ],
       "factories": [
         {
@@ -8811,7 +8811,7 @@
         },
         {
           "owner": "ScheduledBackupConnection",
-          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn receive_submit (self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < CapturedScheduledBackupSubmit >"
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn receive_submit (mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < CapturedScheduledBackupSubmit >"
         }
       ],
       "proof_uses": [],
@@ -14679,7 +14679,9 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn receive (received : rustix :: net :: ReceivedPidfdPacket , socket : Rc < File > , expected_code : & Digest , original : & mut NativeAcquisition) -> Result < Self >",
         "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)",
         "pub (in crate :: security_epoch :: native_enrollment) fn require_process_data (& mut self , expected : & ProcessData , original : & mut NativeAcquisition) -> Result < () >",
-        "pub (in crate :: security_epoch :: native_enrollment) fn send_observation_bind (& mut self , issuer : & File , packet : & crate :: security_epoch :: native_enrollment :: protocol :: Packet , original : & mut NativeAcquisition) -> Result < () >"
+        "pub (in crate :: security_epoch :: native_enrollment) fn send_observation_bind (& mut self , issuer : & File , packet : & crate :: security_epoch :: native_enrollment :: protocol :: Packet , original : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn check_same_submit_actor (& mut self , other : & mut Self , original : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn commitment_data (& mut self , original : & mut NativeAcquisition) -> Result < Digest >"
       ],
       "factories": [
         {
@@ -14703,6 +14705,14 @@
         {
           "owner": "ScheduledJobSender",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn send_observation_bind (& mut self , issuer : & File , packet : & crate :: security_epoch :: native_enrollment :: protocol :: Packet , original : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ScheduledJobSender",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check_same_submit_actor (& mut self , other : & mut Self , original : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ScheduledJobSender",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn commitment_data (& mut self , original : & mut NativeAcquisition) -> Result < Digest >"
         }
       ],
       "proof_uses": [],

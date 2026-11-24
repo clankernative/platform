@@ -54,6 +54,194 @@ fn submit_wire_is_one_canonical_purpose_and_preserves_the_complete_intent() -> R
     Ok(())
 }
 
+fn offer_data() -> SubmitOfferData {
+    SubmitOfferData::new_data(
+        digest("actual-controller"),
+        digest("actual-job-sender"),
+        17,
+        (digest("requester-hello"), digest("controller-offer")),
+        digest("actual-submitted-original"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn hello_and_offer_are_strict_canonical_bounded_comparison_data() -> Result<()> {
+    let offer = offer_data();
+    offer.require_connection_data(17)?;
+    assert!(offer.require_connection_data(18).is_err());
+    assert!(offer.require_connection_data(0).is_err());
+    assert!(
+        SubmitOfferData::new_data(
+            offer.controller.clone(),
+            offer.job.clone(),
+            0,
+            (
+                offer.requester_nonce.clone(),
+                offer.controller_nonce.clone()
+            ),
+            offer.original.clone()
+        )
+        .is_err()
+    );
+    let hello = encode_hello_data(offer.requester_nonce.clone())?;
+    assert_eq!(decode_hello_data(&hello)?, offer.requester_nonce);
+    let bytes = encode_offer_data(&offer)?;
+    assert!(decode_offer_data(&bytes)? == offer);
+    assert!(hello.len() < MAX_HELLO_BYTES && bytes.len() < MAX_OFFER_BYTES);
+    let good: Value = serde_json::from_slice(&bytes)?;
+    for value in [
+        json!({"type":"hello_backup_v1","requester_nonce":offer.requester_nonce,"extra":true}),
+        json!({"type":"hello_backup_v2","requester_nonce":offer.requester_nonce}),
+        json!({"type":"hello_backup_v1"}),
+        json!({"type":"hello_backup_v1","requester_nonce":null}),
+        json!({"type":"hello_backup_v1","requester_nonce":offer.requester_nonce,"offer":good["offer"]}),
+        json!([]),
+        Value::Null,
+    ] {
+        assert!(decode_hello_data(&serde_json::to_vec(&value)?).is_err());
+    }
+    for value in [
+        json!({"type":"offer_backup_v2","offer":good["offer"]}),
+        json!({"type":"offer_backup_v1","offer":good["offer"],"extra":true}),
+        json!({"type":"offer_backup_v1"}),
+        json!({"type":"offer_backup_v1","offer":null}),
+        json!([]),
+        Value::Null,
+    ] {
+        assert!(decode_offer_data(&serde_json::to_vec(&value)?).is_err());
+    }
+    for field in [
+        "controller",
+        "job",
+        "connection",
+        "requester_nonce",
+        "controller_nonce",
+        "original",
+    ] {
+        let mut value = good.clone();
+        value["offer"].as_object_mut().unwrap().remove(field);
+        assert!(decode_offer_data(&serde_json::to_vec(&value)?).is_err());
+        let mut value = good.clone();
+        value["offer"][field] = Value::Null;
+        assert!(decode_offer_data(&serde_json::to_vec(&value)?).is_err());
+    }
+    let mut unknown = good.clone();
+    unknown["offer"]["extra"] = json!(true);
+    assert!(decode_offer_data(&serde_json::to_vec(&unknown)?).is_err());
+    let text = String::from_utf8(bytes.clone())?;
+    for (before, after) in [
+        (
+            "\"type\":\"offer_backup_v1\"",
+            "\"type\":\"offer_backup_v1\",\"type\":\"offer_backup_v1\"",
+        ),
+        ("\"connection\":", "\"connection\":null,\"connection\":"),
+    ] {
+        assert_eq!(text.matches(before).count(), 1);
+        assert!(decode_offer_data(text.replacen(before, after, 1).as_bytes()).is_err());
+    }
+    let htext = String::from_utf8(hello.clone())?;
+    assert_eq!(htext.matches("\"requester_nonce\":").count(), 1);
+    assert!(
+        decode_hello_data(
+            htext
+                .replacen(
+                    "\"requester_nonce\":",
+                    "\"requester_nonce\":null,\"requester_nonce\":",
+                    1
+                )
+                .as_bytes()
+        )
+        .is_err()
+    );
+    let mut reflected = offer.clone();
+    reflected.controller_nonce = reflected.requester_nonce.clone();
+    assert!(encode_offer_data(&reflected).is_err());
+    let value = json!({"type":"offer_backup_v1","offer":reflected});
+    assert!(decode_offer_data(&serde_json::to_vec(&value)?).is_err());
+    for (original, limit, is_offer) in [
+        (&bytes, MAX_OFFER_BYTES, true),
+        (&hello, MAX_HELLO_BYTES, false),
+    ] {
+        let mut oversized = original.clone();
+        oversized.resize(limit + 1, b' ');
+        // A valid JSON packet, so the bound controls are independent of parsing.
+        let _: Value = serde_json::from_slice(&oversized)?;
+        let oversized_error = if is_offer {
+            decode_offer_data(&oversized).map(|_| ())
+        } else {
+            decode_hello_data(&oversized).map(|_| ())
+        }
+        .unwrap_err();
+        assert_eq!(
+            oversized_error.to_string(),
+            if is_offer {
+                "backup_offer_bound"
+            } else {
+                "backup_hello_bound"
+            }
+        );
+        let mut trailing = original.clone();
+        trailing.push(b'\n');
+        let trailing_error = if is_offer {
+            decode_offer_data(&trailing).map(|_| ())
+        } else {
+            decode_hello_data(&trailing).map(|_| ())
+        }
+        .unwrap_err();
+        assert_eq!(
+            trailing_error.to_string(),
+            if is_offer {
+                "backup_offer_noncanonical"
+            } else {
+                "backup_hello_noncanonical"
+            }
+        );
+    }
+    assert!(decode_offer_data(&hello).is_err());
+    assert!(decode_hello_data(&bytes).is_err());
+    Ok(())
+}
+
+#[test]
+fn candidate_intent_binds_every_saved_offer_field_without_changing_other_data() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let candidate = serde_json::to_vec(&fixture.intent)?;
+    let offer = offer_data();
+    let complete = complete_offer_intent_data(&candidate, &offer)?;
+    require_submit_offer_data(&complete, &offer)?;
+    let parsed = Intent::decode_data(&complete)?;
+    let mut expected = fixture.intent;
+    expected.requester.process = offer.job.clone();
+    expected.transport = Transport {
+        controller: offer.controller.clone(),
+        connection: offer.connection.clone(),
+        requester_nonce: offer.requester_nonce.clone(),
+        controller_nonce: offer.controller_nonce.clone(),
+        original: offer.original.clone(),
+    };
+    assert_eq!(parsed, expected);
+    let value: Value = serde_json::from_slice(&complete)?;
+    for path in [
+        ["requester", "process"],
+        ["transport", "controller"],
+        ["transport", "connection"],
+        ["transport", "requester_nonce"],
+        ["transport", "controller_nonce"],
+        ["transport", "original"],
+    ] {
+        let mut changed = value.clone();
+        changed[path[0]][path[1]] = json!(digest("wrong-field"));
+        let intent = super::fixture_intent_bytes(changed)?;
+        assert!(require_submit_offer_data(&intent, &offer).is_err());
+    }
+    let mut reflected = offer.clone();
+    reflected.controller_nonce = reflected.requester_nonce.clone();
+    assert!(complete_offer_intent_data(&candidate, &reflected).is_err());
+    assert!(require_submit_offer_data(&complete, &reflected).is_err());
+    Ok(())
+}
+
 fn uid(n: u32) -> String {
     format!("00000000-0000-0000-0000-{n:012}")
 }

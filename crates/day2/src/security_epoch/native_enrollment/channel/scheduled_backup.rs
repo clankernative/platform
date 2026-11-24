@@ -18,7 +18,7 @@ use anyhow::{Result, ensure};
 use rustix::{
     event::PollFlags,
     fs::{Mode, OFlags},
-    net::{self, AddressFamily, RecvPidfdError, SocketFlags, SocketType},
+    net::{self, AddressFamily, RecvPidfdError, SendFlags, SocketFlags, SocketType},
 };
 use std::{cell::Cell, fs::File, io::IoSliceMut, os::unix::fs::MetadataExt, rc::Rc};
 
@@ -49,6 +49,7 @@ pub(in crate::security_epoch::native_enrollment) struct ScheduledBackupConnectio
     socket: Rc<File>,
     name: Rc<ScheduledBackupSocketName>,
     refused: Cell<bool>,
+    original: Option<BackupSubmitOriginal>,
 }
 
 /// One actual Submit, still NOT an admitted request. Its immutable comparison
@@ -57,6 +58,8 @@ pub(in crate::security_epoch::native_enrollment) struct ScheduledBackupConnectio
 pub(in crate::security_epoch::native_enrollment) struct CapturedScheduledBackupSubmit {
     connection: ScheduledBackupConnection,
     sender: ScheduledJobSender,
+    hello_sender: ScheduledJobSender,
+    offer: crate::security_epoch::scheduled_backup::requester::SubmitOfferData,
     intent: Vec<u8>,
     original: BackupSubmitOriginal,
     refused: bool,
@@ -237,14 +240,16 @@ impl ScheduledBackupSocketListener {
         requested
     }
 
-    /// No wait or native original is retained by this resource. The eventual
-    /// Submit driver must capture its genuine original before decode/auth.
+    /// Idle readiness is outside this action. The real Submit driver captures
+    /// its original BEFORE calling accept; retain its negative guard before any
+    /// native stage/peer work, never recapture or renew after acceptance.
     pub(in crate::security_epoch::native_enrollment) fn accept(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
         original: &mut NativeAcquisition,
     ) -> Result<ScheduledBackupConnection> {
         let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let captured = BackupSubmitOriginal::capture(original)?;
             stage.storage()?.scheduled_backup_root_selection()?;
             stage.check_serving_acquisition(original)?;
             self.check()?;
@@ -255,6 +260,7 @@ impl ScheduledBackupSocketListener {
                 socket: Rc::new(File::from(socket)),
                 name: Rc::clone(&self.name),
                 refused: Cell::new(false),
+                original: Some(captured),
             };
             connection.check_resources()?;
             self.check()?;
@@ -274,18 +280,109 @@ impl ScheduledBackupSocketListener {
 
 impl ScheduledBackupConnection {
     /// Consumes this actual connection before the first fallible receive.
-    /// The outer fixed Submit action must already own its genuine original;
-    /// this method never starts, renews, returns or reconstructs a clock.
+    /// The outer fixed Submit action already owns its genuine original. Take
+    /// the SAME guard saved before accept; never start, renew, return or
+    /// reconstruct a clock. Hello/Offer/Submit all spend this original.
     pub(in crate::security_epoch::native_enrollment) fn receive_submit(
-        self,
+        mut self,
         stage: &mut EnrolledRoleStage<'_>,
         original: &mut NativeAcquisition,
     ) -> Result<CapturedScheduledBackupSubmit> {
         let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let captured = BackupSubmitOriginal::capture(original)?;
+            let mut captured = self
+                .original
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("backup_submit_original_missing"))?;
+            captured.check(original)?;
             let selected = stage.storage()?.scheduled_backup_root_selection()?;
             stage.check_serving_acquisition(original)?;
             self.check_resources()?;
+            use crate::security_epoch::scheduled_backup::requester;
+            let mut hello_bytes = [0_u8; requester::MAX_HELLO_BYTES];
+            let hello_received = loop {
+                original.remaining()?;
+                match net::recv_pidfd_packet(&self.socket, &mut [IoSliceMut::new(&mut hello_bytes)])
+                {
+                    Ok(packet) => break packet,
+                    Err(RecvPidfdError::Io(rustix::io::Errno::AGAIN)) => {
+                        wait(&self.socket, PollFlags::IN, original)?
+                    }
+                    Err(RecvPidfdError::Io(rustix::io::Errno::INTR)) => {
+                        original.remaining()?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            let hello_count = hello_received.bytes;
+            let mut hello_sender = ScheduledJobSender::receive(
+                hello_received,
+                Rc::clone(&self.socket),
+                &selected.executable,
+                original,
+            )?;
+            let requester_nonce = requester::decode_hello_data(&hello_bytes[..hello_count])?;
+            let identity = stage.storage()?.backup_observer_identity_data(original)?;
+            let controller = day2_capabilities::Digest::of(&(
+                "day2-scheduled-backup-controller-v1",
+                &identity.public_key,
+                &identity.controller,
+            ))?;
+            let job = hello_sender.commitment_data(original)?;
+            let controller_nonce = crate::security_epoch::native_enrollment::protocol::nonce(
+                "scheduled-backup-submit-offer",
+            )?;
+            captured.check(original)?;
+            let domain = original.historical_interval_observation().0;
+            let offer = requester::SubmitOfferData::new_data(
+                controller,
+                job,
+                net::sockopt::socket_cookie(&self.socket)?,
+                (requester_nonce, controller_nonce),
+                domain,
+            )?;
+            let offer_bytes = requester::encode_offer_data(&offer)?;
+            // A fixed DATA Offer, never an arbitrary frame/rights writer. Only
+            // unsent AGAIN/INTR can continue under this same saved original.
+            let sent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                captured.check(original)?;
+                self.check_resources()?;
+                hello_sender.check(original)?;
+                stage.check_serving_acquisition(original)?;
+                loop {
+                    original.remaining()?;
+                    match net::send(
+                        &self.socket,
+                        &offer_bytes,
+                        SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
+                    ) {
+                        Ok(count) => {
+                            ensure!(count == offer_bytes.len(), "backup_offer_partial_send");
+                            break;
+                        }
+                        Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {
+                            wait(&self.socket, PollFlags::OUT, original)?
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Ok(())
+            }));
+            let sender_post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                hello_sender.check(original)
+            }));
+            let stage_post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                stage.check_serving_acquisition(original)
+            }));
+            if !matches!(&sent, Ok(Ok(())))
+                || !matches!(&sender_post, Ok(Ok(())))
+                || !matches!(&stage_post, Ok(Ok(())))
+            {
+                hello_sender.refuse();
+                stage.refuse_serving();
+                original.refuse();
+            }
+            let sent = finish_checked(sent, sender_post);
+            finish_checked(Ok(sent), stage_post)?;
             let mut bytes = [0_u8; MAX_SUBMIT];
             let received = loop {
                 original.remaining()?;
@@ -301,18 +398,22 @@ impl ScheduledBackupConnection {
                 }
             };
             let count = received.bytes;
-            let sender = ScheduledJobSender::receive(
+            let mut sender = ScheduledJobSender::receive(
                 received,
                 Rc::clone(&self.socket),
                 &selected.executable,
                 original,
             )?;
+            hello_sender.check_same_submit_actor(&mut sender, original)?;
             let intent = crate::security_epoch::scheduled_backup::requester::decode_submit_data(
                 &bytes[..count],
             )?;
+            requester::require_submit_offer_data(&intent, &offer)?;
             let mut submit = CapturedScheduledBackupSubmit {
                 connection: self,
                 sender,
+                hello_sender,
+                offer,
                 intent,
                 original: captured,
                 refused: false,
@@ -460,6 +561,14 @@ impl CapturedScheduledBackupSubmit {
             self.original.check(original)?;
             self.connection.check_resources()?;
             self.sender.check(original)?;
+            self.hello_sender
+                .check_same_submit_actor(&mut self.sender, original)?;
+            self.offer
+                .require_connection_data(net::sockopt::socket_cookie(&self.connection.socket)?)?;
+            crate::security_epoch::scheduled_backup::requester::require_submit_offer_data(
+                &self.intent,
+                &self.offer,
+            )?;
             self.original.check_intent(original, &self.intent)?;
             original.remaining()?;
             Ok(())
@@ -468,6 +577,7 @@ impl CapturedScheduledBackupSubmit {
             self.refused = true;
             self.original.refuse();
             self.sender.refuse();
+            self.hello_sender.refuse();
             self.connection.refused.set(true);
             original.refuse();
         }
@@ -507,6 +617,7 @@ impl CapturedScheduledBackupSubmit {
         self.refused = true;
         self.original.refuse();
         self.sender.refuse();
+        self.hello_sender.refuse();
         self.connection.refused.set(true);
     }
 }

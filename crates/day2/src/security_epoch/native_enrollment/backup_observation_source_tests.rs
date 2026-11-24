@@ -146,7 +146,8 @@ fn socket_resource_contract(socket: &str, directory: &str, birth: &str) -> bool 
     })
         && socket.matches(&fragment("finish_checked(requested, checked)")).count() == 3
         && socket.matches(&fragment("stage.storage()?.scheduled_backup_root_selection()?;")).count() == 3
-        && socket.matches(&fragment("stage.refuse_serving(); original.refuse();")).count() == 3
+        // Three original outer boundaries plus the new independent Offer posts.
+        && socket.matches(&fragment("stage.refuse_serving(); original.refuse();")).count() == 4
         && socket.matches(&fragment("let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { stage.check_serving_acquisition(original) })); ")).count() == 3
         && !["remove_file", "unlink", "receive_issuer", "ProtectedRestoreAdmission", "SignedStage"].iter().any(|forbidden| socket.contains(forbidden))
         && !socket.contains(&fragment("NativeAcquisition::begin"))
@@ -262,19 +263,69 @@ fn selected_method(source: &str, owner: &str, name: &str) -> String {
     found
 }
 
-fn submit_contract(receive: &str, check: &str, sender_receive: &str, sender_check: &str) -> bool {
+fn submit_accept_contract(accept: &str) -> bool {
+    let mut tail = accept;
+    for text in [
+        "BackupSubmitOriginal::capture(original)",
+        "scheduled_backup_root_selection",
+        "check_serving_acquisition",
+        "net::accept_with",
+        "original: Some(captured)",
+        "connection.check_resources",
+        "self.check",
+    ] {
+        let token = fragment(text);
+        let Some((_, remaining)) = tail.split_once(&token) else {
+            return false;
+        };
+        tail = remaining;
+    }
+    true
+}
+
+fn submit_contract(
+    accept: &str,
+    receive: &str,
+    check: &str,
+    sender_receive: &str,
+    sender_check: &str,
+) -> bool {
     let mut next = 0;
     for required in [
-        "self, stage: &mut EnrolledRoleStage<'_>, original: &mut NativeAcquisition",
-        "let captured = BackupSubmitOriginal::capture(original)?;",
+        "mut self, stage: &mut EnrolledRoleStage<'_>, original: &mut NativeAcquisition",
+        "let mut captured = self.original.take().ok_or_else(|| anyhow::anyhow!(\"backup_submit_original_missing\"))?;",
+        "captured.check(original)?;",
         "let selected = stage.storage()?.scheduled_backup_root_selection()?;",
         "stage.check_serving_acquisition(original)?;",
         "self.check_resources()?;",
         "original.remaining()?;",
+        "net::recv_pidfd_packet(&self.socket, &mut [IoSliceMut::new(&mut hello_bytes)])",
+        "let mut hello_sender = ScheduledJobSender::receive(hello_received, Rc::clone(&self.socket), &selected.executable, original)?;",
+        "requester::decode_hello_data(&hello_bytes[..hello_count])?",
+        "stage.storage()?.backup_observer_identity_data(original)?",
+        "hello_sender.commitment_data(original)?",
+        "protocol::nonce(\"scheduled-backup-submit-offer\")?",
+        "captured.check(original)?;",
+        "original.historical_interval_observation().0",
+        "SubmitOfferData::new_data",
+        "net::sockopt::socket_cookie(&self.socket)?",
+        "requester::encode_offer_data(&offer)?",
+        "captured.check(original)?;",
+        "hello_sender.check(original)?;",
+        "stage.check_serving_acquisition(original)?;",
+        "net::send(&self.socket, &offer_bytes, SendFlags::DONTWAIT | SendFlags::NOSIGNAL)",
+        "ensure!(count == offer_bytes.len(), \"backup_offer_partial_send\")",
+        "let sender_post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { hello_sender.check(original) }));",
+        "let stage_post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { stage.check_serving_acquisition(original) }));",
+        "hello_sender.refuse(); stage.refuse_serving(); original.refuse();",
+        "finish_checked(sent, sender_post)",
+        "finish_checked(Ok(sent), stage_post)?",
         "net::recv_pidfd_packet(&self.socket, &mut [IoSliceMut::new(&mut bytes)])",
         "ScheduledJobSender::receive(received, Rc::clone(&self.socket), &selected.executable, original)?",
+        "hello_sender.check_same_submit_actor(&mut sender, original)?;",
         "crate::security_epoch::scheduled_backup::requester::decode_submit_data(&bytes[..count])?",
-        "CapturedScheduledBackupSubmit { connection: self, sender, intent, original: captured, refused: false }",
+        "requester::require_submit_offer_data(&intent, &offer)?;",
+        "CapturedScheduledBackupSubmit { connection: self, sender, hello_sender, offer, intent, original: captured, refused: false }",
         "submit.check(original)?;",
         "let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { stage.check_serving_acquisition(original) }));",
         "stage.refuse_serving(); original.refuse();",
@@ -290,9 +341,18 @@ fn submit_contract(receive: &str, check: &str, sender_receive: &str, sender_chec
     [
         "self.original.check(original)?;",
         "self.connection.check_resources()?; self.sender.check(original)?;",
+        "self.hello_sender.check_same_submit_actor(&mut self.sender, original)?;",
+        "self.offer.require_connection_data(net::sockopt::socket_cookie(&self.connection.socket)?)?;",
+        "requester::require_submit_offer_data(&self.intent, &self.offer)?;",
         "self.original.check_intent(original, &self.intent)?;",
-        "self.refused = true; self.original.refuse(); self.sender.refuse(); self.connection.refused.set(true); original.refuse();",
+        "self.refused = true; self.original.refuse(); self.sender.refuse(); self.hello_sender.refuse(); self.connection.refused.set(true); original.refuse();",
     ].iter().all(|needle| check.contains(&fragment(needle)))
+        && submit_accept_contract(accept)
+        && accept.matches(&fragment("BackupSubmitOriginal::capture(original)")).count() == 1
+        && !receive.contains(&fragment("BackupSubmitOriginal::capture(original)"))
+        && receive.matches(&fragment("net::recv_pidfd_packet")).count() == 2
+        && receive.matches(&fragment("requester::decode_hello_data")).count() == 1
+        && receive.matches(&fragment("requester::decode_submit_data")).count() == 1
         && [
             "MessageProcess::receive(received, expected_code, original, &costs)?",
             "let proc = require_proc_view(original)?;",
@@ -320,16 +380,35 @@ fn submit_contract(receive: &str, check: &str, sender_receive: &str, sender_chec
 fn actual_submit_consumes_connection_and_keeps_same_original_and_kernel_sender() {
     let socket = include_str!("channel/scheduled_backup.rs");
     let sender = include_str!("process/backup_anchor.rs");
+    let accept = selected_method(socket, "ScheduledBackupSocketListener", "accept");
     let receive = selected_method(socket, "ScheduledBackupConnection", "receive_submit");
     let check = selected_method(socket, "CapturedScheduledBackupSubmit", "check");
     let sender_receive = selected_method(sender, "ScheduledJobSender", "receive");
     let sender_check = selected_method(sender, "ScheduledJobSender", "check");
     assert!(submit_contract(
+        &accept,
         &receive,
         &check,
         &sender_receive,
         &sender_check
     ));
+    for (before, after) in [
+        (
+            "let captured = BackupSubmitOriginal::capture(original)?;",
+            "let captured = untrusted_original();",
+        ),
+        ("original: Some(captured)", "original: None"),
+    ] {
+        let before = fragment(before);
+        assert_eq!(accept.matches(&before).count(), 1);
+        assert!(!submit_contract(
+            &accept.replacen(&before, &fragment(after), 1),
+            &receive,
+            &check,
+            &sender_receive,
+            &sender_check
+        ));
+    }
     let changed = receive.replacen(
         &fragment("self.check_resources()?;"),
         &fragment("self.check_resources()?; channel.receive_issuer(original)?;"),
@@ -337,6 +416,7 @@ fn actual_submit_consumes_connection_and_keeps_same_original_and_kernel_sender()
     );
     assert_ne!(changed, receive);
     assert!(!submit_contract(
+        &accept,
         &changed,
         &check,
         &sender_receive,
@@ -344,19 +424,28 @@ fn actual_submit_consumes_connection_and_keeps_same_original_and_kernel_sender()
     ));
     for (from, to) in [
         (
-            "let captured = BackupSubmitOriginal::capture(original)?;",
-            "let captured = untrusted_original();",
+            "let mut captured = self.original.take().ok_or_else(|| anyhow::anyhow!(\"backup_submit_original_missing\"))?;",
+            "let mut captured = untrusted_original();",
         ),
         (
             "ScheduledJobSender::receive(received, Rc::clone(&self.socket), &selected.executable, original)?",
             "untrusted_sender_data()?",
         ),
         ("original: captured", "original: untrusted_original()"),
+        (
+            "let sender_post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { hello_sender.check(original) }));",
+            "let sender_post = Ok(Ok(()));",
+        ),
+        (
+            "let stage_post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { stage.check_serving_acquisition(original) }));",
+            "let stage_post = Ok(Ok(()));",
+        ),
     ] {
         let from = fragment(from);
         let to = fragment(to);
         assert_eq!(receive.matches(&from).count(), 1, "mutation target");
         assert!(!submit_contract(
+            &accept,
             &receive.replacen(&from, &to, 1),
             &check,
             &sender_receive,
@@ -367,12 +456,21 @@ fn actual_submit_consumes_connection_and_keeps_same_original_and_kernel_sender()
         ("self.original.check(original)?;", ""),
         ("self.sender.check(original)?;", ""),
         ("self.sender.refuse();", ""),
+        (
+            "self.hello_sender.check_same_submit_actor(&mut self.sender, original)?;",
+            "",
+        ),
+        (
+            "requester::require_submit_offer_data(&self.intent, &self.offer)?;",
+            "",
+        ),
         ("self.original.check_intent(original, &self.intent)?;", ""),
     ] {
         let from = fragment(from);
         let to = fragment(to);
         assert_eq!(check.matches(&from).count(), 1, "mutation target");
         assert!(!submit_contract(
+            &accept,
             &receive,
             &check.replacen(&from, &to, 1),
             &sender_receive,
@@ -391,6 +489,7 @@ fn actual_submit_consumes_connection_and_keeps_same_original_and_kernel_sender()
         let to = fragment(to);
         assert_eq!(sender_receive.matches(&from).count(), 1, "mutation target");
         assert!(!submit_contract(
+            &accept,
             &receive,
             &check,
             &sender_receive.replacen(&from, &to, 1),
@@ -400,10 +499,100 @@ fn actual_submit_consumes_connection_and_keeps_same_original_and_kernel_sender()
     let from = fragment("require_pidfd(&self.proc, &self.process.pidfd, pid, original)?;");
     assert_eq!(sender_check.matches(&from).count(), 1);
     assert!(!submit_contract(
+        &accept,
         &receive,
         &check,
         &sender_receive,
         &sender_check.replacen(&from, "", 1)
+    ));
+}
+
+fn two_message_sender_contract(commitment: &str, joined: &str) -> bool {
+    let ordered_tokens = |text: &str, expected: &[&str]| {
+        let mut tail = text;
+        for needle in expected {
+            let needle = fragment(needle);
+            let Some((_, rest)) = tail.split_once(&needle) else {
+                return false;
+            };
+            tail = rest;
+        }
+        true
+    };
+    ordered_tokens(
+        commitment,
+        &[
+            "self.check(original)?;",
+            "Digest::of(&(\"day2-scheduled-backup-process-v1\", &self.process.data))",
+            "let checked = self.check(original)",
+            "self.refuse()",
+            "original.refuse()",
+            "let commitment = requested?",
+            "checked?",
+            "Ok(commitment)",
+        ],
+    ) && ordered_tokens(
+        joined,
+        &[
+            "self.check(original)?",
+            "other.check(original)?",
+            "Rc::ptr_eq(&self.socket, &other.socket)",
+            "self.cookie == other.cookie",
+            "MessageProcess::check_same_actor(&mut [&mut self.process, &mut self.connector, &mut other.process, &mut other.connector], original, &HashCosts::disabled())",
+            "let first = std::panic::catch_unwind",
+            "let second = std::panic::catch_unwind",
+            "self.refuse()",
+            "other.refuse()",
+            "original.refuse()",
+            "match requested",
+            "match first",
+            "match second",
+        ],
+    ) && joined.matches(&fragment("self.check(original)")).count() == 2
+        && joined.matches(&fragment("other.check(original)")).count() == 2
+        && !joined.contains(&fragment("NativeAcquisition::begin"))
+}
+
+#[test]
+fn actual_hello_submit_join_keeps_both_kernel_actors_and_independent_posts() {
+    let source = include_str!("process/backup_anchor.rs");
+    let commitment = selected_method(source, "ScheduledJobSender", "commitment_data");
+    let join = selected_method(source, "ScheduledJobSender", "check_same_submit_actor");
+    assert!(two_message_sender_contract(&commitment, &join));
+    for (before, after) in [
+        ("Rc::ptr_eq(&self.socket, &other.socket)", "true"),
+        ("self.cookie == other.cookie", "true"),
+        (
+            "MessageProcess::check_same_actor(&mut [&mut self.process, &mut self.connector, &mut other.process, &mut other.connector], original, &HashCosts::disabled())",
+            "Ok(())",
+        ),
+        (
+            "let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check(original)));",
+            "let first = Ok(Ok(()));",
+        ),
+        (
+            "let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| other.check(original)));",
+            "let second = Ok(Ok(()));",
+        ),
+        ("other.refuse();", ""),
+    ] {
+        let before = fragment(before);
+        assert_eq!(
+            join.matches(&before).count(),
+            1,
+            "actual join mutation target"
+        );
+        assert!(!two_message_sender_contract(
+            &commitment,
+            &join.replacen(&before, &fragment(after), 1)
+        ));
+    }
+    let before =
+        fragment("Digest::of(&(\"day2-scheduled-backup-process-v1\", &self.process.data))");
+    assert_eq!(commitment.matches(&before).count(), 1);
+    assert!(!two_message_sender_contract(
+        &commitment.replacen(&before, &fragment("Digest::new(b\"untrusted\")"), 1),
+        &join
     ));
 }
 
