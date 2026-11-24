@@ -9,7 +9,7 @@ license = "MIT"
 
 [patch.crates-io]
 # Own every kernel-installed sender pidfd before validating ancillary messages.
-rustix = { git = "https://github.com/clankernative/rustix", rev = "6f3845cfc5b1ac7f490e6fe9641eed720c99f6d0" }
+rustix = { git = "https://github.com/clankernative/rustix", rev = "a7834e0edace258dc42f344f2401a2d21349460f" }
 
 
 # Compiler profiles live only in build/bazel and .bazelrc. This manifest is a

@@ -106,11 +106,24 @@ fn text<'a>(value: &'a Value, name: &str) -> &'a str {
     value[name].as_str().unwrap_or_default()
 }
 
+/// What an instance admits a candidate record from, all derived from
+/// day2.json: its forge's server and org, its registry and its state bucket.
+#[derive(Clone, Copy, Debug)]
+pub struct Scope<'a> {
+    pub server: &'a str,
+    pub org: &'a str,
+    pub registry: &'a str,
+    pub bucket: &'a str,
+}
+
 /// A candidate record's validation, for `app`, in the earlier controller's
-/// order and with its messages: the
-/// record's fields, its binding, its native admission and checked main
-/// artifact, its app-local images and its private build log under `bucket`.
-pub fn check(value: &Value, app: &str, registry: &str, bucket: &str) -> Result<()> {
+/// order and with its messages: the record's fields, its binding, its native
+/// admission and checked main artifact, its app-local images under the
+/// registry and its private build log under the bucket. The binding's source
+/// must also be an app repository on the instance's forge, which the earlier
+/// controller did not check.
+pub fn check(value: &Value, app: &str, scope: &Scope) -> Result<()> {
+    let (registry, bucket) = (scope.registry, scope.bucket);
     unported(value)?;
     ensure!(
         object_with(value, &FIELDS),
@@ -161,6 +174,7 @@ pub fn check(value: &Value, app: &str, registry: &str, bucket: &str) -> Result<(
         binding["source"]["repository"] == binding["repository"],
         "release source mismatch"
     );
+    instance_source::on_forge(binding, scope.server, scope.org)?;
     ensure!(
         app_image(text(value, "image"), registry, app, true)
             && app_image(text(binding, "tooling_image"), registry, app, true)
@@ -201,7 +215,8 @@ pub fn check(value: &Value, app: &str, registry: &str, bucket: &str) -> Result<(
 
 /// The checks the earlier build host made of the binding it received, for a
 /// binding under `registry`: its shape, its app, its pinned app-local images,
-/// its image repository and its source directory.
+/// its image repository and its source directory; and, though the build host
+/// reads no day2.json, that its repository is not a platform `day2-` one.
 pub fn native_binding(binding: &Value, registry: &str) -> Result<String> {
     instance_source::unported_binding(binding)?;
     ensure!(
@@ -229,6 +244,10 @@ pub fn native_binding(binding: &Value, registry: &str) -> Result<String> {
     verification_profile(&binding["verification"])?;
     contract(&binding["ci_artifact"])?;
     instance_source::identity(&binding["source"])?;
+    ensure!(
+        !instance_source::platform_repository(text(binding, "repository")),
+        "the binding's repository is a platform repository (day2-<name>), not an app's"
+    );
     Ok(app.to_owned())
 }
 

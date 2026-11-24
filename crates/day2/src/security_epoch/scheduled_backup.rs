@@ -9,6 +9,8 @@ use day2_capabilities::{
 };
 use serde::{Deserialize, Serialize};
 
+mod journal;
+pub(in crate::security_epoch) mod requester;
 mod reservation;
 
 const MAX_PAYLOAD: usize = 16_384;

@@ -177,8 +177,8 @@ crate.annotation(
 
 crate.annotation(
     crate = "cookie",
-    version = "0.18.2",
-    patches = ["//build/bazel:patches/cookie-0.18.2-cargo-context.patch"],
+    version = "0.18.3",
+    patches = ["//build/bazel:patches/cookie-0.18.3-cargo-context.patch"],
     patch_args = ["-p1"],
 )
 

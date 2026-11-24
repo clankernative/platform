@@ -17,6 +17,8 @@ use std::{collections::BTreeMap, fs::File, marker::PhantomData, rc::Rc, thread::
 
 const NAMESPACES: [&str; 6] = ["time", "time_for_children", "pid", "mnt", "user", "cgroup"];
 
+pub(super) mod backup_anchor;
+
 pub(super) struct SelfSnapshot {
     pub process: crate::security_epoch::NativeProcessObservation,
     pub namespace: crate::security_epoch::NativeNamespaceObservation,

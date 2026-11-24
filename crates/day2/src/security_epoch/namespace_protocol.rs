@@ -111,6 +111,43 @@ pub(super) fn task(stat: &[u8], status: &[u8]) -> Result<TaskFacts> {
     })
 }
 
+/// Comparison DATA only. For the actual fixed /proc/self leader, one entry
+/// in both namespace lists means the proc mount and receiver use the same PID
+/// namespace. See proc_pid_status(5): lists start in the proc mount namespace
+/// and continue through nested inner namespaces. Never translate/fallback.
+/// Real procfs/retained-file ownership remains the native caller's obligation.
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn require_same_proc_pid_view_data(
+    stat: &[u8],
+    status: &[u8],
+    expected: u32,
+) -> Result<()> {
+    let current = task(stat, status)?;
+    ensure!(
+        expected > 0
+            && expected <= i32::MAX as u32
+            && current.process == expected
+            && current.thread == expected,
+        "backup_forwarded_proc_pid_view"
+    );
+    let text = std::str::from_utf8(status)?;
+    for field in ["NStgid:", "NSpid:"] {
+        let value = text
+            .lines()
+            .find_map(|line| line.strip_prefix(field))
+            .context("backup_forwarded_proc_namespace_list_missing")?;
+        let mut values = value.split_ascii_whitespace();
+        let first = values
+            .next()
+            .context("backup_forwarded_proc_namespace_list_empty")?;
+        ensure!(
+            values.next().is_none() && decimal::<u32>(first)? == expected,
+            "backup_forwarded_proc_pid_view"
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn offsets(bytes: &[u8]) -> Result<TimeOffsets> {
     ensure!(bytes.len() <= 1024, "epoch_native_timens_bound");
     let text = std::str::from_utf8(bytes)?;
@@ -260,6 +297,65 @@ pub(super) fn mappings(bytes: &[u8]) -> Result<Vec<Mapping>> {
 mod tests {
     use super::decimal;
     use std::{fmt::Display, str::FromStr};
+
+    #[test]
+    fn same_proc_pid_view_requires_complete_unique_single_namespace_leader_data()
+    -> anyhow::Result<()> {
+        let mut fields = vec!["0"; 50];
+        fields[0] = "S";
+        fields[19] = "123";
+        let stat = format!("17 (proc view DATA fixture) {}\n", fields.join(" "));
+        let status = "Tgid:\t17\nPid:\t17\nNStgid:\t17\nNSpid:\t17\n";
+        super::require_same_proc_pid_view_data(stat.as_bytes(), status.as_bytes(), 17)?;
+        for field in ["NStgid", "NSpid"] {
+            for value in [
+                "",
+                "0",
+                "-1",
+                "+17",
+                "017",
+                "18",
+                "2147483648",
+                "17 17",
+                "18 17",
+                "17 18",
+                "17\t17",
+                "١٧",
+            ] {
+                let changed =
+                    status.replace(&format!("{field}:\t17"), &format!("{field}:\t{value}"));
+                assert!(
+                    super::require_same_proc_pid_view_data(stat.as_bytes(), changed.as_bytes(), 17)
+                        .is_err()
+                );
+            }
+            let missing = status.replace(&format!("{field}:\t17\n"), "");
+            assert!(
+                super::require_same_proc_pid_view_data(stat.as_bytes(), missing.as_bytes(), 17)
+                    .is_err()
+            );
+            let duplicate = format!("{status}{field}:\t17\n");
+            assert!(
+                super::require_same_proc_pid_view_data(stat.as_bytes(), duplicate.as_bytes(), 17)
+                    .is_err()
+            );
+        }
+        for changed in [
+            status.trim_end().to_owned(),
+            status.replace("Tgid:\t17", "Tgid:\t18"),
+            status.replace("Pid:\t17", "Pid:\t18"),
+            format!("{status}x:{}\n", "x".repeat(65536)),
+        ] {
+            assert!(
+                super::require_same_proc_pid_view_data(stat.as_bytes(), changed.as_bytes(), 17)
+                    .is_err()
+            );
+        }
+        assert!(
+            super::require_same_proc_pid_view_data(stat.as_bytes(), status.as_bytes(), 0).is_err()
+        );
+        Ok(())
+    }
 
     fn compare<T: FromStr + Display + PartialEq>(word: &str) {
         // Independent previous parse-plus-Display oracle, including each

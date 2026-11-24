@@ -36,7 +36,7 @@ use syn::{
 const POLICY: &str = "architecture-proofs.json";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 // The reviewed registry aggregates owners; candidate requests stay separately bounded.
-const MAX_POLICY_PROOFS: usize = 348;
+const MAX_POLICY_PROOFS: usize = 349;
 const MAX_CANDIDATE_PROOFS: usize = 128;
 const MAX_TRAIT_SOURCES: usize = 64;
 const MAX_BUFFER_DESTRUCTORS: usize = 128;
@@ -2711,18 +2711,18 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_proof_catalog_has_a_finite_348_entry_budget() -> Result<()> {
-        for count in [130, 256, 263, 320, 321, 326, 339, 348] {
+    fn reviewed_proof_catalog_has_a_finite_349_entry_budget() -> Result<()> {
+        for count in [130, 256, 263, 320, 321, 326, 339, 348, 349] {
             validate_policy(&serde_json::from_value(proof_catalog(count))?)?;
         }
-        for count in [0, 349] {
+        for count in [0, 350] {
             let error = validate_policy(&serde_json::from_value(proof_catalog(count))?)
                 .err()
                 .context("out-of-budget proof catalog admitted")?;
             ensure!(error.to_string() == "proof policy entry budget");
         }
-        let mut duplicate = proof_catalog(348);
-        duplicate["proofs"][347] = duplicate["proofs"][0].clone();
+        let mut duplicate = proof_catalog(349);
+        duplicate["proofs"][348] = duplicate["proofs"][0].clone();
         ensure!(
             validate_policy(&serde_json::from_value(duplicate)?)
                 .err()
@@ -2730,8 +2730,8 @@ mod tests {
                 .to_string()
                 == "duplicate proof policy entry"
         );
-        let mut reordered = proof_catalog(348);
-        reordered["proofs"].as_array_mut().unwrap().swap(346, 347);
+        let mut reordered = proof_catalog(349);
+        reordered["proofs"].as_array_mut().unwrap().swap(347, 348);
         ensure!(
             validate_policy(&serde_json::from_value(reordered)?)
                 .err()
@@ -2746,7 +2746,7 @@ mod tests {
     fn expanded_catalog_enforces_actual_source_after_the_former_limit() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let root = fixture.path().canonicalize()?;
-        let policy = proof_catalog(348);
+        let policy = proof_catalog(349);
         fs::write(root.join(POLICY), serde_json::to_vec(&policy)?)?;
         let source =
             "struct Claim; pub struct Permit { claim: Claim } impl Permit { pub fn send(self) {} }";
@@ -2756,14 +2756,14 @@ mod tests {
             fs::write(&path, source)?;
         }
         check(&root)?;
-        let last = root.join(policy["proofs"][347]["source"].as_str().unwrap());
+        let last = root.join(policy["proofs"][348]["source"].as_str().unwrap());
         fs::write(
             &last,
             format!("{source} impl Permit {{ pub fn raw(&self) {{}} }}"),
         )?;
         let error = check(&root)
             .err()
-            .context("unreviewed API in the 348th source was not enforced")?;
+            .context("unreviewed API in the 349th source was not enforced")?;
         ensure!(format!("{error:#}").contains("unreviewed proof method"));
         Ok(())
     }
@@ -2777,7 +2777,7 @@ mod tests {
         let policy: Policy = day2::json::decode_evidence(bytes)?;
         validate_policy(&policy)?;
         ensure!(
-            policy.proofs.len() == 348,
+            policy.proofs.len() == 349,
             "reviewed repository proof count"
         );
         let mut changed: serde_json::Value = day2::json::decode_evidence(bytes)?;

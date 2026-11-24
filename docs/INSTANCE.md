@@ -29,7 +29,8 @@ day2 instance candidate native-probe JOB [--agent]
 name. It reads no other file. `instance render` validates the same file and
 prints the [OpenTofu inputs](#rendered-inputs) the platform renders from it.
 `instance plan` runs a [read-only plan](#plan) of the core roots with those
-inputs, and `instance apply` [applies](#apply) them. `instance release`
+inputs, each app's day2-app root with its [release inputs](#release-inputs),
+and `instance apply` [applies](#apply) them. `instance release`
 [publishes and fetches](#release) the qualified SDK releases apps pin, and
 `instance source` [reads an app's source and checked artifact](#source) from the
 forge, and `instance candidate` [builds, probes and checks](#candidate) an app's
@@ -182,8 +183,9 @@ the spec cannot yet describe: the installation security shell
 `deploy/integrations/` (such as `gitea-instance-ci`), optional stacks (such as
 `qualification-runner`) and roots an instance owns itself. Day2 renders an
 app's access policy at release activation from day2-app's `admins`, which this
-command renders. `instance plan` and `apply` do not run day2-app yet (step 3),
-so an instance's own day2-app apply must pass them.
+command renders. `instance plan` and `apply` run every root in this table; a
+day2-app root's image, artifact and native admission are its app's
+[release inputs](#release-inputs), read when it runs.
 
 ### Variables
 
@@ -226,7 +228,6 @@ it:
 - node counts, the Cloud Asset API opt-in and other project or cluster choices;
 - discovered IDs (`project_number`, `cloudflare_zone_id`,
   `backend_service_name`);
-- images and artifact IDs;
 - extension download routes (step 4);
 - per-app extras: runtime identities, secrets, provider credentials, resource
   catalogs and policies, schedules, pod labels and guardrail overrides
@@ -237,11 +238,71 @@ The instance commits those at fixed paths: `gcp/config/<root>.tfvars` for
 `gcp/config/apps/<id>.tfvars`. Instance CI switches to the rendered variables
 before an instance deletes its committed copies.
 
+A committed day2-app input may not set a variable the platform owns: a top-level
+assignment (a line that starts with the name, bare or quoted, then `=`) of any
+rendered day2-app variable, of `security_requirements`, of the release-profile
+switches `release_managed` and `rolling_deploys` (with either, the stack would
+ignore the release inputs; the platform deploys only the direct single-app
+profile), of `workload_name` (a deploy derives `day2-<id>`) or of
+`security_shell_contract` (the security shell is not a rendered root yet). That
+root fails with `failed_inputs`. OpenTofu receives the direct release profile,
+derived workload name and absent security shell at command-line precedence.
+A committed `image` and `artifact_id` are
+allowed but never used: the release inputs win over them, and an app with no
+release is not run. The instance's own deploy controller still reads the
+committed `image` as its source binding's image repository until the
+controller moves into the platform.
+
+### Release inputs
+
+A day2-app root's image, artifact and native admission come from its app's
+release selection, which the instance's deploy controller writes at
+`gs://<project>-tofu-state/day2/app-releases/<id>/selection.json` once a
+candidate is approved for deployment. The platform only reads it, in-process,
+before the root's init:
+
+- **Read.** The object's generation is read first, then its bytes at exactly
+  that generation (at most 1 MiB, no duplicate key at any depth). Only a
+  describe that finds the object absent means the app has no release yet; any
+  other failure (authentication, network, a server error, a timeout, an object
+  replaced between the two reads) fails the root. A failure is never absence,
+  and nothing ever falls back to a committed image.
+- **Shape.** Exactly `version` (the integer 1), `status` (`activating` or
+  `ready`) and `candidate`. A rolling selection is refused: the platform
+  deploys only the single-app profile. Plans may inspect an `activating`
+  candidate while the stack's activation guards still govern what it can plan.
+  A normal apply requires `ready`. The deployment controller finishes
+  activations and guarded first installs before recording that status.
+- **Candidate.** Checked as [`instance candidate check`](#candidate) checks a
+  record, never against the app's current `sdk`, so a selection stays
+  deployable across an SDK bump until the next release.
+- **SDK release.** The candidate's `qualified_release` manifest is read through
+  the [release cache](#release) (only the manifest; a hit after the first
+  read). It must be `linux_sqlite_single_v1`, pinned under the registry, and
+  the candidate's `security_requirements.containment.evidence.receipt_digest`
+  must be its native evidence digest.
+- **Rendered.** `release.tfvars.json` holds exactly `image`, `artifact_id` and
+  `security_requirements`, values as decoded, keys sorted. It is passed after
+  the committed and rendered variables, so it wins.
+- **No selection.** The root is `unreleased`: it is not initialized, planned or
+  applied, and that is not a failure. A new app is installed by its first
+  deploy. `delivery: paused` does not change any of this: it gates promotion,
+  not the installed release.
+- **Failures** are permanent: the root is `failed_release` with the reason in
+  its `release.error`, and the command exits 6. Plan and apply are rerun, not
+  retried.
+- **Reads.** `gcloud storage` with the ambient credentials, as `instance
+  candidate` reads release state: the plan identity needs only object read
+  access to the state bucket. The release cache is `$DAY2_RELEASE_CACHE`, else
+  `~/.cache/day2-platform-releases`, and must be writable: in instance CI the
+  job's environment sets `DAY2_RELEASE_CACHE` to a job-local directory.
+
 ## Plan
 
 `instance plan DIRECTORY PLATFORM NEW_DIRECTORY` validates `day2.json`, renders
-its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
-`project`, `cluster`, `tenancy`, then `app-edge` per app.
+its inputs and runs a read-only OpenTofu plan of every root in apply order:
+`project`, `cluster`, `tenancy`, then `app-edge` per app, then `day2-app` per
+app.
 
 - **Platform.** `PLATFORM` is a git repository that contains the `platform`
   commit. Each root plans a private copy of `deploy/gke/stacks/<stack>` read
@@ -255,7 +316,9 @@ its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
   private CLI configuration, so ambient provider overrides never apply.
 - **Inputs.** Each root initializes against its rendered backend and plans with
   a copy of its committed `.tfvars` file, then its rendered variables, so a
-  rendered value wins over a committed copy.
+  rendered value wins over a committed copy. A day2-app root first reads its
+  [release inputs](#release-inputs) and plans with them last; an app with no
+  release selection is `unreleased` and not planned.
 - **New roots.** Each root first lists its exact state object, which needs only
   object read access. If the listing is empty, the root plans against an empty
   local state and is reported as a new root, so no state is created. A missing
@@ -278,6 +341,10 @@ its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
     digest of its changes that a later `instance apply` must match.
   - Each root's `plan.txt` is the plan as OpenTofu prints it, with sensitive
     values masked: what an operator reviews before an apply.
+  - The receipt (format 2) also records each day2-app root's `release`: where
+    it was read (`selection`, the record's URI, generation, status and digest),
+    the candidate record's digest, its source commit, image, artifact, tooling
+    image and qualified release, and the digest of its `release.tfvars.json`.
   - Plans hold state values in plain text, so treat the directory like state.
   - Providers are cached once for all roots.
   - Credential material is refused there.
@@ -287,11 +354,9 @@ its inputs and runs a read-only OpenTofu plan of the core roots in apply order:
   - The command exits 6 if any root failed, or if the plan could not start.
   - A plan with changes exits 0; its receipt lists every changed resource,
     pending move, import and output change.
-- **Not planned:**
-  - `day2-app`, whose image and artifact inputs come from the release
-    controller (step 3);
-  - instances with OAuth workload inputs (`gcp/config/oauth-workloads.json`),
-    which fail closed.
+- **Not planned:** instances with OAuth workload inputs
+  (`gcp/config/oauth-workloads.json`), which fail closed; day2-app's OAuth
+  runtime is not in the single-app release profile.
 - **Known limits:**
   - Interrupting the command does not yet stop OpenTofu or remove the
     temporary kubeconfig directory; an interrupted apply runs its current root
@@ -315,6 +380,10 @@ owners never do.
   backends, committed inputs and rendered variables. A root whose new plan has
   other changes, or that the reviewed plan could not plan, is refused
   (`refused_unreviewed`) unless it has nothing to change; plan and review again.
+  A day2-app root's release is read again and compared root by root: a release
+  that changed or appeared since the reviewed plan is `refused_unreviewed`, one
+  that disappeared is `failed_release`, and one that only moved from
+  `activating` to `ready` with the same candidate still applies.
   The receipt is not signed: this binds the apply to a reviewed plan as a
   process step, not as a security boundary against whoever can write the files.
 - **One cycle per dependency.** Each root plans again in the apply, after the
@@ -323,6 +392,8 @@ owners never do.
   reviewed plan and is refused; plan, review and apply again for the next step.
 - **Committed.** The instance must be a clean git checkout whose `day2.json` and
   every committed input equal their bytes at `HEAD`.
+- **day2-app roots,** after their release: init, plan, show and apply as every
+  other root; an unreleased app's root runs nothing.
 - **Each root, in apply order:** init against its rendered backend, plan with
   the state lock, show, then apply exactly that saved plan. The saved plan's
   digest is checked again before apply, and OpenTofu refuses a saved plan whose
@@ -341,20 +412,61 @@ owners never do.
   reads their state. The host runs no root until each shared root before it has
   applied, so a failed or refused shared root stops the apply and the roots
   after it report `skipped`. An `app-edge` root reads only the shared roots, so
-  its failure stops only itself. The host also requires the roots in that order,
-  all on one state bucket with distinct prefixes.
+  its failure stops only itself and its own app's `day2-app` root, which reads
+  the edge's platform contract and is then `skipped`. A failed `day2-app` root
+  stops nothing else. The host also requires the roots in that order: the core
+  roots on one state bucket with distinct prefixes, and each `day2-app` root on
+  its app's own `<project>-<id>-state` / `day2-app/<id>`.
 - **Cluster credentials.** If the apply changed the cluster root, or the first
   read failed, the kubeconfig is read again once, before the first root that
   needs it.
-- **Mode.** The host action fixes plan or apply, and the request must name the
-  same mode, so `instance plan` can never apply.
+- **Mode.** The host action fixes plan, apply or deploy, and the request must
+  name the same mode, so `instance plan` can never apply.
 - **Output.** As for a plan. Root statuses are `no_changes`, `applied`,
-  `refused_destroy`, `refused_unreviewed`, `skipped` and the plan's failures plus
-  `failed_apply`. The command exits 6 if any root failed or was refused. If the
-  output audit fails after an apply, `receipt.json` is still written, with
-  `ok: false` and the audit error.
-- **Not applied:** `day2-app` and the stacks the spec does not model yet; the
-  instance's own tooling still applies those.
+  `unreleased`, `refused_destroy`, `refused_unreviewed`, `skipped` and the
+  plan's failures (`failed_credentials`, `failed_inputs`, `failed_release`,
+  `failed_init`, `failed_plan`, `failed_show`) plus `failed_apply`. The command
+  exits 6 if any root failed or was refused; an unreleased root is not a
+  failure. If the output audit fails after an apply, `receipt.json` is still
+  written, with `ok: false` and the audit error.
+- **Not applied:** the stacks the spec does not model yet; the instance's own
+  tooling still applies those.
+
+### Deploy mode
+
+A deploy (`instance deploy`, the stopped-app sequence) runs one app's day2-app
+root in a third host mode. Only the deploy's own host action starts it; plan and
+apply can never reach it. Its request holds exactly that root, rendered as plan
+and apply render it, and the candidate record file being deployed.
+
+- **Stages:** `release` (the candidate file, checked as a selection's candidate
+  is, and the committed-input rule), `init` (always the real backend: on a new
+  app's first install there is no state yet, and the apply creates it), an
+  optional `target`, then `selected`, `plan` (with the state lock), `show` and
+  `apply`.
+- **Target.** The `instance.json` the root's plan would publish, which `day2
+  platform maintain activate` takes as its target: a plan of only
+  `kubernetes_config_map_v1.instance`, without the state lock, into its own plan
+  file that is never applied. The stack's release admission is not in that
+  resource's dependency graph, so it renders while the new image is not yet
+  activated. The string's exact bytes go to `instance.json` (mode 0600) in the
+  root's directory, with the plan as `target.json` and `target.txt`. It runs at
+  most once, after init and before `selected`; a deploy that installs a new
+  app skips it. A failure is `failed_target`.
+- **Selected.** Just before the locked plan, the app's selection is read again
+  at its exact generation and must name exactly the request's candidate, with
+  status `activating` or `ready`; otherwise the root is `failed_release` and
+  nothing is planned. The selection is the approval record: there is no
+  reviewed plan, and destructive plans are still refused.
+- **Deadlines.** Shorter than an apply's, because the app is stopped while it
+  runs: a lock wait of up to five minutes within each step, 10 minutes for a
+  plan and 15 for the apply, then one minute's grace after an interrupt.
+  Each OpenTofu show capture has one minute.
+- **Output.** As for an apply, with statuses `no_changes`, `applied`,
+  `not_applied` (the deploy stopped before the apply), `refused_destroy` and the
+  failures, including `failed_target`. The root's `release` records the
+  candidate file and the selection `selected` checked, and `target` the
+  rendered `instance.json`'s path, digest and size.
 
 ## Release
 
@@ -424,9 +536,11 @@ writes is valid to the other.
   `verification` and `ci_artifact`. It is validated as the controller validates
   it (closed objects, integers that are not booleans, no duplicate keys), then
   against `day2.json`: the source server is `forge.server`, the repository is in
-  `forge.org`, the app is one of `apps`, and `qualified_release` and
-  `verification.cases` are that app's `sdk` and `verification`. Images must be
-  under the app's directory in the artifact registry.
+  `forge.org` and is not one of the platform's own repositories (a name that
+  starts with `day2-`, in any case), the app is one of `apps`, and
+  `qualified_release` and `verification.cases` are that app's `sdk` and
+  `verification`. Images must be under the app's directory in the artifact
+  registry.
   - The binding is the transitional input from the instance's existing deploy
     controller, not a spec field. Its repository and image names restate names
     `day2.json` derives, so they are checked only for ownership (the org and the
@@ -642,7 +756,12 @@ identity's credentials and the forge token of [`instance source`](#source).
 - **check.** Reads only `day2.json` and the record: the record's exact fields,
   its binding, its native admission, its checked artifact's provenance, its
   app-local images and its build log path, for `APP`, against the derived
-  registry and state bucket only, never the app's current `sdk`.
+  registry and state bucket only, never the app's current `sdk`. Unlike the
+  earlier controller, it also requires the binding's source to be an app
+  repository on the instance's forge, as `instance source` does:
+  `forge.server`, `forge.org`, and no `day2-` repository. `build` checks stored
+  and cached records the same way, and so does `preflight`; the build host
+  refuses a `day2-` repository too.
 - **Failures** after the spec validates exit 6 with `candidate_failed` and the
   controller's own message (`builder returned another source or toolchain`,
   `checked-input cache identity changed`, `native build pool wait budget
@@ -677,7 +796,9 @@ identity's credentials and the forge token of [`instance source`](#source).
 3. **Platform-owned control (started: slice 1, publishing and fetching SDK
    releases with `day2 instance release`; slice 2, reading app sources and
    checked artifacts with `day2 instance source`; slice 3, building, probing and
-   checking deployment candidates with `day2 instance candidate`).** Deployment, promotion, webhook and
+   checking deployment candidates with `day2 instance candidate`; slice 4a,
+   planning and applying each app's day2-app root with its release inputs, and
+   the deploy mode a deploy runs it in).** Deployment, promotion, webhook and
    artifact provenance logic moves from instance repositories into `ops/*.roc` recipes
    with narrow Rust capabilities. Instance workflows become rendered shims that
    call `day2 instance plan` and `day2 instance apply`; any edit to a shim fails

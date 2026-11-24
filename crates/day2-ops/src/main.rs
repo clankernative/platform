@@ -692,8 +692,11 @@ impl Operations {
                 struct Input {
                     request: PathBuf,
                 }
-                let session =
-                    instance_roots::Session::prepare(&input::<Input>(&request)?.request, mode)?;
+                let session = instance_roots::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    mode,
+                    instance_roots::Effects::native(),
+                )?;
                 let summary = session.summary();
                 self.instance_session = Some(session);
                 Ok(summary)
@@ -703,6 +706,12 @@ impl Operations {
                 .as_mut()
                 .context("instance session required")?
                 .credentials(),
+            // The prepared roots again, for a deploy recipe's later steps: read only.
+            "instance-roots-summary" => Ok(self
+                .instance_session
+                .as_ref()
+                .context("instance session required")?
+                .summary()),
             "instance-roots-operation" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]

@@ -63,6 +63,10 @@ pub(super) enum Route<'a> {
     ReplicaSet { namespace: &'a str, name: &'a str },
     Deployment { namespace: &'a str, name: &'a str },
     StatefulSet { namespace: &'a str, name: &'a str },
+    ScheduledJob { namespace: &'a str, name: &'a str },
+    ScheduledCronJob { namespace: &'a str, name: &'a str },
+    BackupAdmissionPolicy(&'a str),
+    BackupAdmissionBinding(&'a str),
     GoogleAccount(&'a EpochIam),
     GoogleMint(&'a EpochIam),
     Cluster,
@@ -90,6 +94,10 @@ fn admission_kind(route: &Route<'_>) -> Option<Work> {
         | Route::ReplicaSet { .. }
         | Route::Deployment { .. }
         | Route::StatefulSet { .. }
+        | Route::ScheduledJob { .. }
+        | Route::ScheduledCronJob { .. }
+        | Route::BackupAdmissionPolicy(_)
+        | Route::BackupAdmissionBinding(_)
         | Route::GoogleAccount(_)
         | Route::Cluster
         | Route::Project
@@ -291,6 +299,46 @@ impl NativeHttp {
                     "namespaces",
                     namespace,
                     "statefulsets",
+                    name,
+                ])?,
+                Method::GET,
+                true,
+            ),
+            Route::ScheduledJob { namespace, name } => (
+                kube(&["apis", "batch", "v1", "namespaces", namespace, "jobs", name])?,
+                Method::GET,
+                true,
+            ),
+            Route::ScheduledCronJob { namespace, name } => (
+                kube(&[
+                    "apis",
+                    "batch",
+                    "v1",
+                    "namespaces",
+                    namespace,
+                    "cronjobs",
+                    name,
+                ])?,
+                Method::GET,
+                true,
+            ),
+            Route::BackupAdmissionPolicy(name) => (
+                kube(&[
+                    "apis",
+                    "admissionregistration.k8s.io",
+                    "v1",
+                    "validatingadmissionpolicies",
+                    name,
+                ])?,
+                Method::GET,
+                true,
+            ),
+            Route::BackupAdmissionBinding(name) => (
+                kube(&[
+                    "apis",
+                    "admissionregistration.k8s.io",
+                    "v1",
+                    "validatingadmissionpolicybindings",
                     name,
                 ])?,
                 Method::GET,

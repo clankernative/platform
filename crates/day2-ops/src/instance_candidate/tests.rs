@@ -20,6 +20,16 @@ use std::{
 };
 
 const GOLDEN_RECEIPT: &str = include_str!("../../../../cli/fixtures/candidate-receipt.json");
+
+/// The synthetic instance's forge, registry and state bucket.
+fn scope() -> record::Scope<'static> {
+    record::Scope {
+        server: SERVER,
+        org: "tools",
+        registry: REGISTRY,
+        bucket: BUCKET,
+    }
+}
 const OTHER: &str = "89abcdef0123456789abcdef0123456789abcdef";
 const ARTIFACT: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 const IMAGE_DIGEST: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -845,6 +855,18 @@ fn error<T>(result: Result<T>) -> String {
     }
 }
 
+/// A candidate record a native build of the synthetic `links` app wrote, and its qualified release's manifest: what a
+/// selection names, for other modules' tests.
+pub(crate) fn selected_candidate() -> (Value, Vec<u8>) {
+    let world = World::new();
+    world.build(COMMIT, "candidate.json").unwrap();
+    let bytes = fs::read(world.path("candidate.json")).unwrap();
+    (
+        record::decode(&bytes).unwrap(),
+        world.published.manifest.clone(),
+    )
+}
+
 #[test]
 fn modes_name_their_commands() {
     for mode in Mode::ALL {
@@ -877,7 +899,7 @@ fn a_new_commit_is_built_on_the_build_host_and_both_records_are_created() -> Res
     assert_eq!(fs::read(world.path("candidate.json"))?, record);
     let value: Value = serde_json::from_slice(&record)?;
     assert_eq!(record::encode(&value)?, record);
-    record::check(&value, "links", REGISTRY, BUCKET)?;
+    record::check(&value, "links", &scope())?;
     assert_eq!(value["binding"], world.binding);
     assert_eq!(value["source_commit"], COMMIT);
     assert_eq!(value["checked_commit"], COMMIT);
@@ -1437,6 +1459,28 @@ fn check_validates_a_candidate_as_the_controller_did() -> Result<()> {
         &|value| value["binding"]["source"]["repository_id"] = json!(4.5),
         "invalid_native_repository_id",
     );
+    // The binding's source must be an app repository on the instance's forge.
+    refused(
+        &|value| value["binding"]["source"]["server"] = json!("https://git.example.org"),
+        "the binding's source server is not day2.json's forge.server",
+    );
+    let repository = |name: &'static str| {
+        move |value: &mut Value| {
+            value["binding"]["repository"] = json!(name);
+            value["binding"]["source"]["repository"] = json!(name);
+            value["ci_artifact"]["receipt"]["repository"] = json!(name);
+        }
+    };
+    refused(
+        &repository("people/links-app"),
+        "the binding's repository is not in day2.json's forge.org",
+    );
+    for platform in ["tools/day2-ci", "tools/day2-instance", "tools/Day2-CI"] {
+        refused(
+            &repository(platform),
+            "the binding's repository is a platform repository (day2-<name>), not an app's",
+        );
+    }
     Ok(())
 }
 
@@ -1608,6 +1652,16 @@ fn the_build_host_checks_every_job_file_before_it_takes_a_slot() -> Result<()> {
     assert_eq!(
         error(native_run(&world, &job, Mode::NativeBuild)),
         "invalid source subdirectory"
+    );
+    // The build host reads no day2.json, but never builds a platform repository.
+    let mut changed = request.clone();
+    let binding = changed.binding.as_mut().unwrap();
+    binding["repository"] = json!("tools/DAY2-ci");
+    binding["source"]["repository"] = json!("tools/DAY2-ci");
+    fs::write(job.join("request.json"), serde_json::to_vec(&changed)?)?;
+    assert_eq!(
+        error(native_run(&world, &job, Mode::NativeBuild)),
+        "the binding's repository is a platform repository (day2-<name>), not an app's"
     );
     // A job directory others can read is refused.
     fs::set_permissions(&job, fs::Permissions::from_mode(0o755))?;
@@ -2273,8 +2327,26 @@ fn live_records_golden() -> Result<()> {
                         .strip_prefix("gs://")
                         .and_then(|rest| rest.split('/').next())
                         .unwrap();
-                    // G3: the controller's validation accepts every current record.
-                    record::check(&value, &app, registry, bucket)?;
+                    // G3: the controller's validation accepts every current record, on the forge its
+                    // binding names.
+                    let binding = &value["binding"];
+                    let server = binding["source"]["server"].as_str().unwrap();
+                    let org = binding["repository"]
+                        .as_str()
+                        .unwrap()
+                        .split('/')
+                        .next()
+                        .unwrap();
+                    record::check(
+                        &value,
+                        &app,
+                        &record::Scope {
+                            server,
+                            org,
+                            registry,
+                            bucket,
+                        },
+                    )?;
                     *counts.entry("records checked").or_default() += 1;
                     if kind == "checked-inputs"
                         && let Some(text) = evidence
