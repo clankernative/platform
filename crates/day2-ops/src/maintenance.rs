@@ -31,7 +31,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
-mod activation;
+pub(crate) mod activation;
 mod runtime_rollout;
 pub use activation::Recovery;
 use activation::{Intent as ActivationIntent, Phase as ActivationPhase};
@@ -72,7 +72,7 @@ const OUTPUT_LIMIT: usize = 16 << 20;
 const LAYER_LIMIT: u64 = 1 << 30;
 /// day2-gke-release and the day2-app stack change an app's image only to the
 /// one this annotation names, and the change removes it.
-const ACTIVATED: &str = "day2.dev/activated-image";
+pub(crate) const ACTIVATED: &str = "day2.dev/activated-image";
 
 // The pod's /srv/day2 scratch volume is sized from the store it maintains; see
 // `scratch_bytes`.

@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, io::Read, path::Path, time::Duration};
 
-pub(super) const ANNOTATION: &str = "day2.dev/activation";
+pub(crate) const ANNOTATION: &str = "day2.dev/activation";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Phase {
+pub(crate) enum Phase {
     Prepared,
     Stopped,
     Fenced,
@@ -21,7 +21,7 @@ pub(super) enum Phase {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Intent {
+pub(crate) struct Intent {
     pub format: u8,
     pub owner: String,
     pub request_digest: String,
