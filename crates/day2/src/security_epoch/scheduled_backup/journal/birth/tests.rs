@@ -655,7 +655,7 @@ fn retain_confirmation_failure(
     expected: &[(bool, bool)],
     actual: &[(bool, bool)],
 ) -> Result<std::path::PathBuf> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    use std::{io::Write, os::unix::fs::{OpenOptionsExt, PermissionsExt}};
     let failed = expected
         .iter()
         .zip(actual)
@@ -669,6 +669,7 @@ fn retain_confirmation_failure(
     std::fs::create_dir_all(base)?;
     let dir = tempfile::Builder::new()
         .prefix("failed-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(base)?
         .keep();
     let path = dir.join("replay.json");
