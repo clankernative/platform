@@ -55,9 +55,15 @@ impl PendingBackupRoot {
         &mut self,
         selected: &EpochStore,
     ) -> Result<serde_json::Value> {
-        ensure!(!std::mem::replace(&mut self.refused, true), "backup_root_birth_refused");
+        ensure!(
+            !std::mem::replace(&mut self.refused, true),
+            "backup_root_birth_refused"
+        );
         self.files.check_pending()?;
-        let body = self.birth.as_mut().ok_or_else(|| anyhow::anyhow!("backup_root_birth_missing"))?
+        let body = self
+            .birth
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("backup_root_birth_missing"))?
             .begin_confirmation_data(selected)?;
         self.files.check_pending()?;
         self.refused = false;
@@ -69,8 +75,13 @@ impl PendingBackupRoot {
         selected: &EpochStore,
         bytes: &[u8],
     ) -> Result<()> {
-        ensure!(!std::mem::replace(&mut self.refused, true), "backup_root_birth_refused");
-        self.birth.as_mut().ok_or_else(|| anyhow::anyhow!("backup_root_birth_missing"))?
+        ensure!(
+            !std::mem::replace(&mut self.refused, true),
+            "backup_root_birth_refused"
+        );
+        self.birth
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("backup_root_birth_missing"))?
             .observe_confirmation_data(selected, 200, bytes)?;
         self.files.check_pending()?;
         self.refused = false;
@@ -79,7 +90,9 @@ impl PendingBackupRoot {
 
     pub(in crate::security_epoch) fn require_confirmed_data(&self) -> Result<()> {
         ensure!(!self.refused, "backup_root_birth_refused");
-        self.birth.as_ref().ok_or_else(|| anyhow::anyhow!("backup_root_birth_missing"))?
+        self.birth
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("backup_root_birth_missing"))?
             .require_confirmed_data()
     }
 

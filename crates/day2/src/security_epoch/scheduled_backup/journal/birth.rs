@@ -146,11 +146,15 @@ impl BirthTurn {
         selected: &EpochStore,
     ) -> Result<Value> {
         let before = std::mem::replace(&mut self.disposition, DispositionData::Unknown);
-        ensure!(before == DispositionData::Known && self.known_update.is_some(),
-            "backup_root_confirmation_requires_known_create");
-        ensure!(self.name == document_data(selected, &self.record.binding)?
-            && self.record == RootRecordData::new_data(selected, self.record.binding.clone())?,
-            "backup_root_confirmation_selection_changed");
+        ensure!(
+            before == DispositionData::Known && self.known_update.is_some(),
+            "backup_root_confirmation_requires_known_create"
+        );
+        ensure!(
+            self.name == document_data(selected, &self.record.binding)?
+                && self.record == RootRecordData::new_data(selected, self.record.binding.clone())?,
+            "backup_root_confirmation_selection_changed"
+        );
         // No mask hides added fields, and no transaction/readTime selector
         // can request an old snapshot or start an unfinished transaction.
         let body = json!({"documents":[self.name]});
@@ -165,28 +169,56 @@ impl BirthTurn {
         bytes: &[u8],
     ) -> Result<()> {
         let before = std::mem::replace(&mut self.disposition, DispositionData::Unknown);
-        ensure!(before == DispositionData::Confirming && status == 200
-            && bytes.len() <= MAX_PAYLOAD * 2, "backup_root_confirmation_unknown");
-        let known = self.known_update.as_ref().context("backup_root_known_version_missing")?;
+        ensure!(
+            before == DispositionData::Confirming
+                && status == 200
+                && bytes.len() <= MAX_PAYLOAD * 2,
+            "backup_root_confirmation_unknown"
+        );
+        let known = self
+            .known_update
+            .as_ref()
+            .context("backup_root_known_version_missing")?;
         let value: Value = crate::json::decode(bytes)
             .map_err(|_| anyhow::anyhow!("backup_root_confirmation_encoding"))?;
         let entries = value.as_array().context("backup_root_confirmation_array")?;
         ensure!(entries.len() == 1, "backup_root_confirmation_count");
-        let entry = entries[0].as_object().context("backup_root_confirmation_map")?;
-        ensure!(entry.len() == 2 && entry.contains_key("found") && entry.contains_key("readTime"),
-            "backup_root_confirmation_fields");
-        let read: UpdateTime = entry.get("readTime").and_then(Value::as_str)
-            .context("backup_root_confirmation_read_time")?.to_owned().try_into()?;
-        ensure!(!known.is_strictly_after_data(&read)?, "backup_root_confirmation_before_create");
-        compare_existing_data(selected, &self.record.binding, known,
-            &serde_json::to_vec(entry.get("found").context("backup_root_confirmation_found")?)?)?;
+        let entry = entries[0]
+            .as_object()
+            .context("backup_root_confirmation_map")?;
+        ensure!(
+            entry.len() == 2 && entry.contains_key("found") && entry.contains_key("readTime"),
+            "backup_root_confirmation_fields"
+        );
+        let read: UpdateTime = entry
+            .get("readTime")
+            .and_then(Value::as_str)
+            .context("backup_root_confirmation_read_time")?
+            .to_owned()
+            .try_into()?;
+        ensure!(
+            !known.is_strictly_after_data(&read)?,
+            "backup_root_confirmation_before_create"
+        );
+        compare_existing_data(
+            selected,
+            &self.record.binding,
+            known,
+            &serde_json::to_vec(
+                entry
+                    .get("found")
+                    .context("backup_root_confirmation_found")?,
+            )?,
+        )?;
         self.disposition = DispositionData::Confirmed;
         Ok(())
     }
 
     pub(in crate::security_epoch) fn require_confirmed_data(&self) -> Result<()> {
-        ensure!(self.disposition == DispositionData::Confirmed && self.known_update.is_some(),
-            "backup_root_confirmation_incomplete");
+        ensure!(
+            self.disposition == DispositionData::Confirmed && self.known_update.is_some(),
+            "backup_root_confirmation_incomplete"
+        );
         Ok(())
     }
 

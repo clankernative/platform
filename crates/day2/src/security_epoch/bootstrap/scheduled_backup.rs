@@ -118,7 +118,9 @@ impl PendingScheduledRootBirth<'_, '_> {
             physical.controller_stage()?,
         )?;
         self.check()?;
-        self.pending.as_ref().ok_or_else(|| anyhow::anyhow!("backup_root_files_missing"))?
+        self.pending
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("backup_root_files_missing"))?
             .require_confirmed_data()?;
         let pending = self
             .pending
@@ -137,24 +139,31 @@ impl PendingScheduledRootBirth<'_, '_> {
     }
 
     fn confirm_birth(&mut self) -> Result<()> {
-        let confirmation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-            self.check()?;
-            let physical = self.physical.as_mut()
-                .ok_or_else(|| anyhow::anyhow!("backup_root_phase_missing"))?;
-            let pending = self.pending.as_mut()
-                .ok_or_else(|| anyhow::anyhow!("backup_root_files_missing"))?;
-            let stage = physical.controller_stage()?;
-            // A second one-use lexical permit from the SAME actual creator,
-            // never a returned/public token or a reconstructed native parent.
-            let permit = RootBirthWritePermit {
-                _identity: &self.write_identity,
-                reads: std::ptr::from_ref(&self.reads),
-                stage: std::ptr::from_ref(stage),
-                pending: std::ptr::from_ref(pending),
-            };
-            self.reads.confirm_scheduled_backup_root_creation(stage, pending, permit)
-        }));
-        let confirmation_post = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check()));
+        let confirmation =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                self.check()?;
+                let physical = self
+                    .physical
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("backup_root_phase_missing"))?;
+                let pending = self
+                    .pending
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("backup_root_files_missing"))?;
+                let stage = physical.controller_stage()?;
+                // A second one-use lexical permit from the SAME actual creator,
+                // never a returned/public token or a reconstructed native parent.
+                let permit = RootBirthWritePermit {
+                    _identity: &self.write_identity,
+                    reads: std::ptr::from_ref(&self.reads),
+                    stage: std::ptr::from_ref(stage),
+                    pending: std::ptr::from_ref(pending),
+                };
+                self.reads
+                    .confirm_scheduled_backup_root_creation(stage, pending, permit)
+            }));
+        let confirmation_post =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check()));
         if !matches!(&confirmation, Ok(Ok(()))) || !matches!(&confirmation_post, Ok(Ok(()))) {
             self.refuse();
         }
@@ -518,16 +527,36 @@ mod tests {
             syn::Stmt::Local(local) if matches!(&local.pat, syn::Pat::Ident(p) if p.ident == name) => local.init.as_ref(),
             _ => None,
         }) else { return false; };
-        let syn::Expr::Call(catch) = init.expr.as_ref() else { return false; };
-        if catch.func.to_token_stream().to_string() != "std :: panic :: catch_unwind" || catch.args.len() != 1 { return false; }
-        let Some(syn::Expr::Call(safe)) = catch.args.first() else { return false; };
-        if safe.func.to_token_stream().to_string() != "std :: panic :: AssertUnwindSafe" || safe.args.len() != 1 { return false; }
-        let Some(syn::Expr::Closure(closure)) = safe.args.first() else { return false; };
-        if !closure.inputs.is_empty() { return false; }
+        let syn::Expr::Call(catch) = init.expr.as_ref() else {
+            return false;
+        };
+        if catch.func.to_token_stream().to_string() != "std :: panic :: catch_unwind"
+            || catch.args.len() != 1
+        {
+            return false;
+        }
+        let Some(syn::Expr::Call(safe)) = catch.args.first() else {
+            return false;
+        };
+        if safe.func.to_token_stream().to_string() != "std :: panic :: AssertUnwindSafe"
+            || safe.args.len() != 1
+        {
+            return false;
+        }
+        let Some(syn::Expr::Closure(closure)) = safe.args.first() else {
+            return false;
+        };
+        if !closure.inputs.is_empty() {
+            return false;
+        }
         let mut actual = closure.body.as_ref();
         while let syn::Expr::Block(block) = actual {
-            if !block.attrs.is_empty() || block.label.is_some() { return false; }
-            let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice() else { return false; };
+            if !block.attrs.is_empty() || block.label.is_some() {
+                return false;
+            }
+            let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice() else {
+                return false;
+            };
             actual = inner;
         }
         actual.to_token_stream().to_string() == expected.to_token_stream().to_string()
@@ -536,47 +565,88 @@ mod tests {
     fn confirmation_guard(creator: &str, counter: &str) -> bool {
         let confirm = method(creator, "confirm_birth");
         let read = method(counter, "confirm_scheduled_backup_root_creation");
-        ordered(&confirm, &[
-            "self . check", "physical . controller_stage", "RootBirthWritePermit",
-            "self . reads . confirm_scheduled_backup_root_creation",
-            "let confirmation_post", "self . refuse", "match confirmation", "match confirmation_post",
-        ]) && caught_post(&confirm, "confirmation_post", &syn::parse_quote!(self.check()))
-            && ordered(&read, &[
+        ordered(
+            &confirm,
+            &[
+                "self . check",
+                "physical . controller_stage",
+                "RootBirthWritePermit",
+                "self . reads . confirm_scheduled_backup_root_creation",
+                "let confirmation_post",
+                "self . refuse",
+                "match confirmation",
+                "match confirmation_post",
+            ],
+        ) && caught_post(
+            &confirm,
+            "confirmation_post",
+            &syn::parse_quote!(self.check()),
+        ) && ordered(
+            &read,
+            &[
                 "permit . require_actual (self , stage , pending)",
                 "self . connection . purpose == NativeRole :: EpochController",
-                "self . check", "scheduled_backup_root_selection",
+                "self . check",
+                "scheduled_backup_root_selection",
                 "pending . begin_confirmation_data (& self . connection . store)",
-                "self . check", "self . connection . credential . authorization",
-                "acquisition . remaining", "http . request_with_ceiling",
-                "Route :: ScheduledBackupRootRead", "pending . observe_confirmation_data",
-                "let checked", "pending . refuse", "self . refuse", "stage . refuse_serving",
-                "match requested", "match checked",
-            ]) && caught_post(&read, "checked", &syn::parse_quote!(self.check(stage)))
-            && !confirm.contains("finish_controller_known") && !confirm.contains("NativeAcquisition :: begin")
-            && !read.contains("finish_controller_known") && !read.contains("NativeAcquisition :: begin")
+                "self . check",
+                "self . connection . credential . authorization",
+                "acquisition . remaining",
+                "http . request_with_ceiling",
+                "Route :: ScheduledBackupRootRead",
+                "pending . observe_confirmation_data",
+                "let checked",
+                "pending . refuse",
+                "self . refuse",
+                "stage . refuse_serving",
+                "match requested",
+                "match checked",
+            ],
+        ) && caught_post(&read, "checked", &syn::parse_quote!(self.check(stage)))
+            && !confirm.contains("finish_controller_known")
+            && !confirm.contains("NativeAcquisition :: begin")
+            && !read.contains("finish_controller_known")
+            && !read.contains("NativeAcquisition :: begin")
     }
 
     #[test]
-    fn actual_confirmation_keeps_creator_inputs_and_real_counter_and_parent_posts_on_error_and_panic() {
-        let creator = include_str!("scheduled_backup.rs").split("#[cfg(test)]").next().unwrap();
-        let counter = include_str!("../authenticated_reads/connection.rs").split("#[cfg(test)]").next().unwrap();
+    fn actual_confirmation_keeps_creator_inputs_and_real_counter_and_parent_posts_on_error_and_panic()
+     {
+        let creator = include_str!("scheduled_backup.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let counter = include_str!("../authenticated_reads/connection.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
         assert!(creator_guard(creator));
         assert!(confirmation_guard(creator, counter));
         // Replace the ACTUAL named local initializer through the AST. Native
         // formatting may use a transparent closure block, not a second call.
         for (source, name, post, is_creator) in [
             (creator, "confirm_birth", "confirmation_post", true),
-            (counter, "confirm_scheduled_backup_root_creation", "checked", false),
+            (
+                counter,
+                "confirm_scheduled_backup_root_creation",
+                "checked",
+                false,
+            ),
         ] {
-            let mut parsed = syn::parse_file(source).unwrap(); let mut changed = 0;
+            let mut parsed = syn::parse_file(source).unwrap();
+            let mut changed = 0;
             for item in &mut parsed.items {
                 if let syn::Item::Impl(item) = item {
                     for member in &mut item.items {
-                        if let syn::ImplItem::Fn(f) = member && f.sig.ident == name {
+                        if let syn::ImplItem::Fn(f) = member
+                            && f.sig.ident == name
+                        {
                             for stmt in &mut f.block.stmts {
                                 if let syn::Stmt::Local(local) = stmt
-                                    && matches!(&local.pat, syn::Pat::Ident(p) if p.ident == post) {
-                                    local.init.as_mut().unwrap().expr = Box::new(syn::parse_quote!(Ok(Ok(()))));
+                                    && matches!(&local.pat, syn::Pat::Ident(p) if p.ident == post)
+                                {
+                                    local.init.as_mut().unwrap().expr =
+                                        Box::new(syn::parse_quote!(Ok(Ok(()))));
                                     changed += 1;
                                 }
                             }
@@ -586,8 +656,11 @@ mod tests {
             }
             assert_eq!(changed, 1);
             let mutated = parsed.to_token_stream().to_string();
-            assert!(!if is_creator { confirmation_guard(&mutated, counter) }
-                else { confirmation_guard(creator, &mutated) });
+            assert!(!if is_creator {
+                confirmation_guard(&mutated, counter)
+            } else {
+                confirmation_guard(creator, &mutated)
+            });
         }
         for (old, replacement) in [
             ("self.confirm_birth()?;", "Ok::<(), anyhow::Error>(())?;"),
@@ -699,7 +772,8 @@ mod seal_tests {
     fn guarded(source: &str) -> bool {
         let parsed = syn::parse_file(source).unwrap();
         struct Constructions {
-            owner: Option<String>, method: Option<String>,
+            owner: Option<String>,
+            method: Option<String>,
             all: Vec<(Option<String>, Option<String>, String)>,
         }
         impl<'a> Visit<'a> for Constructions {
@@ -718,13 +792,26 @@ mod seal_tests {
                 self.method = before;
             }
             fn visit_expr_struct(&mut self, value: &'a syn::ExprStruct) {
-                if value.path.segments.last().is_some_and(|p| p.ident == "RootBirthWritePermit") {
-                    self.all.push((self.owner.clone(), self.method.clone(), value.to_token_stream().to_string()));
+                if value
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|p| p.ident == "RootBirthWritePermit")
+                {
+                    self.all.push((
+                        self.owner.clone(),
+                        self.method.clone(),
+                        value.to_token_stream().to_string(),
+                    ));
                 }
                 syn::visit::visit_expr_struct(self, value);
             }
         }
-        let mut found = Constructions { owner: None, method: None, all: Vec::new() };
+        let mut found = Constructions {
+            owner: None,
+            method: None,
+            all: Vec::new(),
+        };
         found.visit_file(&parsed);
         let expected: syn::Expr = syn::parse_quote!(RootBirthWritePermit {
             _identity: &self.write_identity,
@@ -733,12 +820,25 @@ mod seal_tests {
             pending: std::ptr::from_ref(pending),
         });
         let expected = expected.to_token_stream().to_string();
-        if found.all.len() != 2 || found.all.iter().any(|(owner, _, value)|
-            owner.as_deref() != Some("PendingScheduledRootBirth") || *value != expected) {
+        if found.all.len() != 2
+            || found.all.iter().any(|(owner, _, value)| {
+                owner.as_deref() != Some("PendingScheduledRootBirth") || *value != expected
+            })
+        {
             return false;
         }
-        let names = found.all.iter().map(|(_, name, _)| name.as_deref()).collect::<std::collections::BTreeSet<_>>();
-        if names != [Some("create_known"), Some("confirm_birth")].into_iter().collect() { return false; }
+        let names = found
+            .all
+            .iter()
+            .map(|(_, name, _)| name.as_deref())
+            .collect::<std::collections::BTreeSet<_>>();
+        if names
+            != [Some("create_known"), Some("confirm_birth")]
+                .into_iter()
+                .collect()
+        {
+            return false;
+        }
         let mut create = None;
         let mut confirm = None;
         let mut binding = None;
@@ -757,7 +857,9 @@ mod seal_tests {
                 }
             }
         }
-        let (Some(create), Some(confirm), Some(bound)) = (create, confirm, binding) else { return false; };
+        let (Some(create), Some(confirm), Some(bound)) = (create, confirm, binding) else {
+            return false;
+        };
         let expected_binding: syn::Block = syn::parse_quote!({
             ensure!(
                 std::ptr::addr_eq(self.reads, std::ptr::from_ref(reads))
@@ -768,7 +870,8 @@ mod seal_tests {
             Ok(())
         });
         bound == expected_binding.to_token_stream().to_string()
-            && create.contains(&expected) && confirm.contains(&expected)
+            && create.contains(&expected)
+            && confirm.contains(&expected)
             && create.contains("create_scheduled_backup_root (stage , pending , permit)")
             && confirm.contains("confirm_scheduled_backup_root_creation (stage , pending , permit)")
     }
@@ -805,8 +908,16 @@ mod seal_tests {
                 "true",
             ),
         ] {
-            let expected_count = if old.starts_with("std::ptr::addr_eq") { 1 } else { 2 };
-            assert_eq!(source.matches(old).count(), expected_count, "seal mutation {old}");
+            let expected_count = if old.starts_with("std::ptr::addr_eq") {
+                1
+            } else {
+                2
+            };
+            assert_eq!(
+                source.matches(old).count(),
+                expected_count,
+                "seal mutation {old}"
+            );
             for (at, _) in source.match_indices(old) {
                 let changed = format!("{}{}{}", &source[..at], new, &source[at + old.len()..]);
                 assert!(!guarded(&changed), "seal mutation {old} at {at}");

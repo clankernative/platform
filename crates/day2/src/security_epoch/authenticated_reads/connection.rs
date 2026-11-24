@@ -803,24 +803,39 @@ impl CounterRequest<'_> {
     ) -> Result<()> {
         let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
             permit.require_actual(self, stage, pending)?;
-            ensure!(self.connection.purpose == NativeRole::EpochController,
-                "backup_root_reader_controller_required");
+            ensure!(
+                self.connection.purpose == NativeRole::EpochController,
+                "backup_root_reader_controller_required"
+            );
             self.check(stage)?;
             stage.storage()?.scheduled_backup_root_selection()?;
-            let body = serde_json::to_vec(&pending.begin_confirmation_data(&self.connection.store)?)?;
+            let body =
+                serde_json::to_vec(&pending.begin_confirmation_data(&self.connection.store)?)?;
             ensure!(body.len() <= 65_536, "backup_root_read_bound");
             self.check(stage)?;
             let authorization = self.connection.credential.authorization(
-                &mut self.request.acquisition, self.connection.store.max_lease_seconds)?;
-            let timeout = self.request.acquisition.remaining()?.min(Duration::from_secs(5));
+                &mut self.request.acquisition,
+                self.connection.store.max_lease_seconds,
+            )?;
+            let timeout = self
+                .request
+                .acquisition
+                .remaining()?
+                .min(Duration::from_secs(5));
             let bytes = self.connection.http.request_with_ceiling(
-                Route::ScheduledBackupRootRead, &authorization, Some(&body),
-                &mut self.request.acquisition, timeout)?;
+                Route::ScheduledBackupRootRead,
+                &authorization,
+                Some(&body),
+                &mut self.request.acquisition,
+                timeout,
+            )?;
             pending.observe_confirmation_data(&self.connection.store, &bytes)
         }));
         let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check(stage)));
         if !matches!(&requested, Ok(Ok(()))) || !matches!(&checked, Ok(Ok(()))) {
-            pending.refuse(); self.refuse(); stage.refuse_serving();
+            pending.refuse();
+            self.refuse();
+            stage.refuse_serving();
         }
         match requested {
             Err(panic) => std::panic::resume_unwind(panic),

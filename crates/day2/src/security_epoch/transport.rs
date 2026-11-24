@@ -531,7 +531,9 @@ impl NativeHttp {
 // 2xx must not be relabelled as 200 by its consuming metadata codec.
 fn response_status_accepted(route: &Route<'_>, status: reqwest::StatusCode) -> bool {
     match route {
-        Route::ScheduledBackupRootCommit | Route::ScheduledBackupRootRead => status == reqwest::StatusCode::OK,
+        Route::ScheduledBackupRootCommit | Route::ScheduledBackupRootRead => {
+            status == reqwest::StatusCode::OK
+        }
         _ => status.is_success(),
     }
 }
@@ -575,7 +577,9 @@ mod tests {
         }
         let expected: syn::Block = syn::parse_quote!({
             match route {
-                Route::ScheduledBackupRootCommit | Route::ScheduledBackupRootRead => status == reqwest::StatusCode::OK,
+                Route::ScheduledBackupRootCommit | Route::ScheduledBackupRootRead => {
+                    status == reqwest::StatusCode::OK
+                }
                 _ => status.is_success(),
             }
         });
@@ -600,7 +604,10 @@ mod tests {
         let ack = br#"{"writeResults":[{"updateTime":"2026-11-23T17:00:00.000001Z"}],"commitTime":"2026-11-23T17:00:00.000001Z"}"#;
         for status in 100..600 {
             let status = reqwest::StatusCode::from_u16(status).unwrap();
-            for route in [Route::ScheduledBackupRootCommit, Route::ScheduledBackupRootRead] {
+            for route in [
+                Route::ScheduledBackupRootCommit,
+                Route::ScheduledBackupRootRead,
+            ] {
                 let body = response_status_accepted(&route, status).then_some(ack.as_slice());
                 assert_eq!(body.is_some(), status == reqwest::StatusCode::OK);
             }
@@ -614,7 +621,10 @@ mod tests {
             http.address(&Route::ScheduledBackupRootCommit).unwrap(),
             http.address(&Route::EpochCommit).unwrap()
         );
-        assert_eq!(http.address(&Route::ScheduledBackupRootRead).unwrap(), http.address(&Route::EpochRead).unwrap());
+        assert_eq!(
+            http.address(&Route::ScheduledBackupRootRead).unwrap(),
+            http.address(&Route::EpochRead).unwrap()
+        );
         assert!(admission_kind(&Route::ScheduledBackupRootRead).is_none());
         let source = include_str!("transport.rs")
             .split("\n#[cfg(test)]\nmod tests")
