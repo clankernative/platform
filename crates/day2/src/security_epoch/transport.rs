@@ -638,8 +638,8 @@ mod tests {
             ),
             ("status == reqwest::StatusCode::OK", "status.is_success()"),
             (
-                "Route::ScheduledBackupRootCommit | Route::ScheduledBackupRootRead => status",
-                "Route::EpochCommit | Route::ScheduledBackupRootRead => status",
+                "Route::ScheduledBackupRootCommit | Route::ScheduledBackupRootRead => {",
+                "Route::EpochCommit | Route::ScheduledBackupRootRead => {",
             ),
         ] {
             assert_eq!(source.matches(old).count(), 1);
