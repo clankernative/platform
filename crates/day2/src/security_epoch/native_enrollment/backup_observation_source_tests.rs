@@ -1456,12 +1456,13 @@ fn outer_mutate_method(source: &str, owner: &str, name: &str, from: &str, to: &s
                 if let syn::ImplItem::Fn(method) = item
                     && method.sig.ident == name
                 {
-                    let raw = method.to_token_stream().to_string();
                     let from: proc_macro2::TokenStream = from.parse().unwrap();
                     let to: proc_macro2::TokenStream = to.parse().unwrap();
-                    assert_eq!(raw.matches(&from.to_string()).count(), 1);
-                    *method = syn::parse_str(&raw.replacen(&from.to_string(), &to.to_string(), 1))
-                        .unwrap();
+                    let mut targets = 0;
+                    let changed =
+                        outer_replace_tokens(method.to_token_stream(), &from, &to, &mut targets);
+                    assert_eq!(targets, 1, "{owner}::{name}: {from}");
+                    *method = syn::parse2(changed).unwrap();
                     count += 1;
                 }
             }
@@ -1469,6 +1470,65 @@ fn outer_mutate_method(source: &str, owner: &str, name: &str, from: &str, to: &s
     }
     assert_eq!(count, 1);
     file.to_token_stream().to_string()
+}
+
+// syn reconstructs operator spacing while macro bodies retain source spacing.
+// Compare actual lexical tokens, retaining every delimiter/comma/literal, and
+// ignore only Punct::spacing. Never remove commas and reparse the result.
+fn outer_replace_tokens(
+    source: proc_macro2::TokenStream,
+    from: &proc_macro2::TokenStream,
+    to: &proc_macro2::TokenStream,
+    targets: &mut usize,
+) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, TokenTree};
+    fn equal(left: &TokenTree, right: &TokenTree) -> bool {
+        match (left, right) {
+            (TokenTree::Group(a), TokenTree::Group(b)) => {
+                let a_tokens = a.stream().into_iter().collect::<Vec<_>>();
+                let b_tokens = b.stream().into_iter().collect::<Vec<_>>();
+                a.delimiter() == b.delimiter()
+                    && a_tokens.len() == b_tokens.len()
+                    && a_tokens.iter().zip(&b_tokens).all(|(a, b)| equal(a, b))
+            }
+            (TokenTree::Punct(a), TokenTree::Punct(b)) => a.as_char() == b.as_char(),
+            (TokenTree::Ident(a), TokenTree::Ident(b)) => a == b,
+            (TokenTree::Literal(a), TokenTree::Literal(b)) => a.to_string() == b.to_string(),
+            _ => false,
+        }
+    }
+    let source = source.into_iter().collect::<Vec<_>>();
+    let pattern = from.clone().into_iter().collect::<Vec<_>>();
+    assert!(!pattern.is_empty());
+    let mut result = proc_macro2::TokenStream::new();
+    let mut index = 0;
+    while index < source.len() {
+        if source[index..].len() >= pattern.len()
+            && source[index..index + pattern.len()]
+                .iter()
+                .zip(&pattern)
+                .all(|(a, b)| equal(a, b))
+        {
+            result.extend(to.clone());
+            *targets += 1;
+            index += pattern.len();
+            continue;
+        }
+        let token = match &source[index] {
+            TokenTree::Group(group) => {
+                let mut replacement = Group::new(
+                    group.delimiter(),
+                    outer_replace_tokens(group.stream(), from, to, targets),
+                );
+                replacement.set_span(group.span());
+                TokenTree::Group(replacement)
+            }
+            token => token.clone(),
+        };
+        result.extend([token]);
+        index += 1;
+    }
+    result
 }
 
 fn outer_caught_expression<'a>(statement: &'a syn::Stmt, name: &str) -> Option<&'a syn::Expr> {
