@@ -1404,6 +1404,16 @@
           "default_features": true,
           "optional": false,
           "local_path": null
+        },
+        {
+          "name": "zeroize",
+          "kind": "normal",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
         }
       ],
       "production_targets": [

@@ -37,6 +37,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
 flate2 = "1.1"
 tar = { version = "0.4", default-features = false }
 ring = "=0.17.14"
+zeroize = "=1.9.0"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies"] }
