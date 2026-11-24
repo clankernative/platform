@@ -12,6 +12,7 @@ import ops.InstanceRoots
 import ops.InstanceRelease
 import ops.InstanceSource
 import ops.InstanceCandidate
+import ops.InstanceDeploy
 import ops.Build
 import ops.Delegation
 import ops.Check
@@ -77,6 +78,7 @@ run! = |args| match args {
 	["instance-candidate-check-session", request] => InstanceCandidate.check!(request, call!)
 	["instance-candidate-native-build-session", request] => InstanceCandidate.native_build!(request, call!)
 	["instance-candidate-native-probe-session", request] => InstanceCandidate.native_probe!(request, call!)
+	["instance-deploy-session", request, roots] => InstanceDeploy.run!(request, roots, call!)
 	["build-recipe"] => Build.recipe!(call!)
 	["build-delegation"] => Delegation.build!(call!)
 	["build-delegation-business"] => Delegation.business!(call!)

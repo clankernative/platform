@@ -78,6 +78,7 @@ exports_files([
     "ops/InstanceRelease.roc",
     "ops/InstanceSource.roc",
     "ops/InstanceCandidate.roc",
+    "ops/InstanceDeploy.roc",
     "ops/InstanceRoots.roc",
     "ops/Linux.roc",
     "ops/RuntimeImage.roc",

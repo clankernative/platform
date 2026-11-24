@@ -8,6 +8,7 @@ import InstanceRender
 import InstanceRelease
 import InstanceSource
 import InstanceCandidate
+import InstanceDeploy
 
 ## Status, error, stream, and exit code are projections of one closed outcome.
 Output :: { outcome : Outcome }.{
@@ -21,6 +22,7 @@ Output :: { outcome : Outcome }.{
 		Released(Cli.Release, Names.LocalPath, InstanceSpec, InstanceRelease.Report),
 		Sourced(Cli.SourceRequest, Try(Names.LocalPath, [Null]), InstanceSource.Report),
 		Candidated(Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report),
+		Deployed(Cli.Deploy, Names.LocalPath, InstanceDeploy.Report),
 		Failed(Problem, Cli.Format, Cli.Command),
 	]
 
@@ -56,6 +58,7 @@ Output :: { outcome : Outcome }.{
 			Outcome.Released(request, path, spec, receipt) => released_text(request, path, spec, receipt)
 			Outcome.Sourced(request, path, report) => sourced_text(request, path, report)
 			Outcome.Candidated(request, path, report) => candidated_text(request, path, report)
+			Outcome.Deployed(request, path, report) => deployed_text(request, path, report.receipt)
 			Outcome.Failed(problem, _, _) => error_text(problem)
 		}
 	}
@@ -91,6 +94,7 @@ format = |outcome| match outcome {
 	Output.Outcome.Released(request, _, _, _) => request.parts().format
 	Output.Outcome.Sourced(request, _, _) => request.parts().format
 	Output.Outcome.Candidated(request, _, _) => request.parts().format
+	Output.Outcome.Deployed(request, _, _) => request.format
 }
 
 next_actions : Source -> List(Cli.Action)
@@ -149,6 +153,7 @@ json = |outcome| match outcome {
 	Output.Outcome.Released(request, path, spec, receipt) => released_json(request, path, spec, receipt)
 	Output.Outcome.Sourced(request, path, report) => sourced_json(request, path, report)
 	Output.Outcome.Candidated(request, path, report) => candidated_json(request, path, report)
+	Output.Outcome.Deployed(_, path, report) => deployed_json(path, report)
 	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
 	Output.Outcome.Help(_) => info_json(Bool.True)
 	Output.Outcome.Version(_) => info_json(Bool.False)
@@ -615,6 +620,40 @@ candidated_json = |request, path, report| {
 		.replace_first("\"receipt\":null", "\"receipt\":${report.text}")
 }
 
+deployed_json : Names.LocalPath, InstanceDeploy.Report -> Str
+deployed_json = |path, report| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	actions : List(Cli.ActionDto)
+	actions = []
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: "instance.deploy",
+		exit_code: 0.I32,
+		context: { spec_path: path.to_str(), spec_validation: "checked" },
+		result: { receipt: null },
+		error: null,
+		next_actions: actions,
+	}).replace_first("\"receipt\":null", "\"receipt\":${report.text}")
+}
+
+deployed_text : Cli.Deploy, Names.LocalPath, InstanceDeploy.Receipt -> Str
+deployed_text = |request, path, receipt| Str.join_with(
+	[
+		"DAY2  /  instance deploy",
+		"",
+		"  App       ${Output.safe(receipt.app_id)}",
+		"  Commit    ${Output.safe(receipt.commit)}",
+		"  Image     ${Output.safe(receipt.image)}",
+		"  Artifact  ${Output.safe(receipt.artifact_id)}",
+		"  Path      ${Output.safe(receipt.path)}",
+		"  Spec      ${Output.safe(path.to_str())}",
+		"  Receipt   ${Output.safe(request.output.to_str())}/receipt.json",
+	],
+	"\n",
+)
+
 candidated_text : Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report -> Str
 candidated_text = |request, path, report| {
 	receipt = report.receipt
@@ -999,6 +1038,7 @@ info_json = |is_help| {
 				"instance.candidate.check",
 				"instance.candidate.native-build",
 				"instance.candidate.native-probe",
+				"instance.deploy",
 			],
 			platform_commands: [
 				"platform.build",

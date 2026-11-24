@@ -553,6 +553,16 @@ fn the_path_follows_the_live_workload() {
     let other = image("links", "f");
     let refused = refusal(Some(statefulset(&old, 0, Some(&other), None)), Claim::Bound);
     assert_eq!(refused.class, Class::Fenced);
+    assert_eq!(
+        refusal(Some(statefulset(&new, 1, Some(&other), None)), Claim::Bound).class,
+        Class::Fenced
+    );
+    for replicas in [0, 2] {
+        assert_eq!(
+            refusal(Some(statefulset(&old, replicas, None, None)), Claim::Bound).class,
+            Class::Failed
+        );
+    }
     // A checkpoint this CLI cannot read is refused when the workload is read.
     let mut unknown = statefulset(&old, 1, None, Some(("fenced", DIGEST)));
     unknown["metadata"]["annotations"]["day2.dev/activation"] = json!("{\"format\": 2}");
@@ -582,6 +592,7 @@ fn claims_are_unbound_only_while_pending_without_a_volume() {
     for pvc in [
         json!({"spec": {"volumeName": "pv-1"}, "status": {"phase": "Bound"}}),
         json!({"spec": {"volumeName": "pv-1"}, "status": {"phase": "Pending"}}),
+        json!({"spec": {"volumeName": 123}, "status": {"phase": "Pending"}}),
         json!({"spec": {}, "status": {"phase": "Lost"}}),
         json!({}),
     ] {
@@ -592,30 +603,31 @@ fn claims_are_unbound_only_while_pending_without_a_volume() {
 #[test]
 fn the_deadline_budget_is_the_sum_of_every_remaining_step() -> Result<()> {
     use budget::*;
-    assert_eq!(APPLY, 1680);
+    assert_eq!(APPLY, 2160);
     assert_eq!(ROLLOUT, 660);
     assert_eq!(READBACK, 240);
     let roll = APPLY + ROLLOUT + READBACK + CLASSIFY;
     assert_eq!(
         fence::remaining(Path::Fresh),
-        BACKUP + MAINTAIN_GRACE + 2 * ARCHIVE + ACTIVATE + MAINTAIN_GRACE + roll
+        BACKUP + MAINTAIN_GRACE + 2 * ARCHIVE + SELECTION + ACTIVATE + MAINTAIN_GRACE + roll
     );
-    assert_eq!(fence::remaining(Path::Fresh), 8460);
-    for path in [Path::Activated, Path::Serving, Path::Install] {
+    assert_eq!(fence::remaining(Path::Fresh), 9420);
+    for path in [Path::Activated, Path::Serving] {
         assert_eq!(fence::remaining(path), roll);
     }
+    assert_eq!(fence::remaining(Path::Install), roll + 2 * KUBECTL_READ);
     let now = 1_800_000_000;
     fence::within(now, None, Path::Fresh)?;
-    fence::within(now, Some(now + 8460), Path::Fresh)?;
+    fence::within(now, Some(now + 9420), Path::Fresh)?;
     assert_eq!(
         format!(
             "{:#}",
-            fence::within(now, Some(now + 8459), Path::Fresh).unwrap_err()
+            fence::within(now, Some(now + 9419), Path::Fresh).unwrap_err()
         ),
-        "deploy_deadline: the fresh path needs up to 8460 s, but the job's deadline is 8459 s away; retry with \
+        "deploy_deadline: the fresh path needs up to 9420 s, but the job's deadline is 9419 s away; retry with \
          more time"
     );
-    fence::within(now, Some(now + 2640), Path::Serving)?;
+    fence::within(now, Some(now + 3180), Path::Serving)?;
     assert!(fence::within(now, Some(now - 1), Path::Install).is_err());
     Ok(())
 }
@@ -663,6 +675,7 @@ fn a_failure_is_classified_from_the_workload_read_after_it() {
     let activated = Failure {
         stage: Stage::Deadline,
         mutated: false,
+        retryable: true,
         path: Some(Path::Activated),
         ..base.clone()
     };
@@ -815,7 +828,8 @@ fn checkpoints_read_with_the_operators_format() -> Result<()> {
 // as the real session would, so a failure can be injected at any step.
 
 use super::{Effects, FENCED, Session, tools as deploy};
-use crate::instance_candidate::record;
+use crate::instance_candidate::{record, tools::Store};
+use crate::instance_roots::release::{self, tests::Objects};
 use crate::instance_source::tests::{BUCKET, Fake, PLATFORM};
 use day2::sdk_release::{
     BlobIdentity, Distribution, Evidence, Image, OPERATOR_FILES, PROFILE, Release, TARGET,
@@ -1367,10 +1381,28 @@ struct World {
     directory: tempfile::TempDir,
     fake: Fake,
     cluster: FakeTools,
+    selection: Selection,
     published: Published,
     target: String,
     artifact: String,
     runs: RefCell<u32>,
+}
+
+#[derive(Clone)]
+struct Selection(Rc<RefCell<Objects>>);
+
+impl Store for Selection {
+    fn read(&mut self, uri: &str) -> Result<Option<(Vec<u8>, String)>> {
+        self.0.borrow_mut().read(uri)
+    }
+
+    fn write(&mut self, _: &FsPath, _: &str, _: &str) -> Result<()> {
+        anyhow::bail!("deploy reads selection state")
+    }
+
+    fn put(&mut self, _: &FsPath, _: &str) -> Result<()> {
+        anyhow::bail!("deploy reads selection state")
+    }
 }
 
 impl Drop for World {
@@ -1551,6 +1583,9 @@ impl World {
             directory,
             fake,
             cluster,
+            selection: Selection(Rc::new(RefCell::new(release::tests::stored(
+                &json!({"version": 1, "status": "activating", "candidate": candidate}),
+            )))),
             published,
             target: target.to_owned(),
             artifact: artifact.to_owned(),
@@ -1566,13 +1601,13 @@ impl World {
         json!({
             "instance": {
                 "project": "exampleco-tools", "zone": "us-central1-a", "cluster": "day2",
-                "registry": REGISTRY, "bucket": BUCKET, "org": "tools",
+                "registry": REGISTRY, "bucket": BUCKET, "org": "tools", "server": "https://git.example.com",
                 "apply_identity": APPLY_IDENTITY,
                 "apps": [{"id": "links", "sdk": BlobIdentity::of(&self.published.manifest).digest,
                     "verification": 4}],
             },
             "directory": self.path("instance"),
-            "platform": self.path("platform"),
+            "checkout": self.path("platform"),
             "app_id": "links",
             "candidate": self.path("candidate.json"),
             "output": output,
@@ -1583,9 +1618,19 @@ impl World {
     fn effects(&self) -> Effects {
         Effects {
             tools: Box::new(self.cluster.clone()),
+            store: Box::new(self.selection.clone()),
             release: Box::new(self.fake.clone()),
             cache: Some(self.path("cache")),
         }
+    }
+
+    fn root_release(&self) -> Value {
+        let candidate = record::decode(&fs::read(self.path("candidate.json")).unwrap()).unwrap();
+        json!({
+            "candidate": release::candidate_digest(&candidate).unwrap(),
+            "commit": COMMIT, "image": self.target, "artifact_id": self.artifact,
+            "tooling_image": image_of("day2-tooling", "2"),
+        })
     }
 
     fn session(&self, request: &Value) -> Result<(Session, PathBuf)> {
@@ -1626,7 +1671,7 @@ impl World {
         let ran = (|| -> Result<Value> {
             step("operator", Value::Null)?;
             step("credentials", Value::Null)?;
-            let path = step("observe", Value::Null)?["path"]
+            let path = step("observe", self.root_release())?["path"]
                 .as_str()
                 .unwrap()
                 .to_owned();
@@ -1677,6 +1722,12 @@ impl World {
         })();
         let error = ran.as_ref().err().map(|error| format!("{error:#}"));
         let _ = step("archive-after", Value::Null);
+        if ran.is_ok() {
+            fs::create_dir(output.join("roots")).unwrap();
+            fs::write(output.join("roots/receipt.json"), json!({
+                "mode": "deploy", "ok": true, "roots": [{"label": "day2-app/links", "status": "applied", "release": self.root_release()}],
+            }).to_string()).unwrap();
+        }
         let result =
             step("finish", json!({ "error": error })).map_err(|error| format!("{error:#}"));
         drop(step);
@@ -2101,7 +2152,7 @@ fn the_deadline_refuses_before_anything_stops() -> Result<()> {
     assert!(
         outcome
             .error()
-            .starts_with("retryable: deploy_deadline: the fresh path needs up to 8460 s")
+            .starts_with("retryable: deploy_deadline: the fresh path needs up to 9420 s")
     );
     assert!(outcome.error().ends_with("nothing was stopped"));
     assert!(world.cluster().runs.is_empty());
@@ -2348,14 +2399,18 @@ fn the_session_runs_only_the_steps_its_path_allows() -> Result<()> {
     );
     session.step("operator", &Value::Null)?;
     session.step("credentials", &Value::Null)?;
+    session.check_roots_operation("release")?;
+    assert!(session.check_roots_operation("apply").is_err());
     assert_eq!(
-        session.step("observe", &Value::Null)?,
+        session.step("observe", &world.root_release())?,
         json!({"path": "fresh"})
     );
     assert_eq!(
         refused(&mut session, "apply"),
         "instance deploy runs target next, not apply"
     );
+    session.check_roots_operation("target")?;
+    assert!(session.check_roots_operation("apply").is_err());
     // The rendered target must be the candidate's, with the reported digest.
     let file = world.path("target.json");
     fs::write(&file, desired(OLD_ARTIFACT))?;
@@ -2388,6 +2443,57 @@ fn the_session_runs_only_the_steps_its_path_allows() -> Result<()> {
 }
 
 #[test]
+fn a_foreign_selection_or_root_cannot_stop_the_app() -> Result<()> {
+    let world = World::new();
+    let mut root = world.root_release();
+    root["candidate"] = json!(day2::digest(b"other"));
+    let (mut session, _) = world.session(&world.request(&world.path("foreign-root"), None))?;
+    session.step("operator", &Value::Null)?;
+    session.step("credentials", &Value::Null)?;
+    let error = session.step("observe", &root).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the day2-app root checked a different candidate"
+    );
+    assert!(world.cluster().runs.is_empty());
+
+    world.selection.0.borrow_mut().0.clear();
+    let outcome = world.deploy();
+    assert_eq!(outcome.exit(), 6);
+    assert!(outcome.error().contains("app has no release selection"));
+    assert!(world.cluster().runs.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_selection_changed_after_the_backup_refuses_activation() -> Result<()> {
+    let world = World::new();
+    let (mut session, output) =
+        world.session(&world.request(&world.path("changed-selection"), None))?;
+    session.step("operator", &Value::Null)?;
+    session.step("credentials", &Value::Null)?;
+    session.step("observe", &world.root_release())?;
+    let file = output.join("target.json");
+    let contents = desired(&world.artifact);
+    fs::write(&file, &contents)?;
+    let identity = BlobIdentity::of(contents.as_bytes());
+    session.step(
+        "target",
+        &json!({"path": file, "digest": identity.digest, "bytes": identity.bytes}),
+    )?;
+    session.step("deadline", &Value::Null)?;
+    session.step("backup", &Value::Null)?;
+    session.step("archive-before", &Value::Null)?;
+    world.selection.0.borrow_mut().0.clear();
+    let error = session.step("activate", &Value::Null).unwrap_err();
+    assert!(error.to_string().contains("app has no release selection"));
+    assert_eq!(world.cluster().runs.len(), 1);
+    assert_eq!(world.cluster().runs[0].0, Operation::Backup);
+    assert_eq!(world.workload()["spec"]["replicas"], 1);
+    Ok(())
+}
+
+#[test]
 fn requests_candidates_and_output_directories_are_checked_first() -> Result<()> {
     let world = World::new();
     let output = world.path("checked");
@@ -2403,7 +2509,7 @@ fn requests_candidates_and_output_directories_are_checked_first() -> Result<()> 
     bucket["instance"]["bucket"] = json!("elsewhere");
     assert_eq!(
         refused(bucket),
-        "the instance's bucket and registry must be its project's"
+        "the release state bucket and registry must be the instance project's"
     );
     let mut identity = request.clone();
     identity["instance"]["apply_identity"] = json!("ada@example.com");

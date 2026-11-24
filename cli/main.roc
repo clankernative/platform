@@ -18,6 +18,7 @@ import InstanceRender
 import InstanceRelease
 import InstanceSource
 import InstanceCandidate
+import InstanceDeploy
 import Names
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
@@ -74,6 +75,7 @@ main! = |args| {
 		Cli.Request.Release(release) => released!(release)
 		Cli.Request.Source(source) => sourced!(source)
 		Cli.Request.Candidate(candidate) => candidated!(candidate)
+		Cli.Request.Deploy(deploy) => deployed!(deploy)
 	}
 	emit!(Output.new(outcome))
 }
@@ -224,6 +226,50 @@ candidated! = |candidate| {
 		}
 		Err(CallbackErr(error)) => failed(InstanceCandidate.problem(error))
 		Err(_) => failed(Problem.CandidateFailed("cannot use a private temporary directory"))
+	}
+}
+
+deployed! : Cli.Deploy => Output.Outcome
+deployed! = |deploy| {
+	failed = |problem| Output.Outcome.Failed(problem, deploy.format, Cli.Command.InstanceDeploy)
+	(path, spec) = match InstanceSpec.load!(deploy.directory) {
+		Ok(loaded) => loaded
+		Err(problem) => return failed(problem)
+	}
+	output = deploy.output.to_str()
+	roots = match InstanceRender.deploy_request(
+		spec,
+		deploy.app_id,
+		deploy.candidate.to_str(),
+		{
+			instance: deploy.directory.to_str(),
+			checkout: deploy.checkout.to_str(),
+			output: "${output}/roots",
+		},
+	) {
+		Ok(request) => request
+		Err(UnknownApp(app_id)) => return failed(Problem.InvalidSpec("the app ${app_id} is not in day2.json"))
+	}
+	request = InstanceDeploy.request(spec, deploy)
+	ran = Env.with_temp_dir!(
+		|directory| {
+			file = Path.join(directory, "deploy.json")
+			root_file = Path.join(directory, "roots.json")
+			Path.write_utf8!(file, request).map_err(|_| "cannot write the deploy request")?
+			Path.write_utf8!(root_file, roots).map_err(|_| "cannot write the deploy root request")?
+			Host.instance_deploy!(
+				Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?,
+				Path.to_str(root_file).map_err(|_| "the temporary directory is not UTF-8")?,
+			)
+		},
+	)
+	match ran {
+		Ok(raw) => match InstanceDeploy.receipt(raw, deploy.app_id) {
+			Ok(report) => Output.Outcome.Deployed(deploy, path, report)
+			Err(_) => failed(Problem.DeployFailed("the platform host returned an unreadable receipt"))
+		}
+		Err(CallbackErr(error)) => failed(InstanceDeploy.problem(error))
+		Err(_) => failed(Problem.DeployFailed("cannot use a private temporary directory"))
 	}
 }
 

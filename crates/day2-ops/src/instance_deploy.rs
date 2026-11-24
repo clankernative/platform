@@ -28,8 +28,12 @@ pub mod tools;
 #[cfg(test)]
 mod tests;
 
-use crate::instance_candidate::{read_bounded, record, tools::write_private};
+use crate::instance_candidate::{
+    read_bounded, record,
+    tools::{Gcloud, Store, write_private},
+};
 use crate::instance_release;
+use crate::instance_roots::{self, release};
 use crate::instance_source::{self, App, File};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use archive::Totals;
@@ -69,6 +73,7 @@ pub struct Instance {
     pub registry: String,
     /// `<project>-tofu-state`.
     pub bucket: String,
+    pub server: String,
     pub org: String,
     /// `<org>-infra@<project>.iam.gserviceaccount.com`.
     pub apply_identity: String,
@@ -76,6 +81,17 @@ pub struct Instance {
 }
 
 impl Instance {
+    fn releases(&self) -> release::Releases {
+        release::Releases {
+            bucket: self.bucket.clone(),
+            registry: self.registry.clone(),
+            forge: release::Forge {
+                server: self.server.clone(),
+                org: self.org.clone(),
+            },
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         let lower = |value: &str| {
             !value.is_empty()
@@ -83,16 +99,7 @@ impl Instance {
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         };
-        ensure!(
-            lower(&self.project)
-                && lower(&self.org)
-                && self.bucket == format!("{}-tofu-state", self.project)
-                && self
-                    .registry
-                    .ends_with(&format!("-docker.pkg.dev/{}", self.project))
-                && crate::instance_candidate::registry(&self.registry),
-            "the instance's bucket and registry must be its project's"
-        );
+        self.releases().validate(&self.project)?;
         ensure!(
             lower(&self.zone) && self.zone.matches('-').count() == 2,
             "the instance zone must be <region>-<zone>"
@@ -129,7 +136,7 @@ pub struct Request {
     /// The instance directory and the platform checkout, which the new output
     /// directory must be outside.
     pub directory: PathBuf,
-    pub platform: PathBuf,
+    pub checkout: PathBuf,
     pub app_id: String,
     /// The checked candidate record's exact bytes.
     pub candidate: PathBuf,
@@ -228,6 +235,8 @@ pub struct Receipt {
 /// What a session reaches outside itself.
 pub struct Effects {
     pub tools: Box<dyn tools::Tools>,
+    /// The app's selected candidate, read at its exact generation.
+    pub store: Box<dyn Store>,
     /// The release cache's bucket reads, for the operator.
     pub release: Box<dyn instance_release::Tools>,
     /// The release cache; else `$DAY2_RELEASE_CACHE` or the home cache.
@@ -238,6 +247,7 @@ impl Effects {
     pub fn native() -> Result<Self> {
         Ok(Self {
             tools: Box::new(tools::Native::new(crate::maintenance::interrupt_flag())),
+            store: Box::new(Gcloud::native()),
             release: Box::new(instance_release::Native),
             cache: None,
         })
@@ -247,11 +257,15 @@ impl Effects {
 /// A deploy session.
 pub struct Session {
     tools: Box<dyn tools::Tools>,
+    store: Box<dyn Store>,
     release: Box<dyn instance_release::Tools>,
     cache: Option<PathBuf>,
     instance: Instance,
     deadline: Option<u64>,
     output: PathBuf,
+    directory: PathBuf,
+    platform: PathBuf,
+    candidate_path: PathBuf,
     candidate: Value,
     app: String,
     commit: String,
@@ -340,17 +354,12 @@ impl Session {
                 )
             })?;
         ensure!(
-            !within(parent, &request.directory) && !within(parent, &request.platform),
+            !within(parent, &request.directory) && !within(parent, &request.checkout),
             "the output directory must be outside the instance and the platform checkout"
         );
         let candidate_path = std::path::absolute(&request.candidate)?;
         let candidate = record::decode(&read_bounded(&candidate_path, record::RECORD_LIMIT)?)?;
-        record::check(
-            &candidate,
-            &app,
-            &request.instance.registry,
-            &request.instance.bucket,
-        )?;
+        record::check(&candidate, &app, &request.instance.releases().scope())?;
         let text = |field: &str| -> Result<String> {
             candidate[field]
                 .as_str()
@@ -369,6 +378,7 @@ impl Session {
         private_directory(&output.join("kube"))?;
         let Effects {
             mut tools,
+            store,
             release,
             cache,
         } = effects;
@@ -386,11 +396,15 @@ impl Session {
         });
         Ok(Self {
             tools,
+            store,
             release,
             cache,
             instance: request.instance,
             deadline: request.deadline,
             output,
+            directory: std::path::absolute(request.directory)?,
+            platform: std::path::absolute(request.checkout)?,
+            candidate_path,
             candidate,
             app,
             commit,
@@ -423,6 +437,43 @@ impl Session {
         })
     }
 
+    /// The coordinated root must be the one app and paths this deployment admitted.
+    pub fn check_roots_request(&self, raw: &Path) -> Result<()> {
+        let request: instance_roots::Request = day2::json::decode(&read_bounded(raw, 1 << 20)?)?;
+        ensure!(
+            request.mode == instance_roots::Mode::Deploy
+                && std::path::absolute(&request.instance)? == self.directory
+                && std::path::absolute(&request.checkout)? == self.platform
+                && std::path::absolute(&request.output)? == self.output.join("roots")
+                && std::path::absolute(request.candidate.context("deploy root candidate")?)?
+                    == self.candidate_path
+                && request.project == self.instance.project
+                && request.zone == self.instance.zone
+                && request.cluster == self.instance.cluster
+                && request.releases.as_ref() == Some(&self.instance.releases())
+                && request.roots.len() == 1
+                && request.roots[0].app_id.as_deref() == Some(&self.app),
+            "the day2-app root uses different deploy inputs"
+        );
+        Ok(())
+    }
+
+    /// A root may apply only from the deploy's authorized apply phase.
+    pub fn check_roots_operation(&self, operation: &str) -> Result<()> {
+        let next = self.plan.get(self.done).copied();
+        let expected = match operation {
+            "release" | "init" => "observe",
+            "target" => "target",
+            "selected" | "plan" | "show" | "apply" => "applied",
+            _ => bail!("unknown deploy root operation"),
+        };
+        ensure!(
+            !self.finished && !self.archived && next == Some(expected),
+            "the deploy is not ready to {operation} its day2-app root"
+        );
+        Ok(())
+    }
+
     /// Run the next step, which must be `name`. `detail` carries what the
     /// recipe learned from the day2-app root: the rendered target, the apply's
     /// outcome, or the error that ended the run.
@@ -445,7 +496,7 @@ impl Session {
         let value = match next {
             "operator" => self.operator(),
             "credentials" => self.credentials(),
-            "observe" => self.observe(),
+            "observe" => self.observe(detail),
             "target" => self.target(detail),
             "deadline" => self.check_deadline(),
             "backup" => self.backup(),
@@ -574,8 +625,16 @@ impl Session {
     }
 
     /// Read the live workload and choose the path before anything changes.
-    fn observe(&mut self) -> Result<Value> {
+    fn observe(&mut self, root: &Value) -> Result<Value> {
         self.enter(Stage::Observe);
+        ensure!(
+            root["candidate"] == release::candidate_digest(&self.candidate)?
+                && root["commit"] == self.commit
+                && root["image"] == self.image
+                && root["artifact_id"] == self.artifact_id
+                && root["tooling_image"] == self.tooling,
+            "the day2-app root checked a different candidate"
+        );
         self.retryable = true;
         let namespace = self.namespace();
         let statefulset = self.tools.get(
@@ -611,18 +670,18 @@ impl Session {
                 return Err(anyhow!(refusal.message));
             }
         };
+        self.route = Some(route);
+        self.check_selection()?;
         if route == Route::Fresh {
             let workload = observed.workload.as_ref().context("workload")?;
             self.retryable = true;
-            let configmap = self
-                .tools
-                .get(
-                    &namespace,
-                    tools::Kind::ConfigMap,
-                    &request::configmap(&self.app),
-                )?
-                .context("the workload has no instance ConfigMap")?;
+            let configmap = self.tools.get(
+                &namespace,
+                tools::Kind::ConfigMap,
+                &request::configmap(&self.app),
+            )?;
             self.retryable = false;
+            let configmap = configmap.context("the workload has no instance ConfigMap")?;
             self.live = Some(Live {
                 app_image: workload.image.clone(),
                 artifact_id: self.live_artifact(&configmap)?,
@@ -642,8 +701,17 @@ impl Session {
             ][..],
             _ => &["deadline", "apply", "applied", "rollout", "readback"][..],
         });
-        self.route = Some(route);
         Ok(json!({"path": route.name()}))
+    }
+
+    fn check_selection(&mut self) -> Result<()> {
+        release::selection(
+            self.store.as_mut(),
+            &self.instance.releases(),
+            &self.app,
+            &self.candidate,
+        )?;
+        Ok(())
     }
 
     /// The artifact the live ConfigMap binds the app to: exactly one app, this
@@ -702,6 +770,7 @@ impl Session {
     /// Refuse to start what cannot finish before the job's deadline.
     fn check_deadline(&mut self) -> Result<Value> {
         self.enter(Stage::Deadline);
+        self.check_selection()?;
         let route = self.route.context("path")?;
         let now = self.tools.now()?;
         if let Err(error) = fence::within(now, self.deadline, route) {
@@ -808,6 +877,7 @@ impl Session {
     /// rendered target. Past its fence the old image never restarts.
     fn activate(&mut self) -> Result<Value> {
         self.enter(Stage::Activate);
+        self.check_selection()?;
         let attempt = self.attempt.clone().context("attempt")?;
         let live = self.live.clone().context("live workload")?;
         let value = request::value(
@@ -831,6 +901,13 @@ impl Session {
     /// The day2-app apply is next: from here the app rolls.
     fn apply(&mut self) -> Result<Value> {
         self.enter(Stage::Apply);
+        if self.route == Some(Route::Install) {
+            let observed = self.observed()?;
+            ensure!(
+                observed.workload.is_none() && observed.claim == Claim::Unbound,
+                "the first install requires the app's claim to remain unbound and its workload absent"
+            );
+        }
         self.mutated = true;
         Ok(json!({}))
     }
@@ -995,30 +1072,37 @@ impl Session {
         let Some(directory) = self.attempt.as_ref().map(Attempt::backup_dir) else {
             return Ok(json!({"after": null}));
         };
-        if fs::symlink_metadata(&directory).is_err() || !archive::nonempty(&directory)? {
-            return Ok(json!({"after": null}));
-        }
-        match self.copy(archive::AFTER) {
-            Ok(copied) => {
-                self.after = Some(copied);
-                Ok(json!({"uri": archive::phase_uri(&self.prefix()?, archive::AFTER)}))
+        let archived = (|| -> Result<Value> {
+            match fs::symlink_metadata(&directory) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(json!({"after": null}));
+                }
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
             }
-            Err(error) => {
-                let message = format!("{error:#}");
-                self.archive_error = Some(message.clone());
-                Err(anyhow!(message))
+            if !archive::nonempty(&directory)? {
+                return Ok(json!({"after": null}));
             }
+            self.after = Some(self.copy(archive::AFTER)?);
+            Ok(json!({"uri": archive::phase_uri(&self.prefix()?, archive::AFTER)}))
+        })();
+        if let Err(error) = &archived {
+            self.archive_error = Some(format!("{error:#}"));
         }
+        archived
     }
 
     /// The receipt, or the failure classified from the cluster as it is now:
     /// `retryable: ` (exit 7), `fenced: ` (exit 8) or the plain message (exit 6).
     fn finish(&mut self, detail: &Value) -> Result<Value> {
         self.finished = true;
-        let error = detail["error"].as_str().map(str::to_owned);
+        let mut error = detail["error"].as_str().map(str::to_owned);
         let complete = self.done == self.plan.len() && self.route.is_some();
         if error.is_none() && complete && self.archive_error.is_none() {
-            return self.receipt();
+            match self.receipt() {
+                Ok(receipt) => return Ok(receipt),
+                Err(failure) => error = Some(format!("{failure:#}")),
+            }
         }
         let (message, stage) = match (&error, &self.archive_error) {
             (Some(error), _) => (error.clone(), self.stage),
@@ -1073,18 +1157,26 @@ impl Session {
     fn receipt(&mut self) -> Result<Value> {
         let route = self.route.context("path")?;
         let roots = self.output.join("roots/receipt.json");
-        let roots = match fs::symlink_metadata(&roots) {
-            Ok(_) => {
-                let bytes = read_bounded(&roots, record::RECORD_LIMIT)?;
-                let identity = BlobIdentity::of(&bytes);
-                Some(File {
-                    path: roots.to_string_lossy().into_owned(),
-                    digest: identity.digest,
-                    bytes: identity.bytes,
-                })
-            }
-            Err(_) => None,
-        };
+        let bytes = read_bounded(&roots, 1 << 20).context("read the deploy's day2-app receipt")?;
+        let result: Value = day2::json::decode(&bytes)?;
+        ensure!(
+            result["mode"] == "deploy"
+                && result["ok"] == true
+                && result["roots"][0]["label"] == format!("day2-app/{}", self.app)
+                && result["roots"][0]["release"]["candidate"]
+                    == release::candidate_digest(&self.candidate)?
+                && matches!(
+                    result["roots"][0]["status"].as_str(),
+                    Some("applied" | "no_changes")
+                ),
+            "the day2-app receipt does not prove this candidate was applied"
+        );
+        let identity = BlobIdentity::of(&bytes);
+        let roots = Some(File {
+            path: roots.to_string_lossy().into_owned(),
+            digest: identity.digest,
+            bytes: identity.bytes,
+        });
         let receipt = Receipt {
             format: 1,
             mode: "deploy".into(),

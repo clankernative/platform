@@ -6,6 +6,7 @@ package
 		InstanceRelease,
 		InstanceSource,
 		InstanceCandidate,
+		InstanceDeploy,
 		Build,
 		Delegation,
 		Check,

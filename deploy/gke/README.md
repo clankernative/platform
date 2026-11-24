@@ -763,6 +763,9 @@ reason, and the app is restored on its image.
 
 #### Activation and the day2-app stack
 
+For an instance managed from `day2.json`, [day2 instance deploy](../../docs/INSTANCE.md#deploy)
+coordinates backup, activation and the app-root apply for a selected single-replica candidate.
+
 Every ordinary-mode day2-app plan reads the live StatefulSet (none on the first install, which
 plans normally). An activation is pending while the StatefulSet carries
 `day2.dev/activated-image` and it differs from the image of the template's

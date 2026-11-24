@@ -28,6 +28,9 @@ Problem := [
 	SourceFailed(Str),
 	SourceUnavailable(Str),
 	CandidateFailed(Str),
+	DeployFailed(Str),
+	DeployUnavailable(Str),
+	DeployFenced(Str),
 ].{
 	Dto : { code : Str, message : Str, hint : Str, exit_code : I32, retryable : Bool }
 
@@ -51,8 +54,9 @@ Problem := [
 		| InvalidCatalog(_)
 		| UnsupportedArtifact(_)
 		| MetadataTooLarge => 5
-		PlanFailed(_) | ApplyFailed(_) | ReleaseFailed(_) | SourceFailed(_) | CandidateFailed(_) => 6
-		SourceUnavailable(_) => 7
+		PlanFailed(_) | ApplyFailed(_) | ReleaseFailed(_) | SourceFailed(_) | CandidateFailed(_) | DeployFailed(_) => 6
+		SourceUnavailable(_) | DeployUnavailable(_) => 7
+		DeployFenced(_) => 8
 	}
 
 	code : Problem -> Str
@@ -85,11 +89,14 @@ Problem := [
 		SourceFailed(_) => "source_failed"
 		SourceUnavailable(_) => "source_unavailable"
 		CandidateFailed(_) => "candidate_failed"
+		DeployFailed(_) => "deploy_failed"
+		DeployUnavailable(_) => "deploy_unavailable"
+		DeployFenced(_) => "deploy_fenced"
 	}
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan|apply|release|source|candidate <directory>."
+		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan|apply|release|source|candidate|deploy <directory>."
 		MissingCommand => "Describe options require the command app describe <app>."
 		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
@@ -115,7 +122,12 @@ Problem := [
 		ApplyFailed(detail) => "The instance apply failed: ${detail}"
 		ReleaseFailed(detail) => "The instance release failed: ${detail}"
 		# The host's own message, exactly, which the deploy controller records.
-		SourceFailed(detail) | SourceUnavailable(detail) | CandidateFailed(detail) => detail
+		SourceFailed(detail)
+		| SourceUnavailable(detail)
+		| CandidateFailed(detail)
+		| DeployFailed(detail)
+		| DeployUnavailable(detail)
+		| DeployFenced(detail) => detail
 	}
 
 	hint : Problem -> Str
@@ -152,6 +164,11 @@ Problem := [
 		CandidateFailed(
 			_,
 		) => "Run from the instance's CI job image with the apply identity's credentials and the forge token. This refusal is permanent for these inputs: a build's private evidence is in the instance's release state; fix the cause, then run again."
+		DeployFailed(_) => "Read the deploy and OpenTofu logs and any archived maintenance journal before retrying."
+		DeployUnavailable(_) => "The deploy stopped before changing the app. Retry with enough time to finish."
+		DeployFenced(
+			_,
+		) => "Use the same selected candidate to roll forward. Follow the archived maintenance journal for recovery."
 		InvalidAppName(_) => "Use a lowercase identifier up to 48 bytes; day2_ and sqlite_ prefixes are reserved."
 		InvalidOperationName(_) => "Use dot-separated lowercase identifiers, at most 80 bytes in total."
 		_ => "Run day2 --help for usage and examples."
@@ -168,7 +185,7 @@ Problem := [
 				hint: hint(problem),
 				exit_code: exit_code(problem),
 				retryable: match problem {
-					SourceUnavailable(_) => Bool.True
+					SourceUnavailable(_) | DeployUnavailable(_) => Bool.True
 					_ => Bool.False
 				},
 			}

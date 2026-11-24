@@ -128,7 +128,8 @@ impl Claim {
             None => Self::Absent,
             Some(pvc)
                 if pvc["status"]["phase"] == "Pending"
-                    && pvc["spec"]["volumeName"].as_str().is_none_or(str::is_empty) =>
+                    && (pvc["spec"]["volumeName"].is_null()
+                        || pvc["spec"]["volumeName"].as_str() == Some("")) =>
             {
                 Self::Unbound
             }
@@ -220,25 +221,44 @@ pub fn choose(observed: &Observed, target: &str) -> std::result::Result<Path, Re
             )),
         };
     }
-    if workload.image == target {
-        return Ok(Path::Serving);
+    if let Some(stamp) = &workload.stamp
+        && *stamp != workload.image
+    {
+        if stamp != target {
+            return Err(refuse(
+                Class::Fenced,
+                format!(
+                    "the app is activated for another image ({stamp}) that was never rolled; roll that activation \
+                     forward before deploying another candidate"
+                ),
+            ));
+        }
+        if workload.replicas != 0 {
+            return Err(refuse(
+                Class::Fenced,
+                "the workload is running the original image after activation",
+            ));
+        }
+        return Ok(Path::Activated);
     }
-    match &workload.stamp {
-        Some(stamp) if stamp == target => Ok(Path::Activated),
-        Some(stamp) if *stamp != workload.image => Err(refuse(
-            Class::Fenced,
-            format!(
-                "the app is activated for another image ({stamp}) that was never rolled; roll that activation \
-                 forward before deploying another candidate"
-            ),
-        )),
-        _ => Ok(Path::Fresh),
+    if workload.replicas != 1 {
+        return Err(refuse(
+            Class::Failed,
+            "instance deploy requires exactly one replica before activation",
+        ));
     }
+    Ok(if workload.image == target {
+        Path::Serving
+    } else {
+        Path::Fresh
+    })
 }
 
 /// Each step's worst case, in seconds. The deadline check sums the steps a path
 /// has left; every one is a hard deadline its step enforces.
 pub mod budget {
+    use crate::instance_roots::{DEPLOY_APPLY, DEPLOY_PLAN, DEPLOY_SHOW};
+
     /// One `kubectl get`.
     pub const KUBECTL_READ: u64 = 60;
     /// How long a maintenance session gets after its SIGINT to clean up and
@@ -256,20 +276,22 @@ pub mod budget {
     /// One phase's `gcloud storage cp --recursive`, then its listing.
     pub const ARCHIVE_UPLOAD: u64 = 600;
     pub const ARCHIVE_LIST: u64 = 60;
-    /// The day2-app apply in deploy mode: the state lock wait, the plan, the
-    /// apply and the interrupt grace.
-    pub const APPLY_LOCK_WAIT: u64 = 120;
-    pub const APPLY_PLAN: u64 = 600;
-    pub const APPLY_APPLY: u64 = 900;
-    pub const APPLY_GRACE: u64 = 60;
-    pub const APPLY: u64 = APPLY_LOCK_WAIT + APPLY_PLAN + APPLY_APPLY + APPLY_GRACE;
+    /// The generation-bound selection read: describe then read the object.
+    pub const SELECTION: u64 = crate::instance_candidate::tools::STORE_READ_SECONDS;
+    /// Deploy-mode engine deadlines. Lock waits run within these process deadlines.
+    pub const APPLY: u64 = SELECTION
+        + DEPLOY_PLAN.run.as_secs()
+        + DEPLOY_PLAN.grace.as_secs()
+        + DEPLOY_APPLY.run.as_secs()
+        + DEPLOY_APPLY.grace.as_secs()
+        + 2 * DEPLOY_SHOW.as_secs();
     /// `kubectl rollout status --timeout=600s`, and its process deadline.
     pub const ROLLOUT_WAIT: u64 = 600;
     pub const ROLLOUT: u64 = ROLLOUT_WAIT + 60;
     /// The readback: the StatefulSet, its pod, the ConfigMap and the CronJob.
     pub const READBACK: u64 = 4 * KUBECTL_READ;
-    /// The read after a failure.
-    pub const CLASSIFY: u64 = KUBECTL_READ;
+    /// The read after a failure, including whether a missing workload has a claim.
+    pub const CLASSIFY: u64 = 2 * KUBECTL_READ;
     pub const ARCHIVE: u64 = ARCHIVE_UPLOAD + ARCHIVE_LIST;
 }
 
@@ -280,9 +302,15 @@ pub fn remaining(path: Path) -> u64 {
     let roll = APPLY + ROLLOUT + READBACK + CLASSIFY;
     match path {
         Path::Fresh => {
-            (BACKUP + MAINTAIN_GRACE) + ARCHIVE + (ACTIVATE + MAINTAIN_GRACE) + roll + ARCHIVE
+            (BACKUP + MAINTAIN_GRACE)
+                + ARCHIVE
+                + SELECTION
+                + (ACTIVATE + MAINTAIN_GRACE)
+                + roll
+                + ARCHIVE
         }
-        Path::Activated | Path::Serving | Path::Install => roll,
+        Path::Activated | Path::Serving => roll,
+        Path::Install => roll + 2 * KUBECTL_READ,
     }
 }
 
@@ -346,13 +374,13 @@ pub struct Failure<'a> {
 pub fn classify(failure: &Failure<'_>) -> (Class, &'static str) {
     let earlier_fence = failure.path == Some(Path::Activated);
     if !failure.mutated {
-        return if failure.retryable {
-            (Class::Unavailable, "nothing was stopped")
-        } else if earlier_fence {
+        return if earlier_fence {
             (
                 Class::Fenced,
                 "the app is still stopped after an earlier migration fence; rerun this candidate",
             )
+        } else if failure.retryable {
+            (Class::Unavailable, "nothing was stopped")
         } else {
             (Class::Failed, "nothing was stopped")
         };
@@ -411,8 +439,13 @@ pub fn classify(failure: &Failure<'_>) -> (Class, &'static str) {
         );
     }
     if Some(workload.image.as_str()) == failure.original {
-        return if workload.replicas >= 1 {
+        return if workload.replicas == 1 && workload.ready_replicas == 1 {
             (Class::Failed, "the app was restored on its image")
+        } else if workload.replicas == 1 {
+            (
+                Class::Failed,
+                "activation_recovery_required: the app's original replica is not ready; check its rollout and the maintenance journal",
+            )
         } else {
             (
                 Class::Failed,

@@ -20,6 +20,7 @@ Cli :: [].{
 		Release(Release),
 		Source(SourceRequest),
 		Candidate(CandidateRequest),
+		Deploy(Deploy),
 	]
 
 	## The command a response reports, including failures before a request exists.
@@ -41,6 +42,7 @@ Cli :: [].{
 		InstanceCandidateCheck,
 		InstanceCandidateNativeBuild,
 		InstanceCandidateNativeProbe,
+		InstanceDeploy,
 	].{
 		name : Command -> Str
 		name = |command| match command {
@@ -61,6 +63,7 @@ Cli :: [].{
 			InstanceCandidateCheck => "instance.candidate.check"
 			InstanceCandidateNativeBuild => "instance.candidate.native-build"
 			InstanceCandidateNativeProbe => "instance.candidate.native-probe"
+			InstanceDeploy => "instance.deploy"
 		}
 	}
 
@@ -243,6 +246,17 @@ Cli :: [].{
 		}
 	}
 
+	## `instance deploy` runs a selected candidate on a single-replica app.
+	Deploy : {
+		directory : Names.LocalPath,
+		checkout : Names.LocalPath,
+		app_id : Str,
+		candidate : Names.LocalPath,
+		output : Names.LocalPath,
+		deadline : Try(U64, [Null]),
+		format : Format,
+	}
+
 	## A candidate command and its paths. BINDING is the deploy controller's binding file for the app, COMMIT a full
 	## lowercase commit, CANDIDATE a candidate record file and JOB the build host's private job directory.
 	## - build DIRECTORY BINDING COMMIT NEW_CANDIDATE: the candidate for the binding and commit; its record's bytes are
@@ -350,7 +364,14 @@ Cli :: [].{
 		if args.any(|arg| arg.to_utf8().any(|byte| byte < 32 or byte == 127)) {
 			return Err(Problem.InvalidArguments("control characters are unsupported"))
 		}
-		raw = scan(args, { source: Unset, filter: Unset, intent: Run, format: Text, positionals: [] })?
+		raw =
+			scan(
+				args,
+				{ source: Unset, filter: Unset, intent: Run, format: Text, deadline: Err(Null), positionals: [] },
+			)?
+		if raw.deadline.is_ok() and (raw.intent != Run or requested(raw.positionals).name() != "instance.deploy") {
+			return Err(Problem.ConflictingOptions("--deadline is only for instance deploy."))
+		}
 		match raw.intent {
 			Version => {
 				if raw.positionals != [] or has_options(raw) {
@@ -380,6 +401,7 @@ Cli :: [].{
 					["instance", "release", ..] => Ok(Request.Help(raw.format))
 					["instance", "source", ..] => Ok(Request.Help(raw.format))
 					["instance", "candidate", ..] => Ok(Request.Help(raw.format))
+					["instance", "deploy", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 						Ok(Request.Help(raw.format))
@@ -408,6 +430,26 @@ Cli :: [].{
 						),
 					)
 				}
+				["instance", "deploy", directory, checkout, app_id, candidate, output] => {
+					if has_options(raw) {
+						return Err(
+							Problem.ConflictingOptions("instance deploy accepts only --deadline, --agent or --json."),
+						)
+					}
+					path = |value, role| local_path("deploy", value, role)
+					Ok(
+						Request.Deploy({
+							directory: path(directory, "an instance directory")?,
+							checkout: path(checkout, "a platform checkout")?,
+							app_id: candidate_app(app_id, "instance deploy")?,
+							candidate: path(candidate, "a candidate file")?,
+							output: path(output, "a new output directory")?,
+							deadline: raw.deadline,
+							format: raw.format,
+						}),
+					)
+				}
+				["instance", "deploy", ..] if raw.positionals.len() < 7 => Err(Problem.MissingArgument)
 				["instance", "release"]
 				| ["instance", "release", "publish"]
 				| ["instance", "release", "publish", _]
@@ -521,7 +563,7 @@ Cli :: [].{
 					path = |value, role| candidate_path("check", value, role)
 					action = CandidateAction.Check({
 						directory: path(directory, "an instance directory")?,
-						app_id: candidate_app(id)?,
+						app_id: candidate_app(id, "instance candidate check")?,
 						candidate: path(candidate, "a candidate file")?,
 					})
 					Ok(Request.Candidate(candidate_request(action, raw)?))
@@ -562,11 +604,12 @@ Cli :: [].{
 		}
 	}
 
-	## Agrees with parse: the first positional names the command family. Values
-	## of --instance and --operation are skipped so they cannot select it.
+	## Agrees with parse: the first positional names the command family.
 	requested : List(Str) -> Command
 	requested = |args| match args {
-		["--instance", _, .. as rest] | ["--operation", _, .. as rest] => requested(rest)
+		["--instance", _, .. as rest]
+		| ["--operation", _, .. as rest]
+		| ["--deadline", _, .. as rest] => requested(rest)
 		["instance", .. as rest] => instance_command(rest)
 		[arg, .. as rest] if arg.starts_with("-") => requested(rest)
 		_ => AppDescribe
@@ -584,6 +627,7 @@ Cli :: [].{
 		Request.Release(value) => value.format
 		Request.Source(value) => value.parts().format
 		Request.Candidate(value) => value.parts().format
+		Request.Deploy(value) => value.format
 	}
 
 	quote : Str -> Str
@@ -639,6 +683,21 @@ Cli :: [].{
 				.concat(value.parts().action.arguments())
 			Request.Candidate(value) => ["day2", "instance", "candidate", value.parts().action.verb()]
 				.concat(value.parts().action.arguments())
+			Request.Deploy(value) => [
+				"day2",
+				"instance",
+				"deploy",
+				value.directory.to_str(),
+				value.checkout.to_str(),
+				value.app_id,
+				value.candidate.to_str(),
+				value.output.to_str(),
+			].concat(
+				match value.deadline {
+					Ok(deadline) => ["--deadline", deadline.to_str()]
+					Err(Null) => []
+				},
+			)
 		}
 		base.concat(
 			match request_format(request) {
@@ -656,6 +715,7 @@ Raw : {
 	filter : [Unset, Set(Names.Operation)],
 	intent : [Run, Help, Version],
 	format : Cli.Format,
+	deadline : Try(U64, [Null]),
 	positionals : List(Str),
 }
 
@@ -803,8 +863,8 @@ candidate_commit = |value| {
 }
 
 ## A deployment app ID: a lowercase letter, then at most 39 lowercase letters, digits and hyphens.
-candidate_app : Str -> Try(Str, Problem)
-candidate_app = |value| {
+candidate_app : Str, Str -> Try(Str, Problem)
+candidate_app = |value, command| {
 	bytes = value.to_utf8()
 	valid = match bytes {
 		[first, ..] => {
@@ -821,17 +881,20 @@ candidate_app = |value| {
 	if valid {
 		Ok(value)
 	} else {
-		Err(Problem.InvalidArguments("instance candidate check requires a deployment app ID"))
+		Err(Problem.InvalidArguments("${command} requires a deployment app ID"))
 	}
 }
 
 ## The instance verb follows the family, after any flags.
 instance_command : List(Str) -> Cli.Command
 instance_command = |args| match args {
-	["--instance", _, .. as rest] | ["--operation", _, .. as rest] => instance_command(rest)
+	["--instance", _, .. as rest]
+	| ["--operation", _, .. as rest]
+	| ["--deadline", _, .. as rest] => instance_command(rest)
 	["render", ..] => Cli.Command.InstanceRender
 	["plan", ..] => Cli.Command.InstancePlan
 	["apply", ..] => Cli.Command.InstanceApply
+	["deploy", ..] => Cli.Command.InstanceDeploy
 	["release", .. as rest] => release_command(rest)
 	["source", .. as rest] => source_command(rest)
 	["candidate", .. as rest] => candidate_command(rest)
@@ -897,17 +960,34 @@ scan = |args, raw| match args {
 	}
 	["--instance", value, .. as rest] => set_option("--instance", value, rest, raw)
 	["--operation", value, .. as rest] => set_option("--operation", value, rest, raw)
+	["--deadline", value, .. as rest] => set_deadline(value, rest, raw)
 	["--instance"] => Err(Problem.MissingOptionValue("--instance"))
 	["--operation"] => Err(Problem.MissingOptionValue("--operation"))
+	["--deadline"] => Err(Problem.MissingOptionValue("--deadline"))
 	[arg, .. as rest] if arg
 		.starts_with("--instance=") => set_option("--instance", arg.drop_prefix("--instance="), rest, raw)
 	[arg, .. as rest] if arg
 		.starts_with("--operation=") => set_option("--operation", arg.drop_prefix("--operation="), rest, raw)
+	[arg, .. as rest] if arg.starts_with("--deadline=") => set_deadline(arg.drop_prefix("--deadline="), rest, raw)
 	[arg, .. as rest] => if
 		arg.starts_with("-")
 		Err(Problem.UnknownOption(arg))
 	else
 		scan(rest, { ..raw, positionals: raw.positionals.append(arg) })
+}
+
+set_deadline : Str, List(Str), Raw -> Try(Raw, Problem)
+set_deadline = |value, rest, raw| {
+	if raw.deadline.is_ok() {
+		return Err(Problem.DuplicateOption("--deadline"))
+	}
+	if value.is_empty() or value.starts_with("--") {
+		return Err(Problem.MissingOptionValue("--deadline"))
+	}
+	match U64.from_str(value) {
+		Ok(seconds) if seconds > 0 and value.to_utf8().all(decimal) => scan(rest, { ..raw, deadline: Ok(seconds) })
+		_ => Err(Problem.InvalidArguments("--deadline requires a positive Unix timestamp in seconds"))
+	}
 }
 
 set_option : Str, Str, List(Str), Raw -> Try(Raw, Problem)
@@ -1123,3 +1203,26 @@ expect Cli.requested(["instance", "source", "--agent", "checked-artifact", "."])
 	== "instance.source.checked-artifact"
 expect Cli.requested(["--agent", "instance", "source"]).name() == "instance.source.head"
 expect Cli.requested(["instance", "source", "verify-controls"]).name() == "instance.source.verify-controls"
+
+deploy_args : List(Str)
+deploy_args = ["instance", "deploy", ".", "../platform", "links", "candidate.json", "/tmp/new-deploy"]
+
+expect match Cli.parse(deploy_args.concat(["--deadline", "1800000000", "--agent"])) {
+	Ok(Cli.Request.Deploy(deploy)) => deploy.app_id == "links" and deploy.deadline == Ok(1_800_000_000)
+	_ => Bool.False
+}
+
+expect match Cli.parse(deploy_args.concat(["--deadline=1800000000", "--deadline=1800000001"])) {
+	Err(Problem.DuplicateOption("--deadline")) => Bool.True
+	_ => Bool.False
+}
+
+expect match Cli.parse(deploy_args.concat(["--deadline", "0"])) {
+	Err(Problem.InvalidArguments(_)) => Bool.True
+	_ => Bool.False
+}
+
+expect match Cli.parse(["instance", "check", ".", "--deadline=1800000000"]) {
+	Err(Problem.ConflictingOptions(_)) => Bool.True
+	_ => Bool.False
+}

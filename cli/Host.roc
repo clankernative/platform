@@ -62,6 +62,19 @@ Host :: [].{
 		)
 	}
 
+	## A deploy owns one deploy session and one day2-app root. Both requests travel as private files.
+	instance_deploy! : Str, Str => Try(Str, Str)
+	instance_deploy! = |request, roots| {
+		exchange!(
+			Json.to_str({
+				protocol: 1.U32,
+				action: "instance-deploy",
+				input: Json.to_str({ request: request, roots: roots }),
+			}),
+			Progress,
+		)
+	}
+
 	call! : Str => Try(Str, Str)
 	call! = |request| exchange!(request, Quiet)
 

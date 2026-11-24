@@ -27,6 +27,12 @@ pub trait Store {
     fn put(&mut self, file: &Path, uri: &str) -> Result<()>;
 }
 
+const STORE_DESCRIBE: Duration = Duration::from_secs(120);
+const STORE_CAT: Duration = Duration::from_secs(300);
+
+/// Worst-case time for the native store to read one generation-bound object.
+pub const STORE_READ_SECONDS: u64 = STORE_DESCRIBE.as_secs() + STORE_CAT.as_secs();
+
 /// The build host and how to reach it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
@@ -275,7 +281,7 @@ pub fn exit(code: Option<i32>) -> String {
 
 impl Store for Gcloud {
     fn read(&mut self, uri: &str) -> Result<Option<(Vec<u8>, String)>> {
-        let described = self.gcloud(describe_args(uri), Duration::from_secs(120))?;
+        let described = self.gcloud(describe_args(uri), STORE_DESCRIBE)?;
         if !described.status.success() {
             if absent(&String::from_utf8_lossy(&described.stderr)) {
                 return Ok(None);
@@ -294,7 +300,7 @@ impl Store for Gcloud {
         );
         let bytes = self.checked(
             cat_args(uri, &generation),
-            Duration::from_secs(300),
+            STORE_CAT,
             "read private release state",
         )?;
         Ok(Some((bytes, generation)))

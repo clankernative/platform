@@ -23,6 +23,8 @@ USAGE
   day2 instance candidate check <directory> <app> <candidate> [--agent]
   day2 instance candidate native-build <job directory> [--agent]
   day2 instance candidate native-probe <job directory> [--agent]
+  day2 instance deploy <directory> <platform> <app> <candidate>
+                       <new directory> [--deadline <unix seconds>] [--agent]
   day2 platform --help
 
 PLATFORM OPERATIONS
@@ -133,6 +135,13 @@ COMMANDS
                   the protocol probe. Run by build and preflight over IAP.
                   Candidate commands exit 6 when they refuse and 7 only
                   when a forge read failed transiently.
+  instance deploy Deploy the selected, preflighted candidate of one app.
+                  For a running app, archive a backup before activation,
+                  then apply the app root and read back the rolled workload.
+                  Exit 6 on a refusal, 7 for a retryable failure before the
+                  app changes, or 8 if recovery must roll forward from the
+                  migration fence. With --deadline, refuse to start a
+                  stopped-app phase that can outlast the job's time limit.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
