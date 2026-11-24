@@ -104,8 +104,12 @@ fn actual_submit_clock_guard_keeps_narrower_ceiling_and_refuses_retirement() {
 fn socket_resource_source(source: &str) -> String {
     let mut file = syn::parse_file(source).unwrap();
     let mut removed = 0;
+    let mut admission_removed = 0;
     file.items.retain_mut(|item| {
         let syn::Item::Impl(item) = item else { return true; };
+        if matches!(&*item.self_ty, syn::Type::Path(ty) if ty.path.is_ident("AdmittedScheduledBackupRequest")) {
+            admission_removed += 1; return false;
+        }
         if matches!(&*item.self_ty, syn::Type::Path(ty) if ty.path.is_ident("ObservedScheduledBackupSubmit")) {
             removed += 1; return false;
         }
@@ -118,6 +122,7 @@ fn socket_resource_source(source: &str) -> String {
         true
     });
     assert_eq!(removed, 3, "exact separately checked client/check/drop");
+    assert_eq!(admission_removed, 2, "exact independently checked request impl/drop");
     canonical(file.to_token_stream()).to_string()
 }
 
@@ -341,7 +346,8 @@ fn closed_admission_contract(source: &str) -> bool {
         && !factory.contains(&fragment("NativeAcquisition::begin"))
         && !factory.contains(&fragment("BackupSubmitOriginal::capture"))
         && !factory.contains(&fragment("identity_domain"))
-        && selected_method(source, "AdmittedScheduledBackupRequest", "drop").contains(&fragment("self.refuse();"))
+        && selected_method(source, "AdmittedScheduledBackupRequest", "refuse") == fragment("fn refuse(&mut self) { self.refused = true; self.observation.refuse(); }")
+        && selected_method(source, "AdmittedScheduledBackupRequest", "drop") == fragment("fn drop(&mut self) { self.refuse(); }")
 }
 
 #[test]
