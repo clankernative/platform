@@ -151,7 +151,7 @@
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
       "scope": "const",
-      "fingerprint": "sha256:c538a24541ba736d8caede4d5d765342a8220db2924ac073cfc1169883339a65",
+      "fingerprint": "sha256:ca18e16e00ac7d58cea1cf2f09565b9a73dd55d6e536140d81fb4fda4f9a98c8",
       "registration": null
     },
     {
@@ -8686,6 +8686,35 @@
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+      "type_name": "AdmittedScheduledBackupRequest",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < () >",
+        "fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "ObservedScheduledBackupSubmit",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn try_admit_request (mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < AdmittedScheduledBackupRequest >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "AdmittedScheduledBackupRequest",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "AdmittedScheduledBackupRequest",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:cdf1a62f5f8d550e4d8a7f6a536b6d9615b22e2a2e74ec8995d77a445b6319f7",
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
       "type_name": "CapturedScheduledBackupSubmit",
       "kind": "private_material",
       "consuming_methods": [],
@@ -8767,7 +8796,8 @@
       "consuming_methods": [],
       "methods": [
         "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < () >",
-        "fn refuse (& mut self)"
+        "fn refuse (& mut self)",
+        "pub (in crate :: security_epoch :: native_enrollment) fn try_admit_request (mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < AdmittedScheduledBackupRequest >"
       ],
       "factories": [
         {
@@ -8783,10 +8813,38 @@
         {
           "owner": "ObservedScheduledBackupSubmit",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ObservedScheduledBackupSubmit",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn try_admit_request (mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < AdmittedScheduledBackupRequest >"
         }
       ],
       "proof_uses": [],
       "destructor": "sha256:891cb8734b44eca64a6ef426d5c57683168de3c61e66ebf9d564bb62353b215b",
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+      "type_name": "ProtectedScheduledCreate",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "fn acquire () -> Result < Self >",
+        "fn check (& self) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "ProtectedScheduledCreate",
+          "signature": "fn acquire () -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ProtectedScheduledCreate",
+          "signature": "fn check (& self) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
       "owning_children": []
     },
     {
