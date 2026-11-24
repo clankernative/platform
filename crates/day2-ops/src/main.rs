@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use day2_ops::{
-    backup, chrome_extension, infra, instance_candidate, instance_release, instance_roots,
-    instance_source, local_dev, maintenance, process, projection,
+    backup, chrome_extension, infra, instance_candidate, instance_deploy, instance_release,
+    instance_roots, instance_source, local_dev, maintenance, process, projection,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -31,7 +31,7 @@ fn platform() -> Result<PathBuf> {
 struct Operations {
     development: Option<day2::development::Campaign>,
     infrastructure: Option<infra::Session>,
-    /// The mode the host action fixed for `day2 instance plan|apply`, and its session.
+    /// The mode the host action fixed for `day2 instance plan|apply|deploy`, and its session.
     instance_mode: Option<instance_roots::Mode>,
     instance_session: Option<instance_roots::Session>,
     /// The mode the host action fixed for `day2 instance release publish|fetch`, and its session.
@@ -43,6 +43,7 @@ struct Operations {
     /// The mode the host action fixed for `day2 instance candidate`, and its session.
     candidate_mode: Option<instance_candidate::Mode>,
     candidate_session: Option<instance_candidate::Session>,
+    deploy_session: Option<instance_deploy::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
     maintenance_recovery: Option<maintenance::Recovery>,
@@ -684,16 +685,23 @@ impl Operations {
                     self.instance_session.is_none(),
                     "one instance session per workflow"
                 );
-                let mode = self
-                    .instance_mode
-                    .context("only day2 instance plan or apply starts an instance session")?;
+                let mode = self.instance_mode.context(
+                    "only day2 instance plan, apply or deploy starts an instance session",
+                )?;
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Input {
                     request: PathBuf,
                 }
+                let raw = input::<Input>(&request)?.request;
+                if mode == instance_roots::Mode::Deploy {
+                    self.deploy_session
+                        .as_ref()
+                        .context("deploy session required")?
+                        .check_roots_request(&raw)?;
+                }
                 let session = instance_roots::Session::prepare(
-                    &input::<Input>(&request)?.request,
+                    &raw,
                     mode,
                     instance_roots::Effects::native(),
                 )?;
@@ -720,6 +728,9 @@ impl Operations {
                     operation: String,
                 }
                 let parameters: Input = input(&request)?;
+                if let Some(deploy) = self.deploy_session.as_ref() {
+                    deploy.check_roots_operation(&parameters.operation)?;
+                }
                 self.instance_session
                     .as_mut()
                     .context("instance session required")?
@@ -845,6 +856,39 @@ impl Operations {
                     .context("candidate session required")?
                     .step(&name)
                     .map_err(instance_source::reported)
+            }
+            "instance-deploy-prepare" => {
+                ensure!(
+                    self.instance_mode == Some(instance_roots::Mode::Deploy)
+                        && self.deploy_session.is_none(),
+                    "only day2 instance deploy starts one deploy session"
+                );
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                self.deploy_session = Some(instance_deploy::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    instance_deploy::Effects::native()?,
+                )?);
+                Ok(json!({}))
+            }
+            "instance-deploy-step" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    name: String,
+                    detail: String,
+                }
+                let parameters: Input = input(&request)?;
+                self.deploy_session
+                    .as_mut()
+                    .context("deploy session required")?
+                    .step(
+                        &parameters.name,
+                        &day2::json::decode(parameters.detail.as_bytes())?,
+                    )
             }
             "infra-receipt" => self
                 .infrastructure
@@ -1002,6 +1046,7 @@ fn run(request: Request) -> Result<Value> {
         source_session: None,
         candidate_mode: None,
         candidate_session: None,
+        deploy_session: None,
         local: None,
         maintenance: None,
         maintenance_recovery: None,
@@ -1011,6 +1056,7 @@ fn run(request: Request) -> Result<Value> {
         "local-session",
         "instance-plan",
         "instance-apply",
+        "instance-deploy",
         "instance-release-publish",
         "instance-release-fetch",
     ]
@@ -1107,6 +1153,16 @@ fn run(request: Request) -> Result<Value> {
                 .context("candidate request path must be UTF-8")?
                 .to_owned(),
         ]
+    } else if request.action == "instance-deploy" {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: String,
+            roots: String,
+        }
+        let input: Input = input(&request)?;
+        operations.instance_mode = Some(instance_roots::Mode::Deploy);
+        vec!["instance-deploy-session".into(), input.request, input.roots]
     } else if request.action == "local-session" {
         let mut local = local_dev::Session::resolve(&platform()?, input(&request)?)?;
         local.detach_output();

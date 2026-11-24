@@ -1,0 +1,44 @@
+{
+  "format": 1,
+  "mode": "deploy",
+  "app_id": "links",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "image": "us-central1-docker.pkg.dev/exampleco-tools/links/links@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "artifact_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "tooling_image": "us-central1-docker.pkg.dev/exampleco-tools/links/day2-tooling@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "request_id": "deploy-0123456789abcdef0123456789abcdef01234567-eeeeeeeeeeeeeeee",
+  "path": "fresh",
+  "operator": {
+    "release": "sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848",
+    "cli": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "activation": {
+    "request_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "target_instance_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "record": null
+  },
+  "archive": {
+    "uri": "gs://exampleco-tools-links-backups/deployments/0123456789abcdef0123456789abcdef01234567/0f1e2d3c4b5a49788796a5b4c3d2e1f0/",
+    "before": {
+      "objects": 4,
+      "bytes": 62
+    },
+    "after": {
+      "objects": 8,
+      "bytes": 151
+    }
+  },
+  "apply": {
+    "roots": {
+      "path": "/work/deploy/roots/receipt.json",
+      "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "bytes": 2048
+    }
+  },
+  "readback": {
+    "generation": 2,
+    "revision": "day2-links-2",
+    "image_id": "docker-pullable://us-central1-docker.pkg.dev/exampleco-tools/links/links@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "instance_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  }
+}

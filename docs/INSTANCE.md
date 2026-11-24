@@ -23,6 +23,7 @@ day2 instance candidate preflight DIRECTORY CANDIDATE [--agent]
 day2 instance candidate check DIRECTORY APP CANDIDATE [--agent]
 day2 instance candidate native-build JOB [--agent]
 day2 instance candidate native-probe JOB [--agent]
+day2 instance deploy DIRECTORY PLATFORM APP CANDIDATE NEW_DIRECTORY [--deadline UNIX_SECONDS] [--agent]
 ```
 
 `instance check` reads exactly `DIRECTORY/day2.json` and prints every derived
@@ -777,6 +778,64 @@ identity's credentials and the forge token of [`instance source`](#source).
     its slot reaps the container.
   - Build logs have no size bound, as before.
 
+## Deploy
+
+`day2 instance deploy DIRECTORY PLATFORM APP CANDIDATE NEW_DIRECTORY` deploys a
+selected, preflighted candidate to a single-replica app. Run it with the
+instance's apply identity, tools, and a clean checkout, using the CLI built
+from `day2.json`'s `platform` commit. The instance controller owns selection
+writes, event delivery, promotion policy and the rolling deploy path.
+
+The deploy checks the record against the instance forge, the app, the registry
+and the candidate's qualified SDK release. The candidate's verified SDK CLI
+runs maintenance using its matching tooling image. A `ready` or `activating`
+selection in the instance state bucket must name the exact candidate before
+backup, before activation and before the locked apply.
+
+- **Fresh deploy.** Render the target `instance.json` from the `day2-app` root
+  before the first stop. Back up and restore the current app, archive the
+  backup, then activate the candidate with the rendered target. Apply the
+  saved plan for `day2-app/<app>`, wait for rollout and verify the running
+  workload, pod, bound artifact and scheduled backup job. Readback also
+  compares `instance.json` with the target used for activation.
+- **Previously activated or already serving the target.** Apply or confirm the
+  same selected candidate, wait for rollout, then verify readback. The
+  maintenance backup and activation steps are skipped on these paths.
+- **First install.** When the StatefulSet is absent, apply only if app-edge
+  has created the app's `data` claim and it is still unbound. A claim with a
+  bound volume requires an operator to restore the existing workload and run
+  activation against it.
+
+Archives use create-only objects in the app backup bucket under
+`deployments/<commit>/<attempt>/{before,after}-activation/`. The deploy checks
+each uploaded object's name, size and CRC32C against its local manifest.
+`NEW_DIRECTORY` must be new, private and outside the instance and platform
+checkouts. It contains the deploy receipt, the app root's receipt and logs,
+the operator's output and a private kubeconfig. A successful receipt also
+appears as `result.receipt` with `--agent`.
+
+With `--deadline UNIX_SECONDS`, the deploy checks the upper bound on the
+remaining steps just before the first stop or roll. If the job cannot fit the
+remaining steps, the command exits 7 before it makes a change. The fresh path
+reserves up to 9,420 seconds after this check. Account for build, preflight,
+and target rendering separately when allocating CI job time.
+
+| Exit | Agent code | Meaning |
+| --- | --- | --- |
+| 0 | | The selected release passed rollout and readback. |
+| 6 | `deploy_failed` | A permanent refusal, a pre-fence failure, or a verified deploy whose final archive failed. Follow the archived maintenance journal if the workload was not restored. |
+| 7 | `deploy_unavailable` | A retryable read or insufficient time before the first change. |
+| 8 | `deploy_fenced` | The migration fence was crossed, or the resulting workload state is uncertain. Keep the same candidate and recover or roll forward. |
+
+An active checkpoint with a migration fence needs the operator's recovery
+journal. This command can resume a rollout for a candidate that the operator
+already stamped as activated, but it does not persist the exact request bytes
+needed to resume an interrupted migration. Use `day2 platform maintain
+recover` with the archived journal when the error requests recovery. The
+failure-injection and first-install checks use local substitutes for the
+operator, kubectl, gcloud, and the app-root runner. Production rollout and
+recovery behavior still needs live qualification.
+
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
@@ -793,7 +852,8 @@ identity's credentials and the forge token of [`instance source`](#source).
    checked artifacts with `day2 instance source`; slice 3, building, probing and
    checking deployment candidates with `day2 instance candidate`; slice 4a,
    planning and applying each app's day2-app root with its release inputs, and
-   the deploy mode a deploy runs it in).** Deployment, promotion, webhook and
+   the deploy mode a deploy runs it in; slice 4b, deploying one selected
+   non-rolling candidate with `day2 instance deploy`).** Deployment, promotion, webhook and
    artifact provenance logic moves from instance repositories into `ops/*.roc` recipes
    with narrow Rust capabilities. Instance workflows become rendered shims that
    call `day2 instance plan` and `day2 instance apply`; any edit to a shim fails

@@ -1178,6 +1178,156 @@ fn candidate_session(
     Ok((result, effects))
 }
 
+fn deploy_session(path: &str, failing: &str) -> Result<(Result<Value>, Vec<String>)> {
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &[
+            "instance-deploy-session",
+            "/private/deploy.json",
+            "/private/roots.json",
+        ],
+        |request| {
+            let input: Value = request.decode()?;
+            let step = match request.action.as_str() {
+                "instance-deploy-prepare" => {
+                    assert_eq!(input["request"], "/private/deploy.json");
+                    "prepare".to_owned()
+                }
+                "instance-deploy-step" => input["name"].as_str().unwrap().to_owned(),
+                "instance-roots-prepare" => {
+                    assert_eq!(input["request"], "/private/roots.json");
+                    "roots-prepare".to_owned()
+                }
+                "instance-roots-operation" => {
+                    assert_eq!(input["label"], "day2-app/links");
+                    format!("roots-{}", input["operation"].as_str().unwrap())
+                }
+                "instance-roots-credentials" => "roots-credentials".to_owned(),
+                "instance-roots-summary" => "roots-summary".to_owned(),
+                "instance-roots-receipt" => "roots-receipt".to_owned(),
+                action => panic!("unexpected deploy effect {action}"),
+            };
+            effects.push(step.clone());
+            if step == failing {
+                bail!("cannot {step}");
+            }
+            Ok(match step.as_str() {
+                "roots-prepare" | "roots-summary" => {
+                    json!({"roots": [{"label": "day2-app/links", "shared": false, "needs": [], "release": true}]})
+                }
+                "roots-release" => json!({
+                    "ok": true, "released": true, "release": {"candidate": "candidate", "commit": "commit",
+                    "image": "image", "artifact_id": "artifact", "tooling_image": "tooling"},
+                }),
+                "roots-target" => {
+                    json!({"ok": true, "instance": {"path": "instance.json", "digest": "target", "bytes": 42}})
+                }
+                "observe" => {
+                    let release: Value = serde_json::from_str(input["detail"].as_str().unwrap())?;
+                    assert_eq!(release["candidate"], "candidate");
+                    json!({"path": path})
+                }
+                "target" => {
+                    let target: Value = serde_json::from_str(input["detail"].as_str().unwrap())?;
+                    assert_eq!(target["digest"], "target");
+                    json!({})
+                }
+                "finish" => {
+                    let outcome: Value = serde_json::from_str(input["detail"].as_str().unwrap())?;
+                    if let Some(error) = outcome["error"].as_str() {
+                        bail!("classified: {error}");
+                    }
+                    json!({"finished": true})
+                }
+                _ => json!({"ok": true}),
+            })
+        },
+    );
+    Ok((result, effects))
+}
+
+#[test]
+fn deploy_recipe_orders_the_root_apply_after_backup_and_activation() -> Result<()> {
+    let prefix = [
+        "prepare",
+        "operator",
+        "credentials",
+        "roots-prepare",
+        "roots-credentials",
+        "roots-release",
+        "roots-init",
+        "observe",
+    ];
+    let fresh = [
+        "roots-summary",
+        "roots-target",
+        "target",
+        "deadline",
+        "backup",
+        "archive-before",
+        "activate",
+    ];
+    let roll = [
+        "apply",
+        "roots-summary",
+        "roots-selected",
+        "roots-plan",
+        "roots-show",
+        "roots-apply",
+        "applied",
+        "rollout",
+        "readback",
+        "archive-after",
+        "roots-receipt",
+        "finish",
+    ];
+    let (result, observed) = deploy_session("fresh", "")?;
+    assert_eq!(result?, json!({"finished": true}));
+    assert_eq!(observed, [prefix.as_slice(), &fresh, &roll].concat());
+    for path in ["install", "serving", "activated"] {
+        let (result, observed) = deploy_session(path, "")?;
+        assert_eq!(result?, json!({"finished": true}));
+        assert_eq!(observed, [prefix.as_slice(), &["deadline"], &roll].concat());
+    }
+    Ok(())
+}
+
+#[test]
+fn deploy_recipe_archives_and_classifies_failure_without_advancing_the_workload() -> Result<()> {
+    for failure in [
+        "observe",
+        "roots-target",
+        "backup",
+        "archive-before",
+        "activate",
+        "roots-apply",
+        "rollout",
+    ] {
+        let (result, steps) = deploy_session("fresh", failure)?;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            format!("classified: cannot {failure}")
+        );
+        assert_eq!(
+            &steps[steps.len() - 4..],
+            &[failure, "archive-after", "roots-receipt", "finish"]
+        );
+    }
+    let result = automation::run(
+        &automation::runner()?,
+        &[
+            "platform",
+            "instance-deploy-session",
+            "/private/deploy.json",
+            "/private/roots.json",
+        ],
+        |_| panic!("deploy session is not a platform operation"),
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
 #[test]
 fn candidate_sessions_prepare_then_run_each_step_in_order() -> Result<()> {
     let built = [
