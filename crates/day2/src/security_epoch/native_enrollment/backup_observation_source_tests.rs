@@ -303,7 +303,8 @@ fn closed_admission_contract(source: &str) -> bool {
         let structs = file.items.iter().filter_map(|item| match item {
             syn::Item::Struct(item) if item.ident == name => Some(item), _ => None,
         }).collect::<Vec<_>>();
-        if structs.len() != 1 || structs[0].fields.len() != fields.len() { return false; }
+        if structs.len() != 1 || structs[0].fields.len() != fields.len()
+            || structs[0].attrs.iter().any(|attribute| !attribute.path().is_ident("doc")) { return false; }
         if structs[0].fields.iter().zip(fields).any(|(actual, (name, ty))|
             !matches!(actual.vis, syn::Visibility::Inherited) || !actual.attrs.is_empty()
             || actual.ident.as_ref().is_none_or(|id| id != name)
