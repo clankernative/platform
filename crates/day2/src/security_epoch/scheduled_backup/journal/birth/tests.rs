@@ -264,15 +264,21 @@ fn root_confirmation_binds_the_original_known_ack_and_never_adopts_a_recreated_r
     assert!(turn.submit_data().is_err());
 
     for cut in 0..3 {
-        let root = binding(0, 1, 0); let selected = selection(&root);
-        let mut turn = BirthTurn::new_data(&selected, root)?;
-        if cut != 0 { turn.submit_data()?; }
-        if cut == 2 { turn.lose_data(); }
-        assert!(turn.begin_confirmation_data(&selected).is_err());
-        assert!(turn.require_confirmed_data().is_err());
-        // A matching row cannot supply the absent ACK or resume lost state.
-        assert!(turn.observe_confirmation_data(&selected, 200, b"[]").is_err());
-        assert!(turn.observe_data(200, &ack()).is_err());
+        for direct_observation in [false, true] {
+            let root = binding(0, 1, 0); let selected = selection(&root);
+            let mut turn = BirthTurn::new_data(&selected, root)?;
+            if cut != 0 { turn.submit_data()?; }
+            if cut == 2 { turn.lose_data(); }
+            // The same fully valid response succeeded above. Direct observation
+            // is tested BEFORE a failed begin call can poison these states.
+            if !direct_observation {
+                assert!(turn.begin_confirmation_data(&selected).is_err());
+            }
+            assert!(turn.observe_confirmation_data(&selected, 200,
+                &serde_json::to_vec(&response)?).is_err());
+            assert!(turn.require_confirmed_data().is_err());
+            assert!(turn.observe_data(200, &ack()).is_err());
+        }
     }
     Ok(())
 }
@@ -320,6 +326,151 @@ fn confirmation_stream_is_exact_bounded_and_provider_time_does_not_renew_native_
         let (selected, mut turn, _) = acknowledged_turn()?; turn.begin_confirmation_data(&selected)?;
         assert!(turn.observe_confirmation_data(&selected, status, &body).is_err());
         assert!(turn.require_confirmed_data().is_err());
+    }
+    Ok(())
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfirmationEventData { Submit, Ack, BeginRead, Found, Recreated, Missing, Lose, CrashReopen }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmationProgramData {
+    format: u8,
+    seed: u64,
+    sources: std::collections::BTreeMap<String, Digest>,
+    events: Vec<ConfirmationEventData>,
+}
+
+fn confirmation_sources() -> std::collections::BTreeMap<String, Digest> {
+    [
+        ("codec", include_bytes!("../birth.rs").as_slice()),
+        ("journal", include_bytes!("../../journal.rs").as_slice()),
+        ("reservation_ack", include_bytes!("../../reservation.rs").as_slice()),
+        ("intent", include_bytes!("../../../scheduled_backup.rs").as_slice()),
+        ("provider_versions", include_bytes!("../../../kernel.rs").as_slice()),
+        ("strict_json", include_bytes!("../../../../json.rs").as_slice()),
+        ("campaign", include_bytes!("tests.rs").as_slice()),
+        ("parent", include_bytes!("../../../bootstrap/scheduled_backup.rs").as_slice()),
+        ("counter", include_bytes!("../../../authenticated_reads/connection.rs").as_slice()),
+        ("volume", include_bytes!("../../../storage_authority/native_volume/scheduled_backup.rs").as_slice()),
+        ("http", include_bytes!("../../../transport.rs").as_slice()),
+    ].into_iter().map(|(name, bytes)| (name.to_owned(), Digest::new(bytes))).collect()
+}
+
+fn confirmation_reference(events: &[ConfirmationEventData]) -> Vec<(bool,bool)> {
+    // Independent expected facts: there is no reference to the production
+    // enum, turn, parser, request builder or returned provider DATA.
+    let (mut sent,mut acknowledged,mut started,mut done,mut refused,mut retained) =
+        (false,false,false,false,false,true);
+    events.iter().map(|event| {
+        let accepted = match event {
+            ConfirmationEventData::Submit => retained && !refused && !sent,
+            ConfirmationEventData::Ack => retained && !refused && sent && !acknowledged,
+            ConfirmationEventData::BeginRead => retained && !refused && acknowledged && !started,
+            ConfirmationEventData::Found => retained && !refused && started && !done,
+            ConfirmationEventData::Recreated | ConfirmationEventData::Missing => false,
+            ConfirmationEventData::Lose | ConfirmationEventData::CrashReopen => true,
+        };
+        if matches!(event, ConfirmationEventData::Lose | ConfirmationEventData::CrashReopen) {
+            refused = true; done = false;
+            if *event == ConfirmationEventData::CrashReopen { retained = false; }
+        } else if !accepted { refused = true; done = false; }
+        else {
+            match event {
+                ConfirmationEventData::Submit => sent = true,
+                ConfirmationEventData::Ack => acknowledged = true,
+                ConfirmationEventData::BeginRead => started = true,
+                ConfirmationEventData::Found => done = true,
+                _ => (),
+            }
+        }
+        (accepted, retained && !refused && done)
+    }).collect()
+}
+
+fn replay_confirmation(program: &ConfirmationProgramData) -> Result<Vec<(bool,bool)>> {
+    ensure!(program.format == 1 && program.sources == confirmation_sources()
+        && !program.events.is_empty() && program.events.len() <= 64, "backup_root_replay_binding");
+    let root = binding(0,1,0); let selected = selection(&root);
+    let (_,_,write) = acknowledged_turn()?;
+    let found = serde_json::to_vec(&confirmation_response(&write))?;
+    let mut recreated = confirmation_response(&write);
+    recreated[0]["found"]["createTime"] = json!("2026-11-23T17:00:00.000002Z");
+    recreated[0]["found"]["updateTime"] = recreated[0]["found"]["createTime"].clone();
+    let recreated = serde_json::to_vec(&recreated)?;
+    let mut actual = Some(BirthTurn::new_data(&selected, root)?);
+    let mut trace = Vec::new();
+    for event in &program.events {
+        let accepted = match event {
+            ConfirmationEventData::Submit => actual.as_mut().is_some_and(|t| t.submit_data().is_ok()),
+            ConfirmationEventData::Ack => actual.as_mut().is_some_and(|t| t.observe_data(200,&ack()).is_ok()),
+            ConfirmationEventData::BeginRead => actual.as_mut().is_some_and(|t| t.begin_confirmation_data(&selected).is_ok()),
+            ConfirmationEventData::Found | ConfirmationEventData::Recreated | ConfirmationEventData::Missing => {
+                let body = match event { ConfirmationEventData::Found => found.as_slice(),
+                    ConfirmationEventData::Recreated => recreated.as_slice(), _ => b"[]" };
+                actual.as_mut().is_some_and(|t| t.observe_confirmation_data(&selected,200,body).is_ok())
+            }
+            ConfirmationEventData::Lose => { if let Some(t) = &mut actual { t.lose_data(); } true }
+            ConfirmationEventData::CrashReopen => {
+                actual.take();
+                // A still-matching historical row can compare as DATA. It
+                // supplies neither the lost turn nor an actual native owner.
+                compare_existing_data(&selected,&binding(0,1,0),&known_version(),
+                    &serde_json::to_vec(&stored(&write))?)?;
+                true
+            }
+        };
+        trace.push((accepted,actual.as_ref().is_some_and(|t| t.require_confirmed_data().is_ok())));
+    }
+    Ok(trace)
+}
+
+fn retain_confirmation_failure(program: &ConfirmationProgramData, expected: &[(bool,bool)],
+    actual: &[(bool,bool)]) -> Result<std::path::PathBuf> {
+    use std::{io::Write,os::unix::fs::OpenOptionsExt};
+    let failed = expected.iter().zip(actual).position(|(a,b)| a!=b).unwrap_or(expected.len().min(actual.len()));
+    let bytes = serde_json::to_vec(&json!({"program":program,"failed_at":failed,
+        "expected_prefix":&expected[..expected.len().min(failed+1)],
+        "actual_prefix":&actual[..actual.len().min(failed+1)]}))?;
+    ensure!(bytes.len() <= 65_536,"backup_root_replay_bound");
+    let base=std::path::Path::new("artifacts/simulations/backup-root-confirmation");
+    std::fs::create_dir_all(base)?;
+    let dir=tempfile::Builder::new().prefix("failed-").tempdir_in(base)?.keep();
+    let path=dir.join("replay.json");
+    let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+    file.write_all(&bytes)?;file.sync_all()?;
+    Ok(path)
+}
+
+#[test]
+fn independent_confirmation_histories_replay_twice_through_uncertainty_and_lost_creator() -> Result<()> {
+    use ConfirmationEventData::*;
+    let kinds=[Submit,Ack,BeginRead,Found,Recreated,Missing,Lose,CrashReopen];
+    for seed in 0..32u64 {
+        let mut events=match seed%4 {
+            0=>vec![Submit,Ack,BeginRead,Found],
+            1=>vec![Submit,Lose,BeginRead,Found],
+            2=>vec![Submit,Ack,BeginRead,Recreated],
+            _=>vec![Submit,Ack,BeginRead,CrashReopen,Found],
+        };
+        let mut random=seed+1;
+        for _ in 0..24 { random=random.wrapping_mul(6364136223846793005).wrapping_add(1);events.push(kinds[((random>>32)%8)as usize]); }
+        let program=ConfirmationProgramData { format:1,seed,sources:confirmation_sources(),events };
+        let encoded=serde_json::to_vec(&program)?;
+        let decoded:ConfirmationProgramData=crate::json::decode_evidence(&encoded)?;
+        let expected=confirmation_reference(&decoded.events);
+        let first=replay_confirmation(&decoded)?;let second=replay_confirmation(&decoded)?;
+        if first!=expected || second!=expected {
+            let path=retain_confirmation_failure(&decoded,&expected,if first!=expected {&first}else{&second})?;
+            anyhow::bail!("backup_root_confirmation_replay_failed: {}",path.display());
+        }
+        let mut wrong=decoded.clone();wrong.sources.insert("codec".into(),digest("wrong-source"));
+        assert!(replay_confirmation(&wrong).is_err());
+        let mut wrong=decoded.clone();wrong.events.resize(65,Found);
+        assert!(replay_confirmation(&wrong).is_err());
     }
     Ok(())
 }

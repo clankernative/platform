@@ -511,6 +511,92 @@ mod tests {
             ]
         ));
     }
+
+    fn caught_post(body: &str, name: &str, expected: &syn::Expr) -> bool {
+        let body: syn::Block = syn::parse_str(body).unwrap();
+        let Some(init) = body.stmts.iter().find_map(|stmt| match stmt {
+            syn::Stmt::Local(local) if matches!(&local.pat, syn::Pat::Ident(p) if p.ident == name) => local.init.as_ref(),
+            _ => None,
+        }) else { return false; };
+        let syn::Expr::Call(catch) = init.expr.as_ref() else { return false; };
+        if catch.func.to_token_stream().to_string() != "std :: panic :: catch_unwind" || catch.args.len() != 1 { return false; }
+        let Some(syn::Expr::Call(safe)) = catch.args.first() else { return false; };
+        if safe.func.to_token_stream().to_string() != "std :: panic :: AssertUnwindSafe" || safe.args.len() != 1 { return false; }
+        let Some(syn::Expr::Closure(closure)) = safe.args.first() else { return false; };
+        if !closure.inputs.is_empty() { return false; }
+        let mut actual = closure.body.as_ref();
+        while let syn::Expr::Block(block) = actual {
+            if !block.attrs.is_empty() || block.label.is_some() { return false; }
+            let [syn::Stmt::Expr(inner, None)] = block.block.stmts.as_slice() else { return false; };
+            actual = inner;
+        }
+        actual.to_token_stream().to_string() == expected.to_token_stream().to_string()
+    }
+
+    fn confirmation_guard(creator: &str, counter: &str) -> bool {
+        let confirm = method(creator, "confirm_birth");
+        let read = method(counter, "confirm_scheduled_backup_root_creation");
+        ordered(&confirm, &[
+            "self . check", "physical . controller_stage", "RootBirthWritePermit",
+            "self . reads . confirm_scheduled_backup_root_creation",
+            "let confirmation_post", "self . refuse", "match confirmation", "match confirmation_post",
+        ]) && caught_post(&confirm, "confirmation_post", &syn::parse_quote!(self.check()))
+            && ordered(&read, &[
+                "permit . require_actual (self , stage , pending)",
+                "self . connection . purpose == NativeRole :: EpochController",
+                "self . check", "scheduled_backup_root_selection",
+                "pending . begin_confirmation_data (& self . connection . store)",
+                "self . check", "self . connection . credential . authorization",
+                "acquisition . remaining", "http . request_with_ceiling",
+                "Route :: ScheduledBackupRootRead", "pending . observe_confirmation_data",
+                "let checked", "pending . refuse", "self . refuse", "stage . refuse_serving",
+                "match requested", "match checked",
+            ]) && caught_post(&read, "checked", &syn::parse_quote!(self.check(stage)))
+            && !confirm.contains("finish_controller_known") && !confirm.contains("NativeAcquisition :: begin")
+            && !read.contains("finish_controller_known") && !read.contains("NativeAcquisition :: begin")
+    }
+
+    #[test]
+    fn actual_confirmation_keeps_creator_inputs_and_real_counter_and_parent_posts_on_error_and_panic() {
+        let creator = include_str!("scheduled_backup.rs").split("#[cfg(test)]").next().unwrap();
+        let counter = include_str!("../authenticated_reads/connection.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(creator_guard(creator));
+        assert!(confirmation_guard(creator, counter));
+        // Replace the ACTUAL named local initializer through the AST. Native
+        // formatting may use a transparent closure block, not a second call.
+        for (source, name, post, is_creator) in [
+            (creator, "confirm_birth", "confirmation_post", true),
+            (counter, "confirm_scheduled_backup_root_creation", "checked", false),
+        ] {
+            let mut parsed = syn::parse_file(source).unwrap(); let mut changed = 0;
+            for item in &mut parsed.items {
+                if let syn::Item::Impl(item) = item {
+                    for member in &mut item.items {
+                        if let syn::ImplItem::Fn(f) = member && f.sig.ident == name {
+                            for stmt in &mut f.block.stmts {
+                                if let syn::Stmt::Local(local) = stmt
+                                    && matches!(&local.pat, syn::Pat::Ident(p) if p.ident == post) {
+                                    local.init.as_mut().unwrap().expr = Box::new(syn::parse_quote!(Ok(Ok(()))));
+                                    changed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(changed, 1);
+            let mutated = parsed.to_token_stream().to_string();
+            assert!(!if is_creator { confirmation_guard(&mutated, counter) }
+                else { confirmation_guard(creator, &mutated) });
+        }
+        for (old, replacement) in [
+            ("self.confirm_birth()?;", "Ok::<(), anyhow::Error>(())?;"),
+            (".require_confirmed_data()?;", ";"),
+        ] {
+            assert_eq!(creator.matches(old).count(), 1);
+            assert!(!creator_guard(&creator.replacen(old, replacement, 1)));
+        }
+    }
 }
 
 #[cfg(test)]
