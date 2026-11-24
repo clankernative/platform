@@ -67,6 +67,8 @@ fn normal_fixture_image_matches_canonical_verifier_and_refuses_substitutions() -
         instance,
     };
     image.verify(&manifest, &artifact)?;
+    #[cfg(target_os = "linux")]
+    super::archive::immutable_fixture_cuts(&image, &manifest, &artifact)?;
     assert!(image.verify(&manifest, &foreign).is_err());
     let clone_manifest = || -> Result<crate::backup_archive::Manifest> {
         Ok(serde_json::from_slice(&serde_json::to_vec(&manifest)?)?)

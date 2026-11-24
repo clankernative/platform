@@ -24,6 +24,16 @@ const MANIFEST_LIMIT: u64 = 1024 * 1024;
 const FILE_LIMIT: u64 = 64 * 1024 * 1024;
 const ARTIFACT_LIMIT: u64 = 256 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 4096;
+mod immutable;
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn immutable_fixture_cuts(
+    image: &SnapshotImage,
+    manifest: &Manifest,
+    artifact: &LoadedArtifact,
+) -> Result<()> {
+    immutable::fixture_cuts(image, manifest, artifact)
+}
 // Two bounded byte passes plus per-member open/finish/check transitions.
 const STEP_LIMIT: usize = 2
     * ((ARTIFACT_LIMIT as usize + 16 * 1024 * 1024 + MANIFEST_LIMIT as usize).div_ceil(CHUNK))
