@@ -911,6 +911,7 @@ pub(super) fn policy(root: &KeyOwner) -> EnrollmentPolicy {
     let store = crate::security_epoch::tests::selection();
     let bootstrap = crate::security_epoch::control_slot_tests::policy(&store);
     EnrollmentPolicy {
+        scheduled_backup: None,
         bootstrap,
         store,
         root: super::root_kms::KmsRootSelection {

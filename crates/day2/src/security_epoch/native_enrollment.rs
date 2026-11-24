@@ -52,6 +52,8 @@ pub(in crate::security_epoch) use restore_writer::{ReceiverAction, ReceiverProgr
 mod restored;
 pub(crate) use restored::install_restored_app_host;
 pub(crate) use restored::{RestoredArtifactAdmission, RestoredKeeperBirth, RestoredRuntimeBirth};
+#[cfg(test)]
+mod backup_observation_source_tests;
 mod root_kms;
 #[cfg(target_os = "linux")]
 mod runtime;
@@ -59,6 +61,8 @@ mod runtime;
 mod runtime_reads;
 #[cfg(target_os = "linux")]
 mod runtime_wire;
+#[cfg(target_os = "linux")]
+mod scheduled_runtime;
 #[cfg(target_os = "linux")]
 mod service;
 #[cfg(test)]

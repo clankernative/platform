@@ -529,12 +529,37 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
     command.arg("--@rules_rust//rust/settings:clippy_flag=-Dwarnings");
     // Filegroup roots do not traverse srcs in the Clippy aspect.
     command.args(&labels);
-    crate::build_capture::run(
+    let built = crate::build_capture::run(
         root,
         &mut command,
         budget,
         crate::build_capture::DiagnosticFormat::Configured,
-    )?;
+    );
+    if let Err(primary) = built {
+        // The check action can fail while its declared diagnostic producer
+        // succeeded. The metadata query uses the original remaining budget;
+        // subsequent file observation has an aggregate byte bound, not a hard
+        // OS deadline. Read only declared confined producers, never raw text.
+        let bytes = budget.checked_sub(started.elapsed()).and_then(|remaining| {
+            clippy_declared_outputs(
+                root,
+                &root.join(".cache/bazel-executor"),
+                &labels,
+                false,
+                remaining,
+                self::command(root),
+            )
+            .ok()
+            .map(|paths| clippy_failure_readback(root, &root.join(".cache/bazel-executor"), &paths))
+        });
+        return Err(crate::build_capture::clippy_failure_context(
+            root,
+            primary,
+            bytes
+                .as_ref()
+                .map(|readback| (readback.bytes.as_slice(), readback.coverage)),
+        ));
+    }
     admit_clippy_outputs(
         root,
         &root.join(".cache/bazel-executor"),
@@ -562,9 +587,28 @@ pub(crate) fn admit_clippy_outputs(
     labels: &[String],
     strict: bool,
     budget: Duration,
-    mut query: Command,
+    query: Command,
 ) -> Result<()> {
     use std::io::Read;
+    for declared in clippy_declared_outputs(root, output_base, labels, strict, budget, query)? {
+        let path = confined_output(root, &declared, output_base)?;
+        let mut bytes = Vec::new();
+        fs::File::open(path)?
+            .take(MAX_CATALOG_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        admit_clippy_json(&bytes)?;
+    }
+    Ok(())
+}
+
+fn clippy_declared_outputs(
+    root: &Path,
+    output_base: &Path,
+    labels: &[String],
+    strict: bool,
+    budget: Duration,
+    mut query: Command,
+) -> Result<Vec<PathBuf>> {
     ensure!(
         !labels.is_empty(),
         "nonempty Clippy producer inventory required"
@@ -594,19 +638,76 @@ pub(crate) fn admit_clippy_outputs(
         paths.len(),
         labels.len()
     );
-    for name in paths {
-        ensure!(
-            name.ends_with(".clippy.diagnostics"),
-            "declared Clippy diagnostic output required"
-        );
-        let path = confined_output(root, Path::new(name), output_base)?;
+    paths
+        .into_iter()
+        .map(|name| {
+            let path = Path::new(name);
+            ensure!(
+                name.ends_with(".clippy.diagnostics")
+                    && relative(path)
+                    && path.starts_with("bazel-out"),
+                "declared Clippy diagnostic output required"
+            );
+            Ok(path.to_owned())
+        })
+        .collect()
+}
+
+struct ClippyReadback {
+    bytes: Vec<u8>,
+    // expected, available, missing, rejected, size-limited. Never an admission.
+    coverage: [usize; 5],
+}
+
+fn clippy_failure_readback(root: &Path, output_base: &Path, paths: &[PathBuf]) -> ClippyReadback {
+    use std::io::Read;
+    let mut value = ClippyReadback {
+        bytes: Vec::new(),
+        coverage: [paths.len(), 0, 0, 0, 0],
+    };
+    for declared in paths {
+        let path = match confined_output(root, declared, output_base) {
+            Ok(path) => path,
+            Err(error) => {
+                let missing = error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+                value.coverage[if missing { 2 } else { 3 }] += 1;
+                continue;
+            }
+        };
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) => {
+                value.coverage[if error.kind() == std::io::ErrorKind::NotFound {
+                    2
+                } else {
+                    3
+                }] += 1;
+                continue;
+            }
+        };
+        let remaining = MAX_CATALOG_BYTES.saturating_sub(value.bytes.len());
+        if remaining == 0 {
+            value.coverage[4] += 1;
+            continue;
+        }
         let mut bytes = Vec::new();
-        fs::File::open(path)?
-            .take(MAX_CATALOG_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        admit_clippy_json(&bytes)?;
+        if file.take(remaining as u64).read_to_end(&mut bytes).is_err() {
+            value.coverage[3] += 1;
+            continue;
+        }
+        // Reserve a delimiter; never expose a truncated record or exceed the
+        // aggregate byte bound. Missing/rejected outputs never imply no lint.
+        if bytes.len() >= remaining {
+            value.coverage[4] += 1;
+            continue;
+        }
+        value.bytes.extend_from_slice(&bytes);
+        value.bytes.push(b'\n');
+        value.coverage[1] += 1;
     }
-    Ok(())
+    value
 }
 
 fn admit_clippy_json(bytes: &[u8]) -> Result<()> {
@@ -636,12 +737,9 @@ fn admit_clippy_json(bytes: &[u8]) -> Result<()> {
         );
         match value["level"].as_str() {
             Some("note" | "help") => {}
-            Some("warning" | "error" | "failure-note") => anyhow::bail!(
-                "strict compiler diagnostic: {}",
-                value["message"]
-                    .as_str()
-                    .unwrap_or("diagnostic message unavailable")
-            ),
+            Some("warning" | "error" | "failure-note") => {
+                anyhow::bail!("strict compiler diagnostic")
+            }
             _ => anyhow::bail!("unknown Clippy diagnostic record"),
         }
     }
@@ -1488,6 +1586,153 @@ mod tests {
         fs::remove_file(root.path().join("MODULE.bazel.lock"))?;
         assert!(configuration(root.path()).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn failed_clippy_readback_is_confined_bounded_and_explicitly_incomplete() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let outputs = root.path().join("owned");
+        fs::create_dir(&outputs)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outputs, root.path().join("bazel-out"))?;
+        let one = PathBuf::from("bazel-out/one.clippy.diagnostics");
+        let two = PathBuf::from("bazel-out/two.clippy.diagnostics");
+        fs::write(outputs.join("one.clippy.diagnostics"), b"one")?;
+        fs::write(outputs.join("two.clippy.diagnostics"), b"two")?;
+        let got = clippy_failure_readback(root.path(), &outputs, &[one.clone(), two.clone()]);
+        assert_eq!(got.bytes, b"one\ntwo\n");
+        assert_eq!(got.coverage, [2, 2, 0, 0, 0]);
+        fs::remove_file(outputs.join("two.clippy.diagnostics"))?;
+        let got = clippy_failure_readback(root.path(), &outputs, &[one.clone(), two.clone()]);
+        assert_eq!(got.bytes, b"one\n");
+        assert_eq!(got.coverage, [2, 1, 1, 0, 0]);
+        let got = clippy_failure_readback(
+            root.path(),
+            &outputs,
+            &[PathBuf::from("../private.clippy.diagnostics"), one.clone()],
+        );
+        assert_eq!(got.bytes, b"one\n");
+        assert_eq!(got.coverage, [2, 1, 0, 1, 0]);
+        fs::write(
+            outputs.join("two.clippy.diagnostics"),
+            vec![b' '; MAX_CATALOG_BYTES],
+        )?;
+        let got = clippy_failure_readback(root.path(), &outputs, &[one.clone(), two]);
+        assert_eq!(got.bytes, b"one\n");
+        assert_eq!(got.coverage, [2, 1, 0, 0, 1]);
+        let outside = tempfile::NamedTempFile::new()?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), outputs.join("escape.clippy.diagnostics"))?;
+        let got = clippy_failure_readback(
+            root.path(),
+            &outputs,
+            &[PathBuf::from("bazel-out/escape.clippy.diagnostics")],
+        );
+        assert!(got.bytes.is_empty());
+        assert_eq!(got.coverage, [1, 0, 0, 1, 0]);
+        let secret_fixture =
+            br#"{"$message_type":"diagnostic","level":"error","message":"PRIVATE-LINT-CONTENT"}"#;
+        assert_eq!(
+            admit_clippy_json(secret_fixture).unwrap_err().to_string(),
+            "strict compiler diagnostic"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn actual_lint_failure_reads_declared_diagnostics_before_returning_original_failure() {
+        use quote::ToTokens;
+        let source = include_str!("bazel.rs");
+        let file = syn::parse_file(source).unwrap();
+        let f = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                syn::Item::Fn(f) if f.sig.ident == "lint" => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let body = f.block.to_token_stream().to_string();
+        assert!(body.contains("if let Err (primary) = built"));
+        assert!(body.contains("budget . checked_sub (started . elapsed ())"));
+        assert!(body.contains("clippy_declared_outputs"));
+        assert!(body.contains("clippy_failure_readback"));
+        use syn::visit::Visit;
+        fn peel(mut expr: &syn::Expr) -> &syn::Expr {
+            loop {
+                match expr {
+                    syn::Expr::Paren(p) => expr = &p.expr,
+                    syn::Expr::Group(g) => expr = &g.expr,
+                    syn::Expr::Block(b) if b.label.is_none() && b.block.stmts.len() == 1 => {
+                        if let syn::Stmt::Expr(e, None) = &b.block.stmts[0] {
+                            expr = e;
+                        } else {
+                            return expr;
+                        }
+                    }
+                    _ => return expr,
+                }
+            }
+        }
+        struct Calls(Vec<(String, bool)>);
+        impl<'a> Visit<'a> for Calls {
+            fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func
+                    && path
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|p| p.ident == "clippy_failure_context")
+                {
+                    let good = (|| {
+                        if call.args.len() != 3
+                            || call.args[0].to_token_stream().to_string() != "root"
+                            || call.args[1].to_token_stream().to_string() != "primary"
+                        {
+                            return false;
+                        }
+                        let syn::Expr::MethodCall(map) = &call.args[2] else {
+                            return false;
+                        };
+                        if map.method != "map"
+                            || map.args.len() != 1
+                            || map.receiver.to_token_stream().to_string() != "bytes . as_ref ()"
+                        {
+                            return false;
+                        }
+                        let syn::Expr::Closure(c) = &map.args[0] else {
+                            return false;
+                        };
+                        let mut normalized = c.clone();
+                        *normalized.body = peel(&c.body).clone();
+                        let expected: syn::ExprClosure = syn::parse_quote!(|readback| (
+                            readback.bytes.as_slice(),
+                            readback.coverage
+                        ));
+                        normalized.to_token_stream().to_string()
+                            == expected.to_token_stream().to_string()
+                    })();
+                    self.0.push((call.to_token_stream().to_string(), good));
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+        }
+        let mut calls = Calls(Vec::new());
+        calls.visit_block(&f.block);
+        assert_eq!(calls.0.len(), 1);
+        assert!(calls.0[0].1);
+        let target = &calls.0[0].0;
+        assert_eq!(body.matches(target).count(), 1);
+        let removed = body.replacen(
+            target,
+            "crate::build_capture::clippy_failure_context(root,primary,None)",
+            1,
+        );
+        let changed: syn::Block = syn::parse_str(&removed).unwrap();
+        let mut calls = Calls(Vec::new());
+        calls.visit_block(&changed);
+        assert_eq!(calls.0.len(), 1);
+        assert!(!calls.0[0].1);
     }
 
     #[test]

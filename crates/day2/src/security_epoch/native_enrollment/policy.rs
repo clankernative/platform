@@ -26,6 +26,11 @@ pub(super) struct EnrollmentPolicy {
     pub provisioner_code: Digest,
     pub issuer_code: Digest,
     pub runtime: RuntimeSelection,
+    /// Fixed scheduled-requester selections only. Absence disables the
+    /// purpose; neither presence nor decoding this DATA authorizes a request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_backup:
+        Option<crate::security_epoch::scheduled_backup::requester::RequesterPolicy>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +55,46 @@ impl EnrollmentPolicy {
             )]))?;
         self.root.validate()?;
         self.root_key()?;
+        if let Some(requester_policy) = &self.scheduled_backup {
+            requester_policy.validate_data()?;
+            ensure!(
+                requester_policy.scope == self.bootstrap.scope
+                    && requester_policy.cluster == Digest::of(&self.bootstrap.cluster)?
+                    && requester_policy.node_name == self.runtime.node_name
+                    && requester_policy.node
+                        == Digest::of(&(
+                            "day2-scheduled-backup-node-v1",
+                            &self.runtime.node_name,
+                            &self.runtime.node_uid,
+                        ))?
+                    && requester_policy.namespace == self.bootstrap.app.namespace
+                    && requester_policy.image == self.bootstrap.app.container.image,
+                "native_backup_requester_policy_selection"
+            );
+            for role in [
+                NativeRole::AppHost,
+                NativeRole::EpochController,
+                NativeRole::SecurityShell,
+            ] {
+                let selected = self.workload(role);
+                let day2_capabilities::security_epoch::EpochIam::GkeWorkloadIdentityV1 {
+                    service_account_uid: uploader,
+                    ..
+                } = &requester_policy.uploader;
+                let day2_capabilities::security_epoch::EpochIam::GkeWorkloadIdentityV1 {
+                    service_account_uid: native,
+                    ..
+                } = &selected.google_service_account;
+                ensure!(
+                    requester_policy.service_account.uid != selected.kubernetes_service_account.uid
+                        && (requester_policy.namespace != selected.namespace
+                            || requester_policy.service_account.name
+                                != selected.kubernetes_service_account.name)
+                        && uploader != native,
+                    "native_backup_requester_role_overlap"
+                );
+            }
+        }
         // Some reviewed distro builds report an explicitly empty revision.
         // It remains required selection DATA and is compared exactly at RPC.
         let revision = &self.runtime.containerd_revision;
