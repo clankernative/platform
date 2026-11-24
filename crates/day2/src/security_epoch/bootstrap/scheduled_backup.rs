@@ -645,8 +645,8 @@ mod tests {
                                 if let syn::Stmt::Local(local) = stmt
                                     && matches!(&local.pat, syn::Pat::Ident(p) if p.ident == post)
                                 {
-                                    local.init.as_mut().unwrap().expr =
-                                        Box::new(syn::parse_quote!(Ok(Ok(()))));
+                                    *local.init.as_mut().unwrap().expr =
+                                        syn::parse_quote!(Ok(Ok(())));
                                     changed += 1;
                                 }
                             }
