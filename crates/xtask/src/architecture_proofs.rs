@@ -5619,6 +5619,7 @@ mod owning_children_tests {
                 )
             })
             .collect::<Vec<_>>();
+        children.sort_by(|a, b| a.source.cmp(&b.source));
         validate_owning_children(owner, &children)?;
         children.push(child(
             "crates/example/src/proofs/child11.rs",
