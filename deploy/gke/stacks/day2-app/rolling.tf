@@ -67,7 +67,7 @@ resource "kubernetes_deployment_v1" "rolling" {
     template {
       metadata {
         labels = merge(local.pod_labels, var.release_managed ? {
-          for key, value in try(local.released.spec.template.metadata.labels, {}) : key => value if key == "day2.dev/rollout"
+          for key, value in try(local.released.spec.template.metadata.labels, {}) : key => value if contains(["day2.dev/rollout", "day2.dev/runtime-pair"], key)
         } : {})
         annotations = merge({
           "day2.dev/installation" = var.installation
@@ -92,6 +92,20 @@ resource "kubernetes_deployment_v1" "rolling" {
         termination_grace_period_seconds = var.runtime_resources.shutdown_seconds + 45
 
         affinity {
+          dynamic "node_affinity" {
+            for_each = local.runtime_pair_enabled ? [true] : []
+            content {
+              required_during_scheduling_ignored_during_execution {
+                node_selector_term {
+                  match_fields {
+                    key      = "metadata.name"
+                    operator = "In"
+                    values   = [local.runtime_pair_node]
+                  }
+                }
+              }
+            }
+          }
           pod_affinity {
             required_during_scheduling_ignored_during_execution {
               topology_key = "kubernetes.io/hostname"
@@ -130,7 +144,7 @@ resource "kubernetes_deployment_v1" "rolling" {
         dynamic "init_container" {
           # Native storage already has its actual Controller-owned metadata.
           # No startup chown may change that original mount/root observation.
-          for_each = var.state_ownership_init_enabled && !local.native_enabled ? [true] : []
+          for_each = var.state_ownership_init_enabled && !local.native_enabled && !local.runtime_pair_enabled ? [true] : []
 
           content {
             name              = "state-ownership"
@@ -445,7 +459,7 @@ resource "kubernetes_deployment_v1" "rolling" {
             }
           }
           command = ["/usr/local/bin/day2-serve"]
-          args    = concat([local.instance_path, var.app_id, "--edge"], var.app_calls == null ? [] : ["--app-calls", "${local.app_call_dir}/host.json"])
+          args    = local.runtime_pair_enabled ? local.runtime_pair_args : concat([local.instance_path, var.app_id, "--edge"], var.app_calls == null ? [] : ["--app-calls", "${local.app_call_dir}/host.json"])
           env {
             name  = "DAY2_EXPECTED_ARTIFACT"
             value = local.release_artifact
@@ -509,6 +523,16 @@ resource "kubernetes_deployment_v1" "rolling" {
           volume_mount {
             name       = "tmp"
             mount_path = "/tmp"
+          }
+
+          dynamic "volume_mount" {
+            for_each = local.runtime_pair_enabled ? toset(local.runtime_pair_files) : toset([])
+            content {
+              name       = "runtime-pair"
+              mount_path = "/run/day2-pair/${volume_mount.value}"
+              sub_path   = volume_mount.value
+              read_only  = true
+            }
           }
 
           dynamic "volume_mount" {
@@ -722,6 +746,17 @@ resource "kubernetes_deployment_v1" "rolling" {
           empty_dir {
             medium     = "Memory"
             size_limit = var.tmp_size_limit
+          }
+        }
+
+        dynamic "volume" {
+          for_each = local.runtime_pair_enabled ? [true] : []
+          content {
+            name = "runtime-pair"
+            config_map {
+              name         = local.release_instance
+              default_mode = "0444"
+            }
           }
         }
         dynamic "volume" {

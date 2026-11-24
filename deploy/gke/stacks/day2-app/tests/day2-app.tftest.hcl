@@ -1916,6 +1916,82 @@ run "rolling_handoff_keeps_backups_with_the_released_workload" {
   }
 }
 
+run "runtime_handoff_keeps_adopted_startup_selection_and_backups" {
+  command = plan
+  variables {
+    rolling_deploys = true
+    release_managed = true
+  }
+  override_data {
+    target = data.kubernetes_resources.exclusive_workload
+    values = { objects = [] }
+  }
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { name = "day2-example-app", namespace = "app-example", annotations = { "day2.dev/rollout" = "runtime-release" } }
+      spec = { replicas = 1, template = {
+        metadata = {
+          labels = { "day2.dev/runtime-pair" = "ef69b01dfcf72692" }
+          annotations = {
+            "day2.dev/installation"    = "exampleco", "day2.dev/environment" = "production", "day2.dev/app" = "example_app"
+            "day2.dev/artifact"        = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "day2.dev/instance-sha256" = "released-instance"
+          }
+        }
+        spec = {
+          containers = [{
+            name  = "day2"
+            image = "registry.example.com/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            args  = ["/srv/day2/instance.json", "example_app", "--runtime-candidate", "/run/day2-pair/candidate.json", "/tmp/day2-runtime-pair"]
+            env   = [{ name = "DAY2_EXPECTED_ARTIFACT", value = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]
+            volumeMounts = [
+              for file in ["candidate.json", "source.json"] : { name = "runtime-pair", mountPath = "/run/day2-pair/${file}", subPath = file, readOnly = true }
+            ]
+          }]
+          affinity = { nodeAffinity = { requiredDuringSchedulingIgnoredDuringExecution = { nodeSelectorTerms = [{
+            matchFields = [{ key = "metadata.name", operator = "In", values = ["node-a"] }]
+          }] } } }
+          volumes = [
+            for name in ["instance", "runtime-pair"] : { name = name, configMap = { name = "day2-pair-ef69b01dfcf72692-selection" } }
+          ]
+        }
+      } }
+    }] }
+  }
+  assert {
+    condition = (
+      kubernetes_deployment_v1.rolling[0].spec[0].template[0].metadata[0].labels["day2.dev/runtime-pair"] == substr(sha256("runtime-release"), 0, 16) &&
+      kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].container[0].args[2] == "--runtime-candidate" &&
+      length(kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].init_container) == 0 &&
+      toset([for m in kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].container[0].volume_mount : m.sub_path if m.name == "runtime-pair" && m.read_only]) == toset(["candidate.json", "source.json"]) &&
+      one(one(kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].affinity[0].node_affinity[0].required_during_scheduling_ignored_during_execution[0].node_selector_term).match_fields).values == toset(["node-a"])
+    )
+    error_message = "Infrastructure must preserve the adopted runtime's entrypoint, mounted selection and same-node placement."
+  }
+  assert {
+    condition = (
+      one([for v in kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].volume : v.config_map[0].name if v.name == "runtime-pair"]) ==
+      one([for v in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : v.config_map[0].name if v.name == "instance"]) &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].image ==
+      kubernetes_deployment_v1.rolling[0].spec[0].template[0].spec[0].container[0].image
+    )
+    error_message = "Scheduled backups must use the adopted runtime image and instance."
+  }
+}
+
+run "active_runtime_handoff_refuses_infrastructure_reconciliation" {
+  command = plan
+  override_data {
+    target = data.kubernetes_resources.workload
+    values = { objects = [{
+      metadata = { annotations = { "day2.dev/runtime-pair" = "active-runtime-request" } }
+      spec     = { template = { spec = { containers = [{ name = "day2", image = "registry.example.com/day2/example@sha256:0000000000000000000000000000000000000000000000000000000000000000" }] } } }
+    }] }
+  }
+  expect_failures = [terraform_data.release_admission]
+}
+
 run "rolling_refuses_unadmitted_direct_image_change" {
   command = plan
   variables { rolling_deploys = true }
