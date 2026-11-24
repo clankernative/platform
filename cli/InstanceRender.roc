@@ -163,7 +163,7 @@ InstanceRender :: [].{
 
 		## Where the instance commits this root's inputs the spec cannot describe yet, relative to the instance
 		## directory. `instance plan` and `apply` pass the file before the rendered variables, so a rendered value
-		## wins.
+		## wins; a day2-app root's release variables, read from the app's selection, come last.
 		committed_inputs : Root -> Str
 		committed_inputs = |root| match root {
 			Project | Cluster | Tenancy => "gcp/config/${root.name()}.tfvars"
@@ -171,12 +171,19 @@ InstanceRender :: [].{
 			Day2App(bound) => "gcp/config/apps/${bound.id}.tfvars"
 		}
 
-		## `instance plan` and `apply` run every core root except day2-app, whose image and artifact inputs come
-		## from the release controller (step 3 of docs/INSTANCE.md).
-		plannable : Root -> Bool
-		plannable = |root| match root {
-			Day2App(_) => Bool.False
-			Project | Cluster | Tenancy | AppEdge(_) => Bool.True
+		## The root as the request names it to the host.
+		as_request : Root, InstanceSpec.Derived -> _
+		as_request = |root, names| {
+			backend = root.backend(names)
+			{
+				label: root.label(),
+				stack: root.name(),
+				app_id: root.app_id(),
+				bucket: backend.bucket,
+				prefix: backend.prefix,
+				inputs: root.committed_inputs(),
+				variables: root.tfvars_json(names),
+			}
 		}
 	}
 
@@ -191,66 +198,73 @@ InstanceRender :: [].{
 		}
 	}
 
-	## What a run of the core roots does: `instance plan` is read-only; `instance apply` applies each root's saved
-	## plan only if its changes equal the ones reviewed in a prior plan's output directory, which it carries.
-	Mode := [Plan, Apply(Str)].{
+	## What a run of the roots does: `instance plan` is read-only; `instance apply` applies each root's saved plan
+	## only if its changes equal the ones reviewed in a prior plan's output directory, which it carries; a deploy
+	## (`instance deploy`) applies one app's day2-app root for the candidate its selection names.
+	Mode := [Plan, Apply(Str), Deploy].{
 		name : Mode -> Str
 		name = |mode| match mode {
 			Plan => "plan"
 			Apply(_) => "apply"
+			Deploy => "deploy"
 		}
 
-		## The reviewed plan directory an apply checks every root against; a plan has none.
+		## The reviewed plan directory an apply checks every root against; a plan and a deploy have none.
 		reviewed : Mode -> Try(Str, [Null])
 		reviewed = |mode| match mode {
-			Plan => Err(Null)
+			Plan | Deploy => Err(Null)
 			Apply(directory) => Ok(directory)
 		}
 	}
 
-	## The request `instance plan` or `apply` hands its recipe. The host validates every field again, and refuses
-	## a request whose mode differs from the command that started it.
+	## The request `instance plan` or `apply` hands its recipe: every root, in apply order. The host validates every
+	## field again, and refuses a request whose mode differs from the command that started it.
 	request : InstanceSpec, Mode, { instance : Str, checkout : Str, output : Str } -> Str
 	request = |spec, mode, paths| {
 		names = spec.derived()
-		Json.to_str({
-			mode: mode.name(),
-			reviewed: mode.reviewed(),
-			instance: paths.instance,
-			checkout: paths.checkout,
-			output: paths.output,
-			commit: names.platform_commit,
-			project: names.gcp_project,
-			zone: names.gcp_zone,
-			cluster: names.cluster.name,
-			# The host compares these with its own copies and with the platform commit's.
-			renderer: [
-				{ path: "cli/InstanceSpec.roc", text: instance_spec_source },
-				{ path: "cli/InstanceRender.roc", text: instance_render_source },
-				{ path: "cli/Names.roc", text: names_source },
-				{ path: "cli/JsonValue.roc", text: json_value_source },
-			],
-			roots: roots(spec)
-				.keep_if(|root| root.plannable())
-				.map(
-					|root| {
-						backend = root.backend(names)
-						{
-							label: root.label(),
-							stack: root.name(),
-							app_id: root.app_id(),
-							bucket: backend.bucket,
-							prefix: backend.prefix,
-							inputs: root.committed_inputs(),
-							variables: root.tfvars_json(names),
-						}
-					},
-				),
-		})
+		no_candidate : Try(Str, [Null])
+		no_candidate = Err(Null)
+		rendered(spec, mode, paths, roots(spec).map(|root| root.as_request(names)), no_candidate)
+	}
+
+	## The request a deploy (`instance deploy`) hands the roots recipe: only the app `id`'s day2-app root, rendered
+	## exactly as `request` renders it, and the candidate record file being deployed. `paths.output` must be a new
+	## directory.
+	deploy_request :
+		InstanceSpec,
+		Str,
+		Str,
+		{ instance : Str, checkout : Str, output : Str } ->
+			Try(Str, [UnknownApp(Str)])
+	deploy_request = |spec, id, candidate, paths| {
+		names = spec.derived()
+		match names.apps.keep_if(|bound| bound.id == id).first() {
+			Ok(bound) => Ok(rendered(spec, Mode.Deploy, paths, [Root.Day2App(bound).as_request(names)], Ok(candidate)))
+			Err(_) => Err(UnknownApp(id))
+		}
+	}
+
+	## A day2-app root's release, as the receipt records it: where it came from (the app's `selection`, or a
+	## deploy's `candidate` file, at `record`), the selection it was read from or checked against (its generation,
+	## status and record digest; null before a deploy checks it), and what it renders.
+	Release : {
+		source : Str,
+		record : Str,
+		generation : Try(Str, [Null]),
+		status : Try(Str, [Null]),
+		digest : Try(Str, [Null]),
+		candidate : Str,
+		commit : Str,
+		image : Str,
+		artifact_id : Str,
+		tooling_image : Str,
+		qualified_release : { digest : Str, bytes : U64 },
+		variables : Str,
 	}
 
 	## What the host reports after a run: its mode, the exact stacks and engine, and every root's backend, inputs,
-	## status and changed resources. `instance_commit` is empty when the instance is not a git checkout.
+	## status and changed resources; a day2-app root's release, and a deploy's target. `instance_commit` is empty
+	## when the instance is not a git checkout.
 	Receipt : {
 		format : U64,
 		mode : Str,
@@ -276,28 +290,49 @@ InstanceRender :: [].{
 				plan_digest : Str,
 				show_digest : Str,
 				logs : Str,
+				release : Try(Release, [Null]),
+				target : Try({ path : Str, digest : Str, bytes : U64 }, [Null]),
 			},
 		),
 		directory : Str,
 	}
 
-	## A receipt is accepted only in format 1, for the mode that was run, with that mode's statuses and an `ok`
-	## that agrees with them. Only an apply has applied or skipped roots, and a root is skipped only after a failure.
+	## A receipt is accepted only in format 2, for the mode that was run, with that mode's statuses and an `ok`
+	## that agrees with them. Only an apply has skipped roots, and a root is skipped only after a failure. An app
+	## with no release selection is unreleased in a plan or an apply; a deploy's root is not applied when the deploy
+	## stopped before its apply.
 	receipt : Str, Mode -> Try(Receipt, [InvalidReceipt])
 	receipt = |raw, mode| {
 		parsed : Try(Receipt, _)
 		parsed = Json.parse(raw)
 		decoded = parsed.map_err(|_| InvalidReceipt)?
-		failures = ["failed_credentials", "failed_init", "failed_plan", "failed_show"]
+		failures = [
+			"failed_credentials",
+			"failed_inputs",
+			"failed_release",
+			"failed_init",
+			"failed_plan",
+			"failed_show",
+		]
 		known = match mode {
-			Mode.Plan => ["no_changes", "changes"].concat(failures)
+			Mode.Plan => ["no_changes", "changes", "unreleased"].concat(failures)
 			Mode.Apply(_) => [
 				"no_changes",
 				"applied",
+				"unreleased",
 				"skipped",
 				"failed_apply",
 				"refused_destroy",
 				"refused_unreviewed",
+			]
+				.concat(failures)
+			Mode.Deploy => [
+				"no_changes",
+				"applied",
+				"not_applied",
+				"failed_target",
+				"failed_apply",
+				"refused_destroy",
 			]
 				.concat(failures)
 		}
@@ -305,7 +340,7 @@ InstanceRender :: [].{
 		skipped = decoded.roots.any(|root| root.status == "skipped")
 		if
 			decoded.format
-				== 1
+				== 2
 				and decoded.mode
 					== mode.name()
 					and decoded.roots.all(|root| known.contains(root.status))
@@ -319,6 +354,7 @@ InstanceRender :: [].{
 				}
 	}
 
+	## Every root an instance applies, in apply order.
 	roots : InstanceSpec -> List(Root)
 	roots = |spec| {
 		apps = spec.derived().apps
@@ -326,6 +362,44 @@ InstanceRender :: [].{
 			.concat(apps.map(|bound| Root.AppEdge(bound)))
 			.concat(apps.map(|bound| Root.Day2App(bound)))
 	}
+}
+
+## The request for `roots` in `mode`, with the CLI's own rendering sources and the instance's releases.
+rendered :
+	InstanceSpec,
+	InstanceRender.Mode,
+	{ instance : Str, checkout : Str, output : Str },
+	List(_),
+	Try(Str, [Null]) ->
+		Str
+rendered = |spec, mode, paths, selected, candidate| {
+	names = spec.derived()
+	Json.to_str({
+		mode: mode.name(),
+		reviewed: mode.reviewed(),
+		instance: paths.instance,
+		checkout: paths.checkout,
+		output: paths.output,
+		commit: names.platform_commit,
+		project: names.gcp_project,
+		zone: names.gcp_zone,
+		cluster: names.cluster.name,
+		# The host compares these with its own copies and with the platform commit's.
+		renderer: [
+			{ path: "cli/InstanceSpec.roc", text: instance_spec_source },
+			{ path: "cli/InstanceRender.roc", text: instance_render_source },
+			{ path: "cli/Names.roc", text: names_source },
+			{ path: "cli/JsonValue.roc", text: json_value_source },
+		],
+		roots: selected,
+		# Where a day2-app root's release selection, candidate and SDK release are read and admitted.
+		releases: {
+			bucket: names.tofu_state_bucket,
+			registry: names.artifact_registry,
+			forge: { server: names.forge_server, org: names.forge_org },
+		},
+		candidate,
+	})
 }
 
 ## The cluster's dedicated VPC: the node subnet, the pod and service ranges, and kube-dns at the service range's
@@ -429,16 +503,31 @@ expect InstanceRender.Value.Fields([("a\"b", Text("c\\d"))]).json() == "{\"a\\\"
 
 receipt_sample : Str, Bool -> Str
 receipt_sample = |status, ok|
-	\\{"format":1,"mode":"plan","ok":OK,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
+	\\{"format":2,"mode":"plan","ok":OK,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
 	\\"instance_commit":"","instance_clean":false,"engine":{"version":"1.12.3","digest":"sha256:e"},
 	\\"roots":[{"label":"project","stack":"project","backend":{"bucket":"b","prefix":"foundation"},"new_root":false,
 	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"STATUS","review":"",
-	\\"changes":[],"plan_digest":"sha256:p","show_digest":"sha256:s","logs":"/o/project"}],"directory":"/o"}
+	\\"changes":[],"plan_digest":"sha256:p","show_digest":"sha256:s","logs":"/o/project","release":null,"target":null}],
+	\\"directory":"/o"}
 		.replace_first("OK", if ok "true" else "false")
 		.replace_first("STATUS", status)
 
 apply_sample : Str, Bool -> Str
 apply_sample = |status, ok| receipt_sample(status, ok).replace_first("\"mode\":\"plan\"", "\"mode\":\"apply\"")
+
+deploy_sample : Str, Bool -> Str
+deploy_sample = |status, ok| receipt_sample(status, ok).replace_first("\"mode\":\"plan\"", "\"mode\":\"deploy\"")
+
+# A day2-app root's release, as the host records it.
+release_sample : Str
+release_sample =
+	\\"release":{"source":"selection","record":"gs://b/day2/app-releases/go/selection.json",
+	\\"generation":"7","status":"ready","digest":"sha256:s","candidate":"sha256:c","commit":"c","image":"i",
+	\\"artifact_id":"a","tooling_image":"t","qualified_release":{"digest":"sha256:q","bytes":1236},
+	\\"variables":"sha256:v"}
+
+released_sample : Str
+released_sample = receipt_sample("no_changes", Bool.True).replace_first("\"release\":null", release_sample)
 
 expect InstanceRender.receipt(receipt_sample("no_changes", Bool.True), InstanceRender.Mode.Plan).is_ok()
 expect InstanceRender.receipt(receipt_sample("failed_plan", Bool.False), InstanceRender.Mode.Plan).is_ok()
@@ -456,6 +545,37 @@ expect InstanceRender.receipt(apply_sample("failed_apply", Bool.True), InstanceR
 expect InstanceRender.receipt(apply_sample("skipped", Bool.True), InstanceRender.Mode.Apply("/r")).is_err()
 expect InstanceRender.receipt(apply_sample("changes", Bool.True), InstanceRender.Mode.Apply("/r")).is_err()
 expect InstanceRender.receipt(apply_sample("refused_unreviewed", Bool.False), InstanceRender.Mode.Apply("/r")).is_ok()
+# An unreleased app is not a failure in a plan or an apply; a failed release or refused committed input is.
+expect InstanceRender.receipt(receipt_sample("unreleased", Bool.True), InstanceRender.Mode.Plan).is_ok()
+expect InstanceRender.receipt(apply_sample("unreleased", Bool.True), InstanceRender.Mode.Apply("/r")).is_ok()
+expect InstanceRender.receipt(receipt_sample("failed_release", Bool.False), InstanceRender.Mode.Plan).is_ok()
+expect InstanceRender.receipt(receipt_sample("failed_inputs", Bool.True), InstanceRender.Mode.Plan).is_err()
+# A deploy applies or not, never plans, skips or is unreleased; only it fails at its target.
+expect InstanceRender.receipt(deploy_sample("applied", Bool.True), InstanceRender.Mode.Deploy).is_ok()
+expect InstanceRender.receipt(deploy_sample("not_applied", Bool.True), InstanceRender.Mode.Deploy).is_ok()
+expect InstanceRender.receipt(deploy_sample("failed_target", Bool.False), InstanceRender.Mode.Deploy).is_ok()
+expect InstanceRender.receipt(deploy_sample("unreleased", Bool.True), InstanceRender.Mode.Deploy).is_err()
+expect InstanceRender.receipt(deploy_sample("skipped", Bool.True), InstanceRender.Mode.Deploy).is_err()
+expect InstanceRender.receipt(receipt_sample("failed_target", Bool.False), InstanceRender.Mode.Plan).is_err()
+expect InstanceRender.receipt(deploy_sample("applied", Bool.True), InstanceRender.Mode.Apply("/r")).is_err()
+# A receipt of the earlier format is refused.
+expect
+	InstanceRender.receipt(
+		receipt_sample("no_changes", Bool.True).replace_first("\"format\":2", "\"format\":1"),
+		InstanceRender.Mode.Plan,
+	)
+		.is_err()
+# A day2-app root's release decodes with its selection.
+expect match InstanceRender.receipt(released_sample, InstanceRender.Mode.Plan) {
+	Ok(receipt) => match receipt.roots.first() {
+		Ok(root) => match root.release {
+			Ok(release) => release.image == "i" and release.status == Ok("ready")
+			Err(_) => Bool.False
+		}
+		Err(_) => Bool.False
+	}
+	Err(_) => Bool.False
+}
 
 # The request carries its mode and the CLI's own rendering sources.
 expect match InstanceSpec.from_json(sample) {
@@ -469,6 +589,40 @@ expect match InstanceSpec.from_json(sample) {
 		request.contains("\"path\":\"cli/InstanceRender.roc\"")
 			and request.contains("\"mode\":\"apply\"")
 				and request.contains("\"reviewed\":\"/reviewed\"")
+					and request.contains("\"candidate\":null")
+	}
+	Err(_) => Bool.False
+}
+
+# Plan and apply run every root, the day2-app roots last, with where the instance's releases live.
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => {
+		request = InstanceRender.request(spec, InstanceRender.Mode.Plan, { instance: "i", checkout: "p", output: "o" })
+		request.contains("\"label\":\"day2-app/home\",\"stack\":\"day2-app\",\"app_id\":\"home\"")
+			and request.contains(
+				"\"bucket\":\"exampleco-tools-home-state\",\"prefix\":\"day2-app/home\",\"inputs\":\"gcp/config/apps/home.tfvars\"",
+			)
+				and request.contains(
+					"\"releases\":{\"bucket\":\"exampleco-tools-tofu-state\",\"registry\":\"us-central1-docker.pkg.dev/exampleco-tools\",\"forge\":{\"server\":\"https://git.example.com\",\"org\":\"tools\"}}",
+				)
+	}
+	Err(_) => Bool.False
+}
+
+# A deploy's request holds only its app's day2-app root and the candidate it deploys.
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => {
+		paths = { instance: "i", checkout: "p", output: "o/roots" }
+		match InstanceRender.deploy_request(spec, "go", "/c/candidate.json", paths) {
+			Ok(request) =>
+				request.contains("\"mode\":\"deploy\",\"reviewed\":null")
+					and request.contains("\"roots\":[{\"label\":\"day2-app/go\",")
+						and !request.contains("app-edge/go")
+							and !request.contains("day2-app/home")
+								and request.contains("\"candidate\":\"/c/candidate.json\"")
+			Err(_) => Bool.False
+		}
+			and InstanceRender.deploy_request(spec, "notes", "/c/candidate.json", paths) == Err(UnknownApp("notes"))
 	}
 	Err(_) => Bool.False
 }

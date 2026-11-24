@@ -113,7 +113,8 @@ Cli :: [].{
 		command : Roots -> Command
 		command = |request| match request.mode {
 			InstanceRender.Mode.Plan => Command.InstancePlan
-			InstanceRender.Mode.Apply(_) => Command.InstanceApply
+			# The parser never builds a deploy here: a deploy's roots run inside its own command, which reports them.
+			InstanceRender.Mode.Apply(_) | InstanceRender.Mode.Deploy => Command.InstanceApply
 		}
 
 		## The same instance, as `check` and `render` read it.
@@ -622,7 +623,7 @@ Cli :: [].{
 			]
 				.concat(
 					match value.mode {
-						InstanceRender.Mode.Plan => []
+						InstanceRender.Mode.Plan | InstanceRender.Mode.Deploy => []
 						InstanceRender.Mode.Apply(reviewed) => [reviewed]
 					},
 				)

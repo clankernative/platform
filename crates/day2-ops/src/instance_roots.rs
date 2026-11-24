@@ -1,7 +1,8 @@
 //! OpenTofu runs of an instance's core roots, for `day2 instance plan` and
-//! `day2 instance apply`. The CLI renders each root's backend and variables from
-//! day2.json and InstanceRoots.roc chooses the step order; this adapter
-//! independently validates the request and every engine operation.
+//! `day2 instance apply`, and of one app's day2-app root for `day2 instance
+//! deploy`. The CLI renders each root's backend and variables from day2.json and
+//! InstanceRoots.roc chooses the step order; this adapter independently
+//! validates the request and every engine operation.
 //!
 //! What it guarantees, and how:
 //! - The pinned engine: OpenTofu `ENGINE_VERSION`, admitted by digest, copied into
@@ -19,11 +20,23 @@
 //! - Reviewed applies: an apply session plans each root with the state lock and
 //!   applies exactly that saved plan, which OpenTofu refuses if the state changed
 //!   in between. It refuses a plan that deletes, replaces or forgets a resource,
-//!   and it runs no root until every shared root before it has applied.
+//!   and it runs no root until every shared root before it has applied, nor an
+//!   app's day2-app root until that app's edge has.
+//! - Release inputs: a day2-app root's image, artifact and native admission come
+//!   from the app's durable selection, read and checked in-process
+//!   (`release`), and win over every other input. An app with no selection is
+//!   `unreleased` and not run; nothing falls back to a committed image.
+//! - Selected deploys: a deploy session runs one day2-app root for an explicit
+//!   candidate. It may render the instance ConfigMap with a targeted, unlocked
+//!   plan that is never applied, and applies only once the app's selection names
+//!   exactly that candidate, under its own shorter deadlines.
 //! - Secrets stay out of the output: the DNS token is held in memory and passed
 //!   to app-edge plans and applies only; the kubeconfig and its auth-plugin cache
 //!   live in a private temporary directory removed with the session; the receipt
 //!   step refuses unexpected files in the output.
+pub mod release;
+
+use crate::instance_candidate::record;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -38,9 +51,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The core stacks a session may run. day2-app is planned by the release
-/// controller, which owns its image and artifact inputs.
-pub const STACKS: [&str; 4] = ["project", "cluster", "tenancy", "app-edge"];
+/// The core stacks a session may run.
+pub const STACKS: [&str; 5] = ["project", "cluster", "tenancy", "app-edge", "day2-app"];
+
+/// The stack whose image and artifact inputs come from the app's release selection.
+pub const DAY2_APP: &str = "day2-app";
+
+/// The one resource a deploy's targeted render plans: the instance ConfigMap, whose `instance.json` is the target of
+/// `day2 platform maintain activate`. The stack's release admission is not in its dependency graph, so it renders
+/// while an activation is pending.
+pub const TARGET: &str = "kubernetes_config_map_v1.instance";
 
 /// The stacks every later root reads. An apply runs no root until each shared
 /// root before it has applied, so one failure stops the rest; an app edge reads
@@ -49,6 +69,36 @@ pub const SHARED: [&str; 3] = ["project", "cluster", "tenancy"];
 
 /// How long a plan or apply waits for another holder of a root's state lock.
 const LOCK_TIMEOUT: &str = "-lock-timeout=300s";
+
+/// How long an engine step may run before it is interrupted, and how long an interrupted step that holds the state
+/// lock gets to save state and release it before it is killed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Deadline {
+    pub run: Duration,
+    pub grace: Duration,
+}
+
+/// `instance plan` and `apply`: a plan 15 minutes, an apply two hours (creating a cluster can take most of an hour),
+/// then 30 minutes' grace.
+pub const ROOTS_PLAN: Deadline = Deadline {
+    run: Duration::from_secs(900),
+    grace: Duration::from_secs(1800),
+};
+pub const ROOTS_APPLY: Deadline = Deadline {
+    run: Duration::from_secs(7200),
+    grace: Duration::from_secs(1800),
+};
+
+/// A deploy's one day2-app root, applied while the app is stopped and within its job's budget: a plan 15 minutes, an
+/// apply 30 minutes, then two minutes' grace. The lock wait is `LOCK_TIMEOUT`, as for every root.
+pub const DEPLOY_PLAN: Deadline = Deadline {
+    run: Duration::from_secs(900),
+    grace: Duration::from_secs(120),
+};
+pub const DEPLOY_APPLY: Deadline = Deadline {
+    run: Duration::from_secs(1800),
+    grace: Duration::from_secs(120),
+};
 
 /// The engine every instance session runs, by version and by the digest of the
 /// official release binary for each supported host.
@@ -115,12 +165,14 @@ const BLOB_LIMIT: u64 = 16 << 20;
 const SHOW_LIMIT: u64 = 64 << 20;
 
 /// What a session may do: `day2 instance plan` never locks state or applies;
-/// `day2 instance apply` applies each root's saved plan.
+/// `day2 instance apply` applies each root's saved plan as reviewed; a deploy
+/// applies one app's day2-app root for the candidate its selection names.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Plan,
     Apply,
+    Deploy,
 }
 
 impl Mode {
@@ -128,6 +180,22 @@ impl Mode {
         match self {
             Self::Plan => "plan",
             Self::Apply => "apply",
+            Self::Deploy => "deploy",
+        }
+    }
+
+    /// Whether the session takes state locks and applies.
+    fn applies(self) -> bool {
+        self != Self::Plan
+    }
+
+    /// The deadline of a locked engine step.
+    pub fn deadline(self, stage: Stage) -> Deadline {
+        match (self, stage) {
+            (Self::Deploy, Stage::Apply) => DEPLOY_APPLY,
+            (Self::Deploy, _) => DEPLOY_PLAN,
+            (_, Stage::Apply) => ROOTS_APPLY,
+            _ => ROOTS_PLAN,
         }
     }
 }
@@ -151,6 +219,10 @@ pub struct Request {
     /// An apply's reviewed plan: a prior `instance plan` output directory. Each
     /// root applies only a plan whose changes equal the ones reviewed there.
     pub reviewed: Option<PathBuf>,
+    /// Where releases are kept and admitted, for the day2-app roots.
+    pub releases: Option<release::Releases>,
+    /// A deploy's candidate record file: what its root renders and applies.
+    pub candidate: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -175,9 +247,14 @@ pub struct Root {
     pub variables: String,
 }
 
+/// One operation on one root. A day2-app root reads its release first; a deploy may render its target after init,
+/// and checks its selection before it plans.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
+    Release,
     Init,
+    Target,
+    Selected,
     Plan,
     Show,
     Apply,
@@ -186,7 +263,10 @@ pub enum Stage {
 impl Stage {
     fn parse(name: &str) -> Result<Self> {
         Ok(match name {
+            "release" => Self::Release,
             "init" => Self::Init,
+            "target" => Self::Target,
+            "selected" => Self::Selected,
             "plan" => Self::Plan,
             "show" => Self::Show,
             "apply" => Self::Apply,
@@ -196,16 +276,23 @@ impl Stage {
 
     fn name(self) -> &'static str {
         match self {
+            Self::Release => "release",
             Self::Init => "init",
+            Self::Target => "target",
+            Self::Selected => "selected",
             Self::Plan => "plan",
             Self::Show => "show",
             Self::Apply => "apply",
         }
     }
 
-    fn after(self) -> Option<Self> {
+    /// The stage that must have run before this one, for a root of `stack` in `mode`.
+    fn after(self, mode: Mode, stack: &str) -> Option<Self> {
         match self {
-            Self::Init => None,
+            Self::Release => None,
+            Self::Init => (stack == DAY2_APP).then_some(Self::Release),
+            Self::Target | Self::Selected => Some(Self::Init),
+            Self::Plan if mode == Mode::Deploy => Some(Self::Selected),
             Self::Plan => Some(Self::Init),
             Self::Show => Some(Self::Plan),
             Self::Apply => Some(Self::Show),
@@ -216,6 +303,10 @@ impl Stage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Failure {
     Credentials,
+    /// A committed day2-app input sets a variable the platform owns.
+    Inputs,
+    /// The release could not be read or was refused, or a deploy's selection does not name its candidate.
+    Release,
     Stage(Stage),
     /// The saved plan deletes, replaces or forgets a resource; nothing was applied.
     Destroys,
@@ -227,6 +318,13 @@ enum Failure {
 struct Progress {
     done: BTreeSet<Stage>,
     failed: Option<Failure>,
+    /// A day2-app root whose app has no release selection: it runs nothing else.
+    unreleased: bool,
+    /// A day2-app root's checked release, and the selection it came from.
+    release: Option<release::Release>,
+    selection: Option<release::Selection>,
+    /// A deploy's rendered target `instance.json`.
+    target: Option<Value>,
     new_root: bool,
     changes: Vec<Value>,
     destroys: Vec<String>,
@@ -237,13 +335,18 @@ struct Progress {
 }
 
 /// Where a root's files live inside the output directory.
+#[derive(Clone)]
 pub struct Layout {
     pub config: PathBuf,
     pub stack: PathBuf,
     pub data: PathBuf,
     pub inputs: PathBuf,
     pub rendered: PathBuf,
+    /// A day2-app root's `release.tfvars.json`.
+    pub release: PathBuf,
     pub plan: PathBuf,
+    /// A deploy's targeted plan.
+    pub target: PathBuf,
 }
 
 /// Credentials an engine step receives; only `plan` and `apply` of the roots that
@@ -257,12 +360,37 @@ pub fn expected_inputs(stack: &str, app_id: Option<&str>) -> Result<String> {
     Ok(match (stack, app_id) {
         ("project" | "cluster" | "tenancy", None) => format!("gcp/config/{stack}.tfvars"),
         ("app-edge", Some(app)) => format!("gcp/config/app-edge/{app}.tfvars"),
+        (DAY2_APP, Some(app)) => format!("gcp/config/apps/{app}.tfvars"),
         _ => bail!("no committed inputs for {stack}"),
     })
 }
 
 fn needs_cluster(stack: &str) -> bool {
-    stack == "tenancy" || stack == "app-edge"
+    stack == "tenancy" || stack == "app-edge" || stack == DAY2_APP
+}
+
+/// `gcloud container clusters get-credentials <cluster> --zone <zone> --project
+/// <project>`: how a private kubeconfig (the caller's `KUBECONFIG`) is built
+/// for the cluster, from derived names. A deploy builds its own the same way.
+pub fn kubeconfig_args(cluster: &str, zone: &str, project: &str) -> Vec<OsString> {
+    [
+        "container",
+        "clusters",
+        "get-credentials",
+        cluster,
+        "--zone",
+        zone,
+        "--project",
+        project,
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// Whether a root that has never been applied plans against an empty local state: only in a read-only plan. An apply
+/// or a deploy initializes the real backend, so its apply creates the state.
+fn plans_locally(mode: Mode, new_root: bool) -> bool {
+    mode == Mode::Plan && new_root
 }
 
 fn needs_dns(stack: &str) -> bool {
@@ -271,7 +399,10 @@ fn needs_dns(stack: &str) -> bool {
 
 /// The exact engine invocation for one stage of one root: arguments and the
 /// variables set on top of the allowlisted ambient ones. `local_state` is a plan
-/// session's root that has never been applied.
+/// session's root that has never been applied. A day2-app root's release
+/// variables come last, so they win; a deploy's `Target` plans only the instance
+/// ConfigMap, unlocked, into its own plan file. `Release` and `Selected` run no
+/// engine.
 pub fn invocation(
     mode: Mode,
     stage: Stage,
@@ -305,15 +436,27 @@ pub fn invocation(
                 args.push(format!("-backend-config=prefix={}", root.prefix).into());
             }
         }
-        Stage::Plan => {
+        Stage::Plan | Stage::Target => {
             args.extend(["plan", "-input=false", "-no-color"].map(OsString::from));
-            args.push(match mode {
-                Mode::Plan => "-lock=false".into(),
-                Mode::Apply => LOCK_TIMEOUT.into(),
+            args.push(if mode.applies() && stage == Stage::Plan {
+                LOCK_TIMEOUT.into()
+            } else {
+                "-lock=false".into()
             });
+            if stage == Stage::Target {
+                args.push(format!("-target={TARGET}").into());
+            }
             args.push(format!("-var-file={}", layout.inputs.display()).into());
             args.push(format!("-var-file={}", layout.rendered.display()).into());
-            args.push(format!("-out={}", layout.plan.display()).into());
+            if root.stack == DAY2_APP {
+                args.push(format!("-var-file={}", layout.release.display()).into());
+            }
+            let out = if stage == Stage::Target {
+                &layout.target
+            } else {
+                &layout.plan
+            };
+            args.push(format!("-out={}", out.display()).into());
             if needs_cluster(&root.stack)
                 && let Some(kubeconfig) = credentials.kubeconfig
             {
@@ -323,6 +466,7 @@ pub fn invocation(
             }
             provider_env(root, credentials, &mut env);
         }
+        Stage::Release | Stage::Selected => {}
         Stage::Show => {
             args.extend(["show", "-json", "-no-color"].map(OsString::from));
             args.push(layout.plan.clone().into());
@@ -352,10 +496,21 @@ fn provider_env(root: &Root, credentials: &Credentials, env: &mut Vec<(&'static 
     }
 }
 
+/// The roots that must have applied before `root` in an apply: none for a shared
+/// root or an app edge (the shared roots gate every later root separately), and
+/// its app's edge for a day2-app root, whose platform contract the edge writes.
+fn needs(root: &Root) -> Vec<String> {
+    match (root.stack.as_str(), &root.app_id) {
+        (DAY2_APP, Some(app)) => vec![format!("app-edge/{app}")],
+        _ => Vec::new(),
+    }
+}
+
 /// Whether `stage` of `label` may run now. Each root runs its stages in order and
-/// stops at its first failure; only an apply session applies; and an apply runs no
-/// root until every shared root before it has applied, since later roots read
-/// their state.
+/// stops at its first failure or once it is unreleased; only an apply or a deploy
+/// applies, and only a deploy renders a target or checks its selection; and an
+/// apply runs no root until every shared root before it has applied, since later
+/// roots read their state, nor a day2-app root until its app's edge has.
 fn admit(
     mode: Mode,
     roots: &[Root],
@@ -364,13 +519,22 @@ fn admit(
     stage: Stage,
 ) -> Result<()> {
     let current = progress.get(label).context("unknown root")?;
+    let root = roots
+        .iter()
+        .find(|root| root.label == label)
+        .context("unknown root")?;
     ensure!(current.failed.is_none(), "{label} already failed");
+    ensure!(!current.unreleased, "{label} has no release selection");
     ensure!(
         !current.done.contains(&stage),
         "duplicate {} for {label}",
         stage.name()
     );
-    if let Some(required) = stage.after() {
+    ensure!(
+        stage != Stage::Release || root.stack == DAY2_APP,
+        "only a day2-app root reads a release"
+    );
+    if let Some(required) = stage.after(mode, &root.stack) {
         ensure!(
             current.done.contains(&required),
             "{} needs {} first",
@@ -379,8 +543,16 @@ fn admit(
         );
     }
     ensure!(
-        stage != Stage::Apply || mode == Mode::Apply,
+        stage != Stage::Apply || mode.applies(),
         "instance plan never applies"
+    );
+    ensure!(
+        !matches!(stage, Stage::Target | Stage::Selected) || mode == Mode::Deploy,
+        "only a deploy renders a target or checks its selection"
+    );
+    ensure!(
+        stage != Stage::Target || !current.done.contains(&Stage::Selected),
+        "a deploy renders its target before it checks its selection"
     );
     if mode == Mode::Apply {
         for root in roots.iter().take_while(|root| root.label != label) {
@@ -390,6 +562,13 @@ fn admit(
                     || (earlier.failed.is_none() && earlier.done.contains(&Stage::Apply)),
                 "{label} runs only after {} has applied",
                 root.label
+            );
+        }
+        for needed in needs(root) {
+            let earlier = progress.get(&needed).context("unknown root")?;
+            ensure!(
+                earlier.failed.is_none() && earlier.done.contains(&Stage::Apply),
+                "{label} runs only after {needed} has applied"
             );
         }
     }
@@ -432,7 +611,7 @@ pub fn validate(request: &Request) -> Result<()> {
         "invalid cluster name"
     );
     ensure!(
-        !request.roots.is_empty() && request.roots.len() <= 3 + 128,
+        !request.roots.is_empty() && request.roots.len() <= 3 + 2 * 128,
         "core root count"
     );
     let mut labels = BTreeSet::new();
@@ -448,6 +627,11 @@ pub fn validate(request: &Request) -> Result<()> {
                 format!("app-edge/{app}")
             }
             ("app-edge", None) => bail!("app-edge needs its app"),
+            (DAY2_APP, Some(app)) => {
+                day2_contracts::names::identifier(app)?;
+                format!("{DAY2_APP}/{app}")
+            }
+            (DAY2_APP, None) => bail!("day2-app needs its app"),
             (_, Some(_)) => bail!("{} takes no app", root.stack),
             (stack, None) => stack.to_owned(),
         };
@@ -489,8 +673,50 @@ pub fn validate(request: &Request) -> Result<()> {
             );
         }
     }
+    // A day2-app root keeps its state in its app's own bucket and prefix, the
+    // derived names, so no request can point it at another app's state.
+    for root in &request.roots {
+        if let (DAY2_APP, Some(app)) = (root.stack.as_str(), &root.app_id) {
+            ensure!(
+                root.bucket == format!("{}-{app}-state", request.project)
+                    && root.prefix == format!("{DAY2_APP}/{app}"),
+                "{} keeps its state in <project>-{app}-state, prefix day2-app/{app}",
+                root.label
+            );
+        }
+    }
+    let day2_apps = request
+        .roots
+        .iter()
+        .filter(|root| root.stack == DAY2_APP)
+        .count();
+    match (request.mode, &request.reviewed, &request.candidate) {
+        (Mode::Plan, None, None) | (Mode::Apply, Some(_), None) => {}
+        (Mode::Deploy, None, Some(_)) => ensure!(
+            request.roots.len() == 1 && day2_apps == 1,
+            "a deploy runs exactly one day2-app root"
+        ),
+        (Mode::Plan, Some(_), _) => bail!("a plan reviews nothing"),
+        (Mode::Apply, None, _) => bail!("an apply needs the plan that was reviewed"),
+        (Mode::Deploy, Some(_), _) => {
+            bail!("a deploy is bound to its selection, not a reviewed plan")
+        }
+        (Mode::Deploy, None, None) => bail!("a deploy needs the candidate it deploys"),
+        (_, _, Some(_)) => bail!("only a deploy names a candidate"),
+    }
+    match &request.releases {
+        Some(releases) => releases.validate(&request.project)?,
+        None => ensure!(
+            day2_apps == 0,
+            "day2-app roots need the instance's releases"
+        ),
+    }
+    if request.mode == Mode::Deploy {
+        return Ok(());
+    }
     // Apply order is fixed: the shared roots first, then each app's edge by app,
-    // so no request can run an app edge before the state it reads.
+    // then each app's day2-app root by app, so no request can run a root before
+    // the state it reads.
     ensure!(
         request
             .roots
@@ -500,16 +726,27 @@ pub fn validate(request: &Request) -> Result<()> {
             .eq(SHARED),
         "the core roots start with project, cluster and tenancy, in that order"
     );
+    let rest = &request.roots[SHARED.len()..];
+    let edges = rest.len() - day2_apps;
     ensure!(
-        request.roots[SHARED.len()..]
-            .windows(2)
-            .all(|pair| pair[0].app_id < pair[1].app_id),
+        rest[..edges].iter().all(|root| root.stack == "app-edge")
+            && rest[..edges]
+                .windows(2)
+                .all(|pair| pair[0].app_id < pair[1].app_id),
         "app edges follow the shared roots, sorted by app"
     );
-    // Every core root keeps its state in one bucket, each under its own prefix.
+    ensure!(
+        day2_apps == 0
+            || rest[..edges]
+                .iter()
+                .map(|root| &root.app_id)
+                .eq(rest[edges..].iter().map(|root| &root.app_id)),
+        "each app's day2-app root follows every app edge, in the same app order"
+    );
+    // Every other core root keeps its state in one bucket, each under its own prefix.
     let bucket = &request.roots[0].bucket;
     let mut prefixes = BTreeSet::new();
-    for root in &request.roots {
+    for root in request.roots.iter().filter(|root| root.stack != DAY2_APP) {
         ensure!(
             &root.bucket == bucket,
             "the core roots share one state bucket"
@@ -520,11 +757,14 @@ pub fn validate(request: &Request) -> Result<()> {
             root.prefix
         );
     }
-    match (request.mode, &request.reviewed) {
-        (Mode::Plan, None) | (Mode::Apply, Some(_)) => Ok(()),
-        (Mode::Plan, Some(_)) => bail!("a plan reviews nothing"),
-        (Mode::Apply, None) => bail!("an apply needs the plan that was reviewed"),
-    }
+    ensure!(
+        request
+            .releases
+            .as_ref()
+            .is_none_or(|releases| &releases.bucket == bucket),
+        "releases live in the core roots' state bucket"
+    );
+    Ok(())
 }
 
 /// Run a trusted tool and return its bounded stdout bytes. stderr goes to `log`
@@ -766,18 +1006,33 @@ fn committed_at_head(
     Ok(())
 }
 
+/// What a reviewed plan reviewed: each root's changes digest, for the roots it
+/// could plan, and each day2-app root's release variables digest, `None` for a
+/// root that was unreleased.
+#[derive(Debug, Default)]
+struct Reviewed {
+    changes: BTreeMap<String, String>,
+    releases: BTreeMap<String, Option<String>>,
+}
+
+/// The format of the receipt a session writes, and the only one an apply accepts
+/// as its reviewed plan.
+pub const RECEIPT_FORMAT: u64 = 2;
+
 /// The reviewed changes of each root, from a prior `instance plan` output for the
 /// same platform commit and stacks, the same roots in the same order and the same
 /// backends, committed inputs and rendered variables. A root that plan could not
 /// plan (before its cluster existed, say) has no reviewed changes, so an apply
 /// refuses it if it has any; plan and review again after the roots before it apply.
+/// A day2-app root's release is compared root by root when it is read again
+/// (`release_reviewed`), so one app's new release never refuses the others.
 fn reviewed_changes(
     directory: &Path,
     request: &Request,
     stacks_tree: &str,
     inputs: &BTreeMap<String, String>,
     rendered: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>> {
+) -> Result<Reviewed> {
     let mut bytes = Vec::new();
     fs::File::open(directory.join("receipt.json"))
         .context("the reviewed plan directory has no receipt.json")?
@@ -786,8 +1041,10 @@ fn reviewed_changes(
     ensure!(bytes.len() as u64 <= SHOW_LIMIT, "reviewed receipt budget");
     let receipt: Value = serde_json::from_slice(&bytes).context("reviewed receipt")?;
     ensure!(
-        receipt["format"] == 1 && receipt["mode"] == "plan" && receipt["audit_error"].is_null(),
-        "the reviewed directory must hold an instance plan"
+        receipt["format"] == RECEIPT_FORMAT
+            && receipt["mode"] == "plan"
+            && receipt["audit_error"].is_null(),
+        "the reviewed directory must hold an instance plan of this platform's receipt format"
     );
     ensure!(
         receipt["commit"] == request.commit.as_str() && receipt["stacks_tree"] == stacks_tree,
@@ -800,7 +1057,7 @@ fn reviewed_changes(
         planned.len() == request.roots.len(),
         "the reviewed plan has other roots; plan and review again"
     );
-    let mut reviewed = BTreeMap::new();
+    let mut reviewed = Reviewed::default();
     for (root, planned) in request.roots.iter().zip(planned) {
         let label = &root.label;
         ensure!(
@@ -814,19 +1071,57 @@ fn reviewed_changes(
                 && planned["variables"] == rendered[label].as_str(),
             "{label}'s backend or inputs changed since the reviewed plan; plan and review again"
         );
+        let day2_app = root.stack == DAY2_APP;
         match planned["status"].as_str() {
             Some("no_changes" | "changes") => {
                 let review = planned["review"]
                     .as_str()
                     .filter(|review| review.starts_with("sha256:"))
                     .context("reviewed receipt review digest")?;
-                reviewed.insert(label.clone(), review.to_owned());
+                reviewed.changes.insert(label.clone(), review.to_owned());
+                if day2_app {
+                    let release = planned["release"]["variables"]
+                        .as_str()
+                        .filter(|digest| digest.starts_with("sha256:"))
+                        .context("reviewed receipt release digest")?;
+                    reviewed
+                        .releases
+                        .insert(label.clone(), Some(release.to_owned()));
+                }
             }
+            Some("unreleased") if day2_app => {
+                reviewed.releases.insert(label.clone(), None);
+            }
+            Some("failed_inputs" | "failed_release") if day2_app => {}
             Some("failed_credentials" | "failed_init" | "failed_plan" | "failed_show") => {}
             _ => bail!("the reviewed receipt has an unknown status for {label}"),
         }
     }
     Ok(reviewed)
+}
+
+/// Whether an apply may run a day2-app root whose release now renders `current`
+/// (`None`: unreleased), against what the reviewed plan reviewed for it: an
+/// unchanged release, or the root still unreleased. A release that appeared or
+/// changed since needs a new plan and review; a root the reviewed plan could not
+/// plan is left to the changes gate, which refuses it unless nothing changes.
+fn release_reviewed(
+    reviewed: &BTreeMap<String, Option<String>>,
+    label: &str,
+    current: Option<&str>,
+) -> Result<(), (Failure, String)> {
+    match (reviewed.get(label), current) {
+        (None, _) | (Some(None), None) => Ok(()),
+        (Some(Some(before)), Some(now)) if before == now => Ok(()),
+        (Some(Some(_)), None) => Err((
+            Failure::Release,
+            "the app's release selection is gone since the reviewed plan".into(),
+        )),
+        (Some(_), Some(_)) => Err((
+            Failure::Unreviewed,
+            "the app's release changed since the reviewed plan; plan and review again".into(),
+        )),
+    }
 }
 
 fn host() -> &'static str {
@@ -837,8 +1132,30 @@ fn host() -> &'static str {
     }
 }
 
+/// What a session reads outside its engine runs: the instance's release state at an exact generation, and the
+/// release cache's tools and root (`$DAY2_RELEASE_CACHE`, else `~/.cache/day2-platform-releases`).
+pub struct Effects {
+    pub store: Box<dyn crate::instance_candidate::tools::Store>,
+    pub tools: Box<dyn crate::instance_release::Tools>,
+    pub cache: Option<PathBuf>,
+}
+
+impl Effects {
+    /// `gcloud storage` with the job's ambient credentials, as `instance candidate` reads release state.
+    pub fn native() -> Self {
+        Self {
+            store: Box::new(crate::instance_candidate::tools::Gcloud::native()),
+            tools: Box::new(crate::instance_release::Native),
+            cache: None,
+        }
+    }
+}
+
 pub struct Session {
     request: Request,
+    effects: Effects,
+    /// Every root's committed inputs, as read once in prepare.
+    committed: BTreeMap<String, Vec<u8>>,
     instance: PathBuf,
     instance_commit: String,
     instance_clean: bool,
@@ -858,14 +1175,15 @@ pub struct Session {
     kubeconfig_refreshed: bool,
     dns_token: Option<String>,
     credentials_read: bool,
-    /// An apply's reviewed changes digest per root label.
-    reviewed: BTreeMap<String, String>,
+    /// An apply's reviewed changes and releases per root label.
+    reviewed: Reviewed,
     progress: BTreeMap<String, Progress>,
 }
 
 impl Session {
-    /// Validate and stage the CLI's request for a session the host started in `mode`.
-    pub fn prepare(raw: &Path, mode: Mode) -> Result<Self> {
+    /// Validate and stage the CLI's request for a session the host started in
+    /// `mode`, reading release state through `effects`.
+    pub fn prepare(raw: &Path, mode: Mode, effects: Effects) -> Result<Self> {
         let mut bytes = Vec::new();
         fs::File::open(raw)?
             .take(REQUEST_LIMIT + 1)
@@ -995,17 +1313,20 @@ impl Session {
             .iter()
             .map(|root| (root.label.clone(), day2::digest(root.variables.as_bytes())))
             .collect();
+        if mode.applies() {
+            // An apply or a deploy runs only what is committed.
+            committed_at_head(
+                &instance,
+                &instance_commit,
+                instance_clean,
+                &request.roots,
+                &committed,
+            )?;
+        }
         let reviewed = match &request.reviewed {
-            None => BTreeMap::new(),
+            None => Reviewed::default(),
+            // An apply runs only what was reviewed.
             Some(directory) => {
-                // An apply runs only what was reviewed, from what is committed.
-                committed_at_head(
-                    &instance,
-                    &instance_commit,
-                    instance_clean,
-                    &request.roots,
-                    &committed,
-                )?;
                 reviewed_changes(directory, &request, &stacks_tree, &inputs, &rendered)?
             }
         };
@@ -1051,7 +1372,9 @@ impl Session {
                 data: directory.join("data"),
                 inputs: directory.join("inputs.tfvars"),
                 rendered: directory.join("rendered.tfvars.json"),
+                release: directory.join("release.tfvars.json"),
                 plan: directory.join("plan.bin"),
+                target: directory.join("target.bin"),
             };
             fs::write(&layout.inputs, &committed[&root.label])?;
             fs::write(&layout.rendered, &root.variables)?;
@@ -1064,6 +1387,8 @@ impl Session {
             .collect();
         let session = Self {
             request,
+            effects,
+            committed,
             instance,
             instance_commit,
             instance_clean,
@@ -1126,11 +1451,14 @@ impl Session {
         command
     }
 
-    /// The roots in apply order, and which of them every later root reads.
+    /// The roots in apply order: which of them every later root reads, which
+    /// roots each needs applied first, and which read a release first.
     pub fn summary(&self) -> Value {
         json!({"roots": self.request.roots.iter().map(|root| json!({
             "label": root.label,
             "shared": SHARED.contains(&root.stack.as_str()),
+            "needs": needs(root),
+            "release": root.stack == DAY2_APP,
         })).collect::<Vec<_>>()})
     }
 
@@ -1180,12 +1508,11 @@ impl Session {
         let _ = fs::remove_file(&kubeconfig);
         let fetched = crate::maintenance::on_path("gcloud").and_then(|gcloud| {
             let mut command = self.tool(&gcloud);
-            command
-                .env("KUBECONFIG", &kubeconfig)
-                .args(["container", "clusters", "get-credentials"])
-                .arg(&self.request.cluster)
-                .args(["--zone", &self.request.zone])
-                .args(["--project", &self.request.project]);
+            command.env("KUBECONFIG", &kubeconfig).args(kubeconfig_args(
+                &self.request.cluster,
+                &self.request.zone,
+                &self.request.project,
+            ));
             crate::process::run(
                 &mut command,
                 self.private.path(),
@@ -1262,30 +1589,30 @@ impl Session {
             fs::write(directory.join("plan.txt"), readable)?;
             return Ok(Some(shown));
         }
-        // A step that holds the state lock (an apply session's plan and apply) is
-        // interrupted when it overruns, so OpenTofu saves state and releases the
-        // lock, and is killed only after a grace period. Creating a cluster can
-        // take most of an hour.
-        let locked =
-            self.request.mode == Mode::Apply && matches!(stage, Stage::Plan | Stage::Apply);
-        let deadline = Duration::from_secs(if stage == Stage::Apply { 7200 } else { 900 });
-        if locked {
+        // A step that holds the state lock (an apply or a deploy session's plan and
+        // apply) is interrupted when it overruns, so OpenTofu saves state and
+        // releases the lock, and is killed only after its mode's grace period.
+        let mode = self.request.mode;
+        let deadline = mode.deadline(stage);
+        if mode.applies() && matches!(stage, Stage::Plan | Stage::Apply) {
             crate::process::run_interruptible(
                 &mut command,
                 &directory,
                 &log,
-                deadline,
-                Duration::from_secs(1800),
+                deadline.run,
+                deadline.grace,
             )?;
         } else {
-            crate::process::run(&mut command, &directory, &log, deadline)?;
+            crate::process::run(&mut command, &directory, &log, deadline.run)?;
         }
         Ok(None)
     }
 
-    /// One engine operation of one root: init, then plan, then show, then, in an
-    /// apply session, apply. A failed operation is recorded for the receipt and
-    /// stops that root; `admit` keeps later roots from running after a shared one.
+    /// One operation of one root: a day2-app root's release first; init, then
+    /// plan, then show, then, in an apply or a deploy, apply; and in a deploy its
+    /// target render and selection check. A failed operation is recorded for the
+    /// receipt and stops that root; `admit` keeps later roots from running after a
+    /// shared one, or after their own app's edge.
     pub fn operation(&mut self, label: &str, name: &str) -> Result<Value> {
         ensure!(self.credentials_read, "credentials come before any root");
         let stage = Stage::parse(name)?;
@@ -1303,6 +1630,12 @@ impl Session {
             .find(|root| root.label == label)
             .context("unknown root")?
             .clone();
+        match stage {
+            Stage::Release => return self.release(&root),
+            Stage::Selected => return self.selected(&root),
+            Stage::Target => return self.target(&root),
+            Stage::Init | Stage::Plan | Stage::Show | Stage::Apply => {}
+        }
         if self.request.mode == Mode::Apply
             && stage == Stage::Init
             && needs_cluster(&root.stack)
@@ -1320,10 +1653,11 @@ impl Session {
         let mut new_root = progress.new_root;
         let plan_digest = progress.plan_digest.clone();
         let gate = apply_gate(
+            self.request.mode,
             &progress.changes,
             &progress.destroys,
             &progress.review,
-            self.reviewed.get(label),
+            self.reviewed.changes.get(label),
         );
         let directory = self.output.join(label.replace('/', "-"));
         let plan_file = self.layouts[label].plan.clone();
@@ -1342,10 +1676,10 @@ impl Session {
                 match stage {
                     Stage::Init => {
                         new_root = !self.state_exists(&root, &directory)?;
-                        if self.request.mode == Mode::Plan && new_root {
+                        if plans_locally(self.request.mode, new_root) {
                             // Plan against an empty local state: nothing is created
-                            // remotely. An apply initializes the real backend, so its
-                            // apply creates the state.
+                            // remotely. An apply or a deploy initializes the real
+                            // backend, so its apply creates the state.
                             fs::write(
                                 self.layouts[label].stack.join("backend_override.tf"),
                                 backend_override(&directory.join("new.tfstate"))?,
@@ -1357,6 +1691,9 @@ impl Session {
                         "the saved plan changed after it was shown"
                     ),
                     Stage::Plan | Stage::Show => {}
+                    Stage::Release | Stage::Target | Stage::Selected => {
+                        bail!("{name} runs no engine step")
+                    }
                 }
                 // Show reads the plan file; its digest must be the same before and after.
                 let before = if stage == Stage::Show {
@@ -1365,7 +1702,7 @@ impl Session {
                     String::new()
                 };
                 let shown =
-                    self.run_stage(stage, &root, self.request.mode == Mode::Plan && new_root)?;
+                    self.run_stage(stage, &root, plans_locally(self.request.mode, new_root))?;
                 Ok(shown.map(|shown| (shown, before)))
             })()
             .map_err(|error| {
@@ -1423,6 +1760,236 @@ impl Session {
         }
     }
 
+    /// Record a root's failure: its message in `<stage>.error` in the root's
+    /// directory, and the failure for the receipt.
+    fn fail(&mut self, label: &str, stage: Stage, failure: Failure, message: &str) -> Result<()> {
+        let directory = self.output.join(label.replace('/', "-"));
+        let _ = fs::write(directory.join(format!("{}.error", stage.name())), message);
+        self.progress.get_mut(label).context("unknown root")?.failed = Some(failure);
+        Ok(())
+    }
+
+    /// A day2-app root's release. Its committed inputs may not set a variable the
+    /// platform owns. Then, in a plan or an apply, the app's selection, read at its
+    /// exact generation (absent: the root is unreleased and runs nothing else),
+    /// and its candidate, checked; an apply compares the release with the reviewed
+    /// plan's. In a deploy, the request's candidate, checked the same way. The
+    /// release variables are written for the root's plans.
+    fn release(&mut self, root: &Root) -> Result<Value> {
+        let label = root.label.as_str();
+        let failed = json!({"ok": false, "released": false, "release": null});
+        let app = root.app_id.clone().context("day2-app needs its app")?;
+        let releases = self.request.releases.clone().context("releases")?;
+        let rendered: Value = day2::json::decode(root.variables.as_bytes())?;
+        let mut owned: Vec<&str> = rendered
+            .as_object()
+            .context("rendered variables must be an object")?
+            .keys()
+            .map(String::as_str)
+            .collect();
+        owned.extend(release::OWNED);
+        let restated = release::restated(&self.committed[label], &owned);
+        if !restated.is_empty() {
+            let message = format!(
+                "{} sets {}, which the platform owns for day2-app; delete them there",
+                root.inputs,
+                restated.join(", ")
+            );
+            self.fail(label, Stage::Release, Failure::Inputs, &message)?;
+            return Ok(failed);
+        }
+        let read = (|| -> Result<Option<(release::Release, Option<release::Selection>)>> {
+            let root_path = match &self.effects.cache {
+                Some(path) => path.clone(),
+                None => crate::instance_release::cache_root()?,
+            };
+            let cache = crate::instance_release::Cache::open(&root_path, &releases.objects())?;
+            let tools = self.effects.tools.as_mut();
+            if self.request.mode == Mode::Deploy {
+                let path = self
+                    .request
+                    .candidate
+                    .as_ref()
+                    .context("deploy candidate")?;
+                let candidate = record::decode(&crate::instance_candidate::read_bounded(
+                    path,
+                    record::RECORD_LIMIT,
+                )?)?;
+                let checked = release::check(&candidate, &app, &releases, &cache, tools)?;
+                return Ok(Some((checked, None)));
+            }
+            let Some(selection) =
+                release::read_selection(self.effects.store.as_mut(), &releases, &app)?
+            else {
+                return Ok(None);
+            };
+            let checked = release::check(&selection.candidate, &app, &releases, &cache, tools)?;
+            Ok(Some((checked, Some(selection))))
+        })();
+        let (checked, selection) = match read {
+            Err(error) => {
+                self.fail(
+                    label,
+                    Stage::Release,
+                    Failure::Release,
+                    &format!("{error:#}"),
+                )?;
+                return Ok(failed);
+            }
+            Ok(found) => found.unzip(),
+        };
+        let variables = checked
+            .as_ref()
+            .map(|release| day2::digest(&release.variables));
+        if let Err((failure, message)) =
+            release_reviewed(&self.reviewed.releases, label, variables.as_deref())
+        {
+            self.fail(label, Stage::Release, failure, &message)?;
+            return Ok(failed);
+        }
+        let selection = selection.flatten();
+        let Some(checked) = checked else {
+            let progress = self.progress.get_mut(label).context("unknown root")?;
+            progress.unreleased = true;
+            progress.done.insert(Stage::Release);
+            return Ok(json!({"ok": true, "released": false, "release": null}));
+        };
+        fs::write(&self.layouts[label].release, &checked.variables)?;
+        let reported = json!({
+            "candidate": checked.digest,
+            "commit": checked.commit,
+            "image": checked.image,
+            "artifact_id": checked.artifact_id,
+            "tooling_image": checked.tooling_image,
+        });
+        let progress = self.progress.get_mut(label).context("unknown root")?;
+        progress.release = Some(checked);
+        progress.selection = selection;
+        progress.done.insert(Stage::Release);
+        Ok(json!({"ok": true, "released": true, "release": reported}))
+    }
+
+    /// A deploy's selection check, just before its locked plan: the app's
+    /// selection, read again at its exact generation, must name exactly the
+    /// candidate the root renders.
+    fn selected(&mut self, root: &Root) -> Result<Value> {
+        let label = root.label.as_str();
+        let app = root.app_id.clone().context("day2-app needs its app")?;
+        let releases = self.request.releases.clone().context("releases")?;
+        let candidate = self.progress[label]
+            .release
+            .as_ref()
+            .context("a deploy checks its selection after its release")?
+            .candidate
+            .clone();
+        match release::selection(self.effects.store.as_mut(), &releases, &app, &candidate) {
+            Ok(selection) => {
+                let progress = self.progress.get_mut(label).context("unknown root")?;
+                progress.selection = Some(selection);
+                progress.done.insert(Stage::Selected);
+                Ok(json!({"ok": true}))
+            }
+            Err(error) => {
+                self.fail(
+                    label,
+                    Stage::Selected,
+                    Failure::Release,
+                    &format!("{error:#}"),
+                )?;
+                Ok(json!({"ok": false}))
+            }
+        }
+    }
+
+    /// A deploy's target: the `instance.json` the root's plan would publish, from
+    /// a plan of only the instance ConfigMap, without the state lock, into its own
+    /// plan file that is never applied. It is written to `instance.json` (0600) in
+    /// the root's directory, with the plan as `target.json` and `target.txt`.
+    fn target(&mut self, root: &Root) -> Result<Value> {
+        let label = root.label.as_str();
+        let directory = self.output.join(label.replace('/', "-"));
+        let layout = self.layouts[label].clone();
+        let rendered = (|| -> Result<Value> {
+            let credentials = Credentials {
+                kubeconfig: self.kubeconfig.as_deref(),
+                dns_token: None,
+            };
+            let (args, env) = invocation(
+                Mode::Deploy,
+                Stage::Target,
+                root,
+                &layout,
+                false,
+                &credentials,
+            );
+            let mut command = self.engine(&[])?;
+            command.args(args).envs(env);
+            crate::process::run(
+                &mut command,
+                &directory,
+                &directory.join("target.log"),
+                DEPLOY_PLAN.run,
+            )?;
+            let before = day2::digest(&fs::read(&layout.target)?);
+            let shown_layout = Layout {
+                plan: layout.target.clone(),
+                ..layout.clone()
+            };
+            let (args, env) = invocation(
+                Mode::Deploy,
+                Stage::Show,
+                root,
+                &shown_layout,
+                false,
+                &credentials,
+            );
+            let mut command = self.engine(&[])?;
+            command.args(args.clone()).envs(env.clone());
+            let shown = capture(
+                command,
+                Some(&directory.join("target-show.log")),
+                Duration::from_secs(300),
+                SHOW_LIMIT,
+            )?;
+            let mut text = self.engine(&[])?;
+            text.args(args.iter().filter(|arg| arg.as_os_str() != "-json"))
+                .envs(env);
+            let readable = capture(
+                text,
+                Some(&directory.join("target-text.log")),
+                Duration::from_secs(300),
+                SHOW_LIMIT,
+            )?;
+            ensure!(
+                day2::digest(&fs::read(&layout.target)?) == before,
+                "the targeted plan changed while it was shown"
+            );
+            fs::write(directory.join("target.json"), &shown)?;
+            fs::write(directory.join("target.txt"), readable)?;
+            let instance = target_instance(&shown)?;
+            let path = directory.join("instance.json");
+            crate::instance_candidate::tools::write_private(&path, &instance)?;
+            Ok(json!({"path": path, "digest": day2::digest(&instance), "bytes": instance.len()}))
+        })();
+        match rendered {
+            Ok(file) => {
+                let progress = self.progress.get_mut(label).context("unknown root")?;
+                progress.target = Some(file.clone());
+                progress.done.insert(Stage::Target);
+                Ok(json!({"ok": true, "instance": file}))
+            }
+            Err(error) => {
+                self.fail(
+                    label,
+                    Stage::Target,
+                    Failure::Stage(Stage::Target),
+                    &format!("{error:#}"),
+                )?;
+                Ok(json!({"ok": false, "instance": null}))
+            }
+        }
+    }
+
     /// The session's receipt. It is written even when the output audit fails, so
     /// an apply that changed infrastructure always leaves one, then marked failed.
     pub fn receipt(&self) -> Result<Value> {
@@ -1430,17 +1997,28 @@ impl Session {
         let mode = self.request.mode;
         let mut roots = Vec::new();
         let mut ok = true;
-        // In an apply, the roots after a failed shared root never run.
+        // In an apply, the roots after a failed shared root never run, nor a
+        // day2-app root whose app's edge did not apply.
         let mut stopped = false;
+        let mut unapplied = BTreeSet::new();
         for root in &self.request.roots {
             let progress = &self.progress[&root.label];
+            let blocked = needs(root).iter().any(|needed| unapplied.contains(needed));
             let status = match progress.failed {
                 Some(failure) => status(failure),
-                None if stopped && progress.done.is_empty() => "skipped",
+                None if progress.unreleased => "unreleased",
+                None if mode == Mode::Apply && (stopped || blocked) && progress.done.is_empty() => {
+                    "skipped"
+                }
+                // A deploy that stopped before its apply (its own step failed) leaves the
+                // root prepared and not applied.
+                None if mode == Mode::Deploy && !progress.done.contains(&Stage::Apply) => {
+                    "not_applied"
+                }
                 None => {
                     let last = match mode {
                         Mode::Plan => Stage::Show,
-                        Mode::Apply => Stage::Apply,
+                        Mode::Apply | Mode::Deploy => Stage::Apply,
                     };
                     ensure!(
                         progress.done.contains(&last),
@@ -1451,11 +2029,17 @@ impl Session {
                     match (mode, progress.changes.is_empty()) {
                         (_, true) => "no_changes",
                         (Mode::Plan, false) => "changes",
-                        (Mode::Apply, false) => "applied",
+                        (Mode::Apply | Mode::Deploy, false) => "applied",
                     }
                 }
             };
             ok &= progress.failed.is_none();
+            if status.starts_with("failed_")
+                || status.starts_with("refused_")
+                || status == "skipped"
+            {
+                unapplied.insert(root.label.clone());
+            }
             stopped |= mode == Mode::Apply
                 && progress.failed.is_some()
                 && SHARED.contains(&root.stack.as_str());
@@ -1481,10 +2065,24 @@ impl Session {
                 "plan_digest": digest("plan.bin")?,
                 "show_digest": digest("show.json")?,
                 "logs": directory,
+                "release": progress.release.as_ref().map(|release| {
+                    let record = match (&progress.selection, &self.request.candidate) {
+                        (_, Some(path)) if mode == Mode::Deploy => path.display().to_string(),
+                        (Some(selection), _) => selection.uri.clone(),
+                        _ => String::new(),
+                    };
+                    release::summary(
+                        release,
+                        if mode == Mode::Deploy { "candidate" } else { "selection" },
+                        &record,
+                        progress.selection.as_ref(),
+                    )
+                }),
+                "target": progress.target,
             }));
         }
         let mut receipt = json!({
-            "format": 1,
+            "format": RECEIPT_FORMAT,
             "mode": mode.name(),
             "ok": ok && audited.is_ok(),
             "commit": self.request.commit,
@@ -1511,8 +2109,10 @@ impl Session {
 
 /// What an apply does at a root's apply stage, from its shown plan: complete the
 /// root without the engine when nothing changes (`Ok(false)`), refuse a plan that
-/// destroys or differs from the reviewed one, and otherwise run it (`Ok(true)`).
+/// destroys or, in an apply, differs from the reviewed one, and otherwise run it
+/// (`Ok(true)`). A deploy has no reviewed plan: its selection binds it.
 fn apply_gate(
+    mode: Mode,
     changes: &[Value],
     destroys: &[String],
     review: &str,
@@ -1528,7 +2128,7 @@ fn apply_gate(
                 destroys.join(", ")
             ),
         ))
-    } else if reviewed.map(String::as_str) != Some(review) {
+    } else if mode != Mode::Deploy && reviewed.map(String::as_str) != Some(review) {
         Err((
             Failure::Unreviewed,
             "the plan's changes differ from the reviewed plan's, or the reviewed plan could \
@@ -1544,6 +2144,10 @@ fn apply_gate(
 fn status(failure: Failure) -> &'static str {
     match failure {
         Failure::Credentials => "failed_credentials",
+        Failure::Inputs => "failed_inputs",
+        Failure::Release => "failed_release",
+        Failure::Stage(Stage::Target) => "failed_target",
+        Failure::Stage(Stage::Release | Stage::Selected) => "failed_release",
         Failure::Stage(Stage::Init) => "failed_init",
         Failure::Stage(Stage::Plan) => "failed_plan",
         Failure::Stage(Stage::Show) => "failed_show",
@@ -1647,6 +2251,31 @@ pub fn changes(shown: &[u8]) -> Result<Vec<Value>> {
         }
     }
     Ok(found)
+}
+
+/// The `instance.json` a deploy's targeted plan would publish, from its
+/// `tofu show -json`: the one instance ConfigMap change's known
+/// `data["instance.json"]`, byte for byte as OpenTofu holds it.
+pub fn target_instance(shown: &[u8]) -> Result<Vec<u8>> {
+    let plan: Value = serde_json::from_slice(shown).context("plan JSON")?;
+    let found: Vec<&Value> = plan["resource_changes"]
+        .as_array()
+        .context("plan has no resource changes")?
+        .iter()
+        .filter(|change| change["address"] == TARGET)
+        .collect();
+    let [change] = found.as_slice() else {
+        bail!("the targeted plan has no single {TARGET}");
+    };
+    let unknown = &change["change"]["after_unknown"]["data"];
+    ensure!(
+        *unknown != json!(true) && unknown["instance.json"] != json!(true),
+        "the targeted plan does not know the instance's instance.json"
+    );
+    let instance = change["change"]["after"]["data"]["instance.json"]
+        .as_str()
+        .context("the targeted plan does not render the instance's instance.json")?;
+    Ok(instance.as_bytes().to_vec())
 }
 
 /// The resources a saved plan would delete (a replacement included) or forget,
@@ -1824,7 +2453,44 @@ mod tests {
                 })
                 .collect(),
             reviewed: None,
+            releases: None,
+            candidate: None,
         }
+    }
+
+    /// The synthetic `links` app's edge and day2-app roots after the shared roots, as `instance plan` renders them.
+    fn app_request(mode: Mode) -> Request {
+        let mut request = request();
+        request.mode = mode;
+        request.roots.truncate(3);
+        request.roots.push(Root {
+            label: "app-edge/links".into(),
+            stack: "app-edge".into(),
+            app_id: Some("links".into()),
+            bucket: "exampleco-tools-tofu-state".into(),
+            prefix: "platform/app/links".into(),
+            inputs: "gcp/config/app-edge/links.tfvars".into(),
+            variables: r#"{"app_id":"links"}"#.into(),
+        });
+        request.roots.push(Root {
+            label: "day2-app/links".into(),
+            stack: DAY2_APP.into(),
+            app_id: Some("links".into()),
+            bucket: "exampleco-tools-links-state".into(),
+            prefix: "day2-app/links".into(),
+            inputs: "gcp/config/apps/links.tfvars".into(),
+            variables: r#"{"app_id":"links","namespace":"app-links"}"#.into(),
+        });
+        request.releases = Some(release::tests::releases());
+        match mode {
+            Mode::Plan => {}
+            Mode::Apply => request.reviewed = Some("reviewed".into()),
+            Mode::Deploy => {
+                request.roots.drain(..4);
+                request.candidate = Some("candidate.json".into());
+            }
+        }
+        request
     }
 
     /// A scratch repository; returns its path and the commit of `files`.
@@ -1873,7 +2539,9 @@ mod tests {
             data: "/out/root/data".into(),
             inputs: "/out/root/inputs.tfvars".into(),
             rendered: "/out/root/rendered.tfvars.json".into(),
+            release: "/out/root/release.tfvars.json".into(),
             plan: "/out/root/plan.bin".into(),
+            target: "/out/root/target.bin".into(),
         }
     }
 
@@ -2287,7 +2955,7 @@ mod tests {
         request.checkout = platform.clone();
         request.output = scratch.path().join("plan");
         // A request for another mode than the host started is refused first.
-        let error = Session::prepare(&write(&request), Mode::Apply)
+        let error = Session::prepare(&write(&request), Mode::Apply, Effects::native())
             .err()
             .unwrap();
         assert!(
@@ -2297,12 +2965,12 @@ mod tests {
         );
         assert!(!scratch.path().join("plan").exists());
         // Not a git checkout.
-        assert!(Session::prepare(&write(&request), Mode::Plan).is_err());
+        assert!(Session::prepare(&write(&request), Mode::Plan, Effects::native()).is_err());
         assert!(!scratch.path().join("plan").exists());
         // An output directory inside the instance or the checkout.
         for inside in [instance.join("plan"), platform.join("plan")] {
             request.output = inside.clone();
-            let error = Session::prepare(&write(&request), Mode::Plan)
+            let error = Session::prepare(&write(&request), Mode::Plan, Effects::native())
                 .err()
                 .unwrap();
             assert!(
@@ -2315,7 +2983,7 @@ mod tests {
         request.output = scratch.path().join("plan");
         std::os::unix::fs::symlink("missing", instance.join("gcp/config/oauth-workloads.json"))
             .unwrap();
-        let error = Session::prepare(&write(&request), Mode::Plan)
+        let error = Session::prepare(&write(&request), Mode::Plan, Effects::native())
             .err()
             .unwrap();
         assert!(
@@ -2535,7 +3203,7 @@ mod tests {
             .map(|root| (root.label.clone(), format!("sha256:v-{}", root.label)))
             .collect();
         let receipt = || {
-            json!({"format": 1, "mode": "plan", "ok": true, "commit": request.commit,
+            json!({"format": 2, "mode": "plan", "ok": true, "commit": request.commit,
                 "stacks_tree": "tree", "roots": request.roots.iter().map(|root| json!({
                     "label": root.label,
                     "backend": {"bucket": root.bucket, "prefix": root.prefix},
@@ -2554,10 +3222,11 @@ mod tests {
             reviewed_changes(scratch.path(), &request, "tree", &inputs, &rendered)
         };
         let reviewed = check(&receipt()).unwrap();
-        assert_eq!(reviewed["app-edge/home"], "sha256:r-app-edge/home");
+        assert_eq!(reviewed.changes["app-edge/home"], "sha256:r-app-edge/home");
         type Refusal = (fn(&mut Value), &'static str);
-        let refusals: [Refusal; 7] = [
+        let refusals: [Refusal; 8] = [
             (|r| r["mode"] = json!("apply"), "must hold an instance plan"),
+            (|r| r["format"] = json!(1), "this platform's receipt format"),
             (
                 |r| r["audit_error"] = json!("unexpected file"),
                 "must hold an instance plan",
@@ -2595,7 +3264,9 @@ mod tests {
         partial["ok"] = json!(false);
         partial["roots"][2]["status"] = json!("failed_credentials");
         let reviewed = check(&partial).unwrap();
-        assert!(reviewed.contains_key("cluster") && !reviewed.contains_key("tenancy"));
+        assert!(
+            reviewed.changes.contains_key("cluster") && !reviewed.changes.contains_key("tenancy")
+        );
     }
 
     #[test]
@@ -2648,16 +3319,36 @@ mod tests {
     fn an_apply_runs_only_an_unrefused_plan_with_changes() {
         let reviewed = "sha256:r".to_owned();
         let change = [json!({"address": "google_sa.new", "actions": ["create"]})];
-        assert_eq!(apply_gate(&[], &[], "sha256:other", None), Ok(false));
         assert_eq!(
-            apply_gate(&change, &[], "sha256:r", Some(&reviewed)),
+            apply_gate(Mode::Apply, &[], &[], "sha256:other", None),
+            Ok(false)
+        );
+        assert_eq!(
+            apply_gate(Mode::Apply, &change, &[], "sha256:r", Some(&reviewed)),
             Ok(true)
         );
         let refused = |destroys: &[String], review, reviewed| {
-            apply_gate(&change, destroys, review, reviewed)
+            apply_gate(Mode::Apply, &change, destroys, review, reviewed)
                 .unwrap_err()
                 .0
         };
+        // A deploy has no reviewed plan; its selection binds it, and it still never destroys.
+        assert_eq!(
+            apply_gate(Mode::Deploy, &change, &[], "sha256:r", None),
+            Ok(true)
+        );
+        assert_eq!(
+            apply_gate(
+                Mode::Deploy,
+                &change,
+                &["google_sa.old".into()],
+                "sha256:r",
+                None
+            )
+            .unwrap_err()
+            .0,
+            Failure::Destroys
+        );
         assert_eq!(
             refused(&["google_sa.old".into()], "sha256:r", Some(&reviewed)),
             Failure::Destroys
@@ -2667,5 +3358,813 @@ mod tests {
             Failure::Unreviewed
         );
         assert_eq!(refused(&[], "sha256:r", None), Failure::Unreviewed);
+    }
+
+    #[test]
+    fn day2_app_roots_follow_every_edge_with_their_own_state_and_releases() {
+        validate(&app_request(Mode::Plan)).unwrap();
+        validate(&app_request(Mode::Apply)).unwrap();
+        validate(&app_request(Mode::Deploy)).unwrap();
+        let cases: [fn(&mut Request); 12] = [
+            |r| r.roots[4].bucket = "exampleco-tools-tofu-state".into(),
+            |r| r.roots[4].bucket = "exampleco-tools-home-state".into(),
+            |r| r.roots[4].prefix = "day2-app/home".into(),
+            |r| r.roots[4].inputs = "gcp/config/app-edge/links.tfvars".into(),
+            |r| r.roots[4].app_id = None,
+            |r| r.releases = None,
+            |r| r.roots.swap(3, 4),
+            |r| {
+                r.roots.remove(3);
+            },
+            |r| r.candidate = Some("candidate.json".into()),
+            |r| r.releases.as_mut().unwrap().bucket = "other-tofu-state".into(),
+            |r| r.releases.as_mut().unwrap().forge.org = "Tools".into(),
+            |r| r.roots[4].label = "day2-app/home".into(),
+        ];
+        for (index, edit) in cases.iter().enumerate() {
+            let mut request = app_request(Mode::Plan);
+            edit(&mut request);
+            assert!(validate(&request).is_err(), "case {index}");
+        }
+        // A deploy runs exactly one day2-app root, for a candidate, with no reviewed plan.
+        let deploys: [fn(&mut Request); 5] = [
+            |r| r.candidate = None,
+            |r| r.reviewed = Some("reviewed".into()),
+            |r| r.roots.push(r.roots[0].clone()),
+            |r| r.roots = request().roots[..1].to_vec(),
+            |r| r.releases = None,
+        ];
+        for (index, edit) in deploys.iter().enumerate() {
+            let mut request = app_request(Mode::Deploy);
+            edit(&mut request);
+            assert!(validate(&request).is_err(), "deploy case {index}");
+        }
+    }
+
+    #[test]
+    fn a_day2_app_root_plans_with_its_release_last_and_a_deploy_renders_only_its_target() {
+        let request = app_request(Mode::Plan);
+        let root = &request.roots[4];
+        let credentials = Credentials {
+            kubeconfig: Some(Path::new("/private/kubeconfig")),
+            dns_token: Some("token"),
+        };
+        let (plan, env) = invocation(
+            Mode::Plan,
+            Stage::Plan,
+            root,
+            &layout(),
+            false,
+            &credentials,
+        );
+        assert_eq!(
+            strings(&plan),
+            [
+                "-chdir=/out/root/stack",
+                "plan",
+                "-input=false",
+                "-no-color",
+                "-lock=false",
+                "-var-file=/out/root/inputs.tfvars",
+                "-var-file=/out/root/rendered.tfvars.json",
+                "-var-file=/out/root/release.tfvars.json",
+                "-out=/out/root/plan.bin",
+                "-var=kubeconfig_path=/private/kubeconfig",
+            ]
+        );
+        // The cluster, never the DNS token.
+        let names: Vec<&str> = env.iter().map(|(name, _)| *name).collect();
+        assert!(names.contains(&"KUBECONFIG") && !names.contains(&"CLOUDFLARE_API_TOKEN"));
+        // A deploy's plan takes the lock; its target never does, and plans only the ConfigMap into its own file.
+        let (plan, _) = invocation(
+            Mode::Deploy,
+            Stage::Plan,
+            root,
+            &layout(),
+            false,
+            &credentials,
+        );
+        assert!(strings(&plan).contains(&"-lock-timeout=300s".to_owned()));
+        let (target, _) = invocation(
+            Mode::Deploy,
+            Stage::Target,
+            root,
+            &layout(),
+            false,
+            &credentials,
+        );
+        assert_eq!(
+            strings(&target),
+            [
+                "-chdir=/out/root/stack",
+                "plan",
+                "-input=false",
+                "-no-color",
+                "-lock=false",
+                "-target=kubernetes_config_map_v1.instance",
+                "-var-file=/out/root/inputs.tfvars",
+                "-var-file=/out/root/rendered.tfvars.json",
+                "-var-file=/out/root/release.tfvars.json",
+                "-out=/out/root/target.bin",
+                "-var=kubeconfig_path=/private/kubeconfig",
+            ]
+        );
+        // An app edge has no release file.
+        let (edge, _) = invocation(
+            Mode::Plan,
+            Stage::Plan,
+            &request.roots[3],
+            &layout(),
+            false,
+            &credentials,
+        );
+        assert!(
+            !strings(&edge)
+                .iter()
+                .any(|arg| arg.contains("release.tfvars.json"))
+        );
+    }
+
+    #[test]
+    fn a_deploy_on_a_new_root_initializes_the_real_backend_so_its_apply_creates_state() {
+        let request = app_request(Mode::Deploy);
+        let root = &request.roots[0];
+        assert!(plans_locally(Mode::Plan, true));
+        assert!(!plans_locally(Mode::Deploy, true) && !plans_locally(Mode::Apply, true));
+        let (init, _) = invocation(
+            Mode::Deploy,
+            Stage::Init,
+            root,
+            &layout(),
+            plans_locally(Mode::Deploy, true),
+            &Credentials {
+                kubeconfig: None,
+                dns_token: None,
+            },
+        );
+        assert!(
+            strings(&init)
+                .contains(&"-backend-config=bucket=exampleco-tools-links-state".to_owned())
+                && strings(&init).contains(&"-backend-config=prefix=day2-app/links".to_owned())
+        );
+        // A deploy builds its own private kubeconfig exactly as the session does.
+        assert_eq!(
+            strings(&kubeconfig_args("day2", "us-central1-a", "exampleco-tools")),
+            [
+                "container",
+                "clusters",
+                "get-credentials",
+                "day2",
+                "--zone",
+                "us-central1-a",
+                "--project",
+                "exampleco-tools"
+            ]
+        );
+        // A first install skips the target: release, init, selected, plan, show and apply are admitted in order.
+        let mut progress: BTreeMap<String, Progress> =
+            [(root.label.clone(), Progress::default())].into();
+        for stage in [
+            Stage::Release,
+            Stage::Init,
+            Stage::Selected,
+            Stage::Plan,
+            Stage::Show,
+            Stage::Apply,
+        ] {
+            admit(Mode::Deploy, &request.roots, &progress, &root.label, stage).unwrap();
+            progress.get_mut(&root.label).unwrap().done.insert(stage);
+        }
+    }
+
+    #[test]
+    fn deploy_deadlines_are_shorter_than_an_apply_s() {
+        assert_eq!(
+            Mode::Deploy.deadline(Stage::Apply),
+            Deadline {
+                run: Duration::from_secs(1800),
+                grace: Duration::from_secs(120)
+            }
+        );
+        assert_eq!(
+            Mode::Deploy.deadline(Stage::Plan),
+            Deadline {
+                run: Duration::from_secs(900),
+                grace: Duration::from_secs(120)
+            }
+        );
+        assert_eq!(Mode::Apply.deadline(Stage::Apply), ROOTS_APPLY);
+        assert_eq!(Mode::Apply.deadline(Stage::Plan), ROOTS_PLAN);
+        assert_eq!(ROOTS_APPLY.run, Duration::from_secs(7200));
+        assert_eq!(ROOTS_APPLY.grace, Duration::from_secs(1800));
+        assert_eq!(LOCK_TIMEOUT, "-lock-timeout=300s");
+    }
+
+    #[test]
+    fn a_day2_app_root_reads_its_release_first_and_waits_for_its_own_edge() {
+        let request = app_request(Mode::Apply);
+        let roots = &request.roots;
+        let fresh = || -> BTreeMap<String, Progress> {
+            roots
+                .iter()
+                .map(|root| (root.label.clone(), Progress::default()))
+                .collect()
+        };
+        let refused = |mode, progress: &BTreeMap<String, Progress>, label, stage| {
+            format!(
+                "{:#}",
+                admit(mode, roots, progress, label, stage).unwrap_err()
+            )
+        };
+        let mut progress = fresh();
+        // A plan reads the release before init; no other root reads one.
+        assert!(
+            refused(Mode::Plan, &progress, "day2-app/links", Stage::Init).contains("needs release")
+        );
+        assert!(
+            refused(Mode::Plan, &progress, "app-edge/links", Stage::Release)
+                .contains("only a day2-app root")
+        );
+        admit(
+            Mode::Plan,
+            roots,
+            &progress,
+            "day2-app/links",
+            Stage::Release,
+        )
+        .unwrap();
+        // Only a deploy renders a target or checks its selection.
+        for stage in [Stage::Target, Stage::Selected] {
+            progress.get_mut("day2-app/links").unwrap().done = [Stage::Release, Stage::Init].into();
+            assert!(
+                refused(Mode::Plan, &progress, "day2-app/links", stage).contains("only a deploy")
+            );
+        }
+        // An unreleased root runs nothing else.
+        progress.get_mut("day2-app/links").unwrap().done = [Stage::Release].into();
+        progress.get_mut("day2-app/links").unwrap().unreleased = true;
+        assert!(
+            refused(Mode::Plan, &progress, "day2-app/links", Stage::Init)
+                .contains("no release selection")
+        );
+        // An apply runs a day2-app root only once the shared roots and its own app's edge have applied.
+        let mut progress = fresh();
+        for shared in ["project", "cluster", "tenancy"] {
+            progress.get_mut(shared).unwrap().done =
+                [Stage::Init, Stage::Plan, Stage::Show, Stage::Apply].into();
+        }
+        assert!(
+            refused(Mode::Apply, &progress, "day2-app/links", Stage::Release)
+                .contains("runs only after app-edge/links has applied")
+        );
+        progress.get_mut("app-edge/links").unwrap().failed = Some(Failure::Destroys);
+        assert!(
+            refused(Mode::Apply, &progress, "day2-app/links", Stage::Release)
+                .contains("app-edge/links")
+        );
+        progress.get_mut("app-edge/links").unwrap().failed = None;
+        progress.get_mut("app-edge/links").unwrap().done =
+            [Stage::Init, Stage::Plan, Stage::Show, Stage::Apply].into();
+        admit(
+            Mode::Apply,
+            roots,
+            &progress,
+            "day2-app/links",
+            Stage::Release,
+        )
+        .unwrap();
+        // A deploy renders its target after init and before its selection, and plans only after the selection.
+        let deploy = app_request(Mode::Deploy);
+        let mut progress: BTreeMap<String, Progress> =
+            [("day2-app/links".to_owned(), Progress::default())].into();
+        let refused = |progress: &BTreeMap<String, Progress>, stage| {
+            format!(
+                "{:#}",
+                admit(
+                    Mode::Deploy,
+                    &deploy.roots,
+                    progress,
+                    "day2-app/links",
+                    stage
+                )
+                .unwrap_err()
+            )
+        };
+        progress.get_mut("day2-app/links").unwrap().done = [Stage::Release, Stage::Init].into();
+        assert!(refused(&progress, Stage::Plan).contains("plan needs selected first"));
+        admit(
+            Mode::Deploy,
+            &deploy.roots,
+            &progress,
+            "day2-app/links",
+            Stage::Target,
+        )
+        .unwrap();
+        progress.get_mut("day2-app/links").unwrap().done =
+            [Stage::Release, Stage::Init, Stage::Target].into();
+        assert!(refused(&progress, Stage::Target).contains("duplicate target"));
+        assert!(refused(&progress, Stage::Apply).contains("apply needs show first"));
+        progress.get_mut("day2-app/links").unwrap().done =
+            [Stage::Release, Stage::Init, Stage::Selected].into();
+        assert!(refused(&progress, Stage::Target).contains("before it checks its selection"));
+        assert_eq!(status(Failure::Inputs), "failed_inputs");
+        assert_eq!(status(Failure::Release), "failed_release");
+        assert_eq!(status(Failure::Stage(Stage::Target)), "failed_target");
+    }
+
+    #[test]
+    fn an_apply_runs_a_day2_app_root_only_with_its_reviewed_release() {
+        let reviewed: BTreeMap<String, Option<String>> = [
+            ("day2-app/go".to_owned(), Some("sha256:a".to_owned())),
+            ("day2-app/home".to_owned(), None),
+        ]
+        .into();
+        assert!(release_reviewed(&reviewed, "day2-app/go", Some("sha256:a")).is_ok());
+        assert!(release_reviewed(&reviewed, "day2-app/home", None).is_ok());
+        // A root the reviewed plan could not plan is left to the changes gate.
+        assert!(release_reviewed(&reviewed, "day2-app/links", Some("sha256:x")).is_ok());
+        assert_eq!(
+            release_reviewed(&reviewed, "day2-app/go", Some("sha256:b"))
+                .unwrap_err()
+                .0,
+            Failure::Unreviewed
+        );
+        assert_eq!(
+            release_reviewed(&reviewed, "day2-app/home", Some("sha256:a"))
+                .unwrap_err()
+                .0,
+            Failure::Unreviewed
+        );
+        assert_eq!(
+            release_reviewed(&reviewed, "day2-app/go", None)
+                .unwrap_err()
+                .0,
+            Failure::Release
+        );
+    }
+
+    #[test]
+    fn a_reviewed_plan_records_each_day2_app_root_s_release() {
+        let scratch = tempfile::tempdir().unwrap();
+        let request = app_request(Mode::Apply);
+        let digests = |prefix: &str| -> BTreeMap<String, String> {
+            request
+                .roots
+                .iter()
+                .map(|root| {
+                    (
+                        root.label.clone(),
+                        format!("sha256:{prefix}-{}", root.label),
+                    )
+                })
+                .collect()
+        };
+        let (inputs, rendered) = (digests("i"), digests("v"));
+        let receipt = |status: &str, release: Value| {
+            json!({"format": 2, "mode": "plan", "ok": true, "commit": request.commit,
+                "stacks_tree": "tree", "roots": request.roots.iter().map(|root| json!({
+                    "label": root.label,
+                    "backend": {"bucket": root.bucket, "prefix": root.prefix},
+                    "inputs": {"path": root.inputs, "digest": inputs[&root.label]},
+                    "variables": rendered[&root.label],
+                    "status": if root.stack == DAY2_APP { status } else { "no_changes" },
+                    "review": "sha256:r",
+                    "release": if root.stack == DAY2_APP { release.clone() } else { Value::Null },
+                })).collect::<Vec<_>>()})
+        };
+        let check = |receipt: &Value| {
+            fs::write(
+                scratch.path().join("receipt.json"),
+                serde_json::to_vec(receipt).unwrap(),
+            )
+            .unwrap();
+            reviewed_changes(scratch.path(), &request, "tree", &inputs, &rendered)
+        };
+        let reviewed = check(&receipt("changes", json!({"variables": "sha256:release"}))).unwrap();
+        assert_eq!(
+            reviewed.releases["day2-app/links"],
+            Some("sha256:release".to_owned())
+        );
+        let reviewed = check(&receipt("unreleased", Value::Null)).unwrap();
+        assert_eq!(reviewed.releases["day2-app/links"], None);
+        assert!(!reviewed.changes.contains_key("day2-app/links"));
+        let reviewed = check(&receipt("failed_release", Value::Null)).unwrap();
+        assert!(!reviewed.releases.contains_key("day2-app/links"));
+        // A planned day2-app root must say which release it planned.
+        assert!(check(&receipt("changes", Value::Null)).is_err());
+    }
+
+    #[test]
+    fn a_target_is_the_known_instance_json_of_the_one_instance_config_map() {
+        let shown = |change: Value| {
+            serde_json::to_vec(&json!({"format_version": "1.2", "resource_changes": [
+                {"address": "terraform_data.native_admission", "change": {"actions": ["no-op"]}},
+                change,
+            ]}))
+            .unwrap()
+        };
+        let instance = "{\"apps\":{\"links\":{\"artifact\":\"artifacts/ab\"}},\"name\":\"é\"}";
+        let config_map = |after: Value, unknown: Value| {
+            json!({"address": TARGET, "change": {"actions": ["no-op"], "after": after,
+                "after_unknown": unknown}})
+        };
+        assert_eq!(
+            target_instance(&shown(config_map(
+                json!({"data": {"instance.json": instance}}),
+                json!({"data": {}})
+            )))
+            .unwrap(),
+            instance.as_bytes()
+        );
+        for (after, unknown) in [
+            (
+                json!({"data": {"instance.json": instance}}),
+                json!({"data": true}),
+            ),
+            (
+                json!({"data": {}}),
+                json!({"data": {"instance.json": true}}),
+            ),
+            (json!({"data": {}}), json!({})),
+            (json!({"data": {"instance.json": 1}}), json!({})),
+        ] {
+            assert!(target_instance(&shown(config_map(after, unknown))).is_err());
+        }
+        let twice = serde_json::to_vec(&json!({"format_version": "1.2", "resource_changes": [
+            config_map(json!({"data": {"instance.json": instance}}), json!({})),
+            config_map(json!({"data": {"instance.json": instance}}), json!({})),
+        ]}))
+        .unwrap();
+        assert!(target_instance(&twice).is_err());
+        assert!(target_instance(br#"{"format_version":"1.2","resource_changes":[]}"#).is_err());
+    }
+
+    /// A session staged by hand for `request`, with release state in `objects`, the release bucket holding
+    /// `manifest`, and each root's committed inputs (empty unless given).
+    fn staged(
+        request: Request,
+        objects: release::tests::Objects,
+        manifest: &[u8],
+        committed: &[(&str, &[u8])],
+    ) -> (tempfile::TempDir, Session) {
+        let scratch = tempfile::tempdir().unwrap();
+        let output = scratch.path().join("out");
+        fs::create_dir(&output).unwrap();
+        let bucket = crate::instance_source::tests::Fake::default();
+        let identity = day2::sdk_release::BlobIdentity::of(manifest);
+        bucket.0.borrow_mut().objects.insert(
+            format!(
+                "{}/{}",
+                release::tests::releases().objects(),
+                &identity.digest[7..]
+            ),
+            manifest.to_vec(),
+        );
+        let mut layouts = BTreeMap::new();
+        for root in &request.roots {
+            let directory = output.join(root.label.replace('/', "-"));
+            fs::create_dir(&directory).unwrap();
+            layouts.insert(
+                root.label.clone(),
+                Layout {
+                    config: output.join("tofurc"),
+                    stack: directory.join("stack"),
+                    data: directory.join("data"),
+                    inputs: directory.join("inputs.tfvars"),
+                    rendered: directory.join("rendered.tfvars.json"),
+                    release: directory.join("release.tfvars.json"),
+                    plan: directory.join("plan.bin"),
+                    target: directory.join("target.bin"),
+                },
+            );
+        }
+        let committed = request
+            .roots
+            .iter()
+            .map(|root| {
+                let bytes = committed
+                    .iter()
+                    .find(|(label, _)| *label == root.label)
+                    .map_or(Vec::new(), |(_, bytes)| bytes.to_vec());
+                (root.label.clone(), bytes)
+            })
+            .collect();
+        let labels = |value: &str| -> BTreeMap<String, String> {
+            request
+                .roots
+                .iter()
+                .map(|root| (root.label.clone(), value.to_owned()))
+                .collect()
+        };
+        let session = Session {
+            effects: Effects {
+                store: Box::new(objects),
+                tools: Box::new(bucket),
+                cache: Some(scratch.path().join("cache")),
+            },
+            committed,
+            instance: scratch.path().join("instance"),
+            instance_commit: String::new(),
+            instance_clean: false,
+            platform: scratch.path().join("platform"),
+            stacks_tree: "tree".into(),
+            output,
+            engine_digest: "sha256:e".into(),
+            layouts,
+            inputs: labels("sha256:i"),
+            rendered: labels("sha256:v"),
+            private: tempfile::tempdir().unwrap(),
+            kubeconfig: None,
+            kubeconfig_current: true,
+            kubeconfig_refreshed: false,
+            dns_token: None,
+            credentials_read: true,
+            reviewed: Reviewed::default(),
+            progress: request
+                .roots
+                .iter()
+                .map(|root| (root.label.clone(), Progress::default()))
+                .collect(),
+            request,
+        };
+        (scratch, session)
+    }
+
+    fn selection(candidate: &Value) -> release::tests::Objects {
+        release::tests::stored(&json!({"version": 1, "status": "ready", "candidate": candidate}))
+    }
+
+    #[test]
+    fn a_plan_reads_each_app_s_selection_and_renders_its_release() {
+        let (candidate, manifest) = crate::instance_candidate::tests::selected_candidate();
+        let (_scratch, mut session) = staged(
+            app_request(Mode::Plan),
+            selection(&candidate),
+            &manifest,
+            &[],
+        );
+        let result = session.operation("day2-app/links", "release").unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["released"], true);
+        assert_eq!(result["release"]["image"], candidate["image"]);
+        assert_eq!(
+            result["release"]["candidate"],
+            release::candidate_digest(&candidate).unwrap()
+        );
+        let written = fs::read(&session.layouts["day2-app/links"].release).unwrap();
+        assert_eq!(written, release::variables(&candidate).unwrap());
+        assert!(
+            session.progress["day2-app/links"]
+                .done
+                .contains(&Stage::Release)
+        );
+        // An app with no selection is unreleased and runs nothing else.
+        let (_scratch, mut session) = staged(
+            app_request(Mode::Plan),
+            release::tests::Objects::default(),
+            &manifest,
+            &[],
+        );
+        let result = session.operation("day2-app/links", "release").unwrap();
+        assert_eq!(
+            result,
+            json!({"ok": true, "released": false, "release": null})
+        );
+        assert!(session.operation("day2-app/links", "init").is_err());
+        assert!(!session.layouts["day2-app/links"].release.exists());
+    }
+
+    #[test]
+    fn a_release_that_cannot_be_read_or_restates_an_owned_input_fails_only_its_root() {
+        let (candidate, manifest) = crate::instance_candidate::tests::selected_candidate();
+        let mut failing = release::tests::Objects::default();
+        failing.0.insert(release::tests::URI.into(), None);
+        let (_scratch, mut session) = staged(app_request(Mode::Plan), failing, &manifest, &[]);
+        let result = session.operation("day2-app/links", "release").unwrap();
+        assert_eq!(result["ok"], false);
+        assert_eq!(
+            session.progress["day2-app/links"].failed,
+            Some(Failure::Release)
+        );
+        let error =
+            fs::read_to_string(session.output.join("day2-app-links/release.error")).unwrap();
+        assert!(error.contains("not absence"), "{error}");
+        // The rest still run.
+        admit(
+            Mode::Plan,
+            &session.request.roots,
+            &session.progress,
+            "app-edge/links",
+            Stage::Init,
+        )
+        .unwrap();
+        // A committed copy of a rendered or platform-owned variable fails the root before anything is read.
+        for committed in [
+            b"namespace = \"app-other\"\n".as_slice(),
+            b"workload_name = \"x\"\n",
+            b"security_shell_contract = {\n  namespace = \"s\"\n  name = \"c\"\n}\n",
+        ] {
+            let (_scratch, mut session) = staged(
+                app_request(Mode::Plan),
+                selection(&candidate),
+                &manifest,
+                &[("day2-app/links", committed)],
+            );
+            session.operation("day2-app/links", "release").unwrap();
+            assert_eq!(
+                session.progress["day2-app/links"].failed,
+                Some(Failure::Inputs)
+            );
+            let error =
+                fs::read_to_string(session.output.join("day2-app-links/release.error")).unwrap();
+            assert!(
+                error.starts_with("gcp/config/apps/links.tfvars sets "),
+                "{error}"
+            );
+        }
+        // The bootstrap image and artifact may stay committed: the release wins over them.
+        let (_scratch, mut session) = staged(
+            app_request(Mode::Plan),
+            selection(&candidate),
+            &manifest,
+            &[(
+                "day2-app/links",
+                b"image = \"r/links/links@sha256:00\"\nartifact_id = \"00\"\n",
+            )],
+        );
+        assert_eq!(
+            session.operation("day2-app/links", "release").unwrap()["ok"],
+            true
+        );
+    }
+
+    #[test]
+    fn an_apply_refuses_a_release_that_changed_since_the_reviewed_plan() {
+        let (candidate, manifest) = crate::instance_candidate::tests::selected_candidate();
+        let applied = || {
+            let (scratch, mut session) = staged(
+                app_request(Mode::Apply),
+                selection(&candidate),
+                &manifest,
+                &[],
+            );
+            for label in ["project", "cluster", "tenancy", "app-edge/links"] {
+                session.progress.get_mut(label).unwrap().done =
+                    [Stage::Init, Stage::Plan, Stage::Show, Stage::Apply].into();
+            }
+            (scratch, session)
+        };
+        let variables = day2::digest(&release::variables(&candidate).unwrap());
+        let (_scratch, mut session) = applied();
+        session.reviewed.releases = [("day2-app/links".to_owned(), Some(variables))].into();
+        assert_eq!(
+            session.operation("day2-app/links", "release").unwrap()["ok"],
+            true
+        );
+        let (_scratch, mut session) = applied();
+        session.reviewed.releases = [("day2-app/links".to_owned(), None)].into();
+        session.operation("day2-app/links", "release").unwrap();
+        assert_eq!(
+            session.progress["day2-app/links"].failed,
+            Some(Failure::Unreviewed)
+        );
+    }
+
+    #[test]
+    fn a_deploy_renders_its_candidate_and_applies_only_once_the_selection_names_it() {
+        let (candidate, manifest) = crate::instance_candidate::tests::selected_candidate();
+        let deploy = |objects: release::tests::Objects, file: &[u8]| {
+            let (scratch, mut session) = staged(app_request(Mode::Deploy), objects, &manifest, &[]);
+            let path = scratch.path().join("candidate.json");
+            fs::write(&path, file).unwrap();
+            session.request.candidate = Some(path);
+            (scratch, session)
+        };
+        let record = crate::instance_candidate::record::encode(&candidate).unwrap();
+        // Not selected yet: the candidate still renders, so a target can be planned before the selection is written.
+        let (_scratch, mut session) = deploy(release::tests::Objects::default(), &record);
+        let result = session.operation("day2-app/links", "release").unwrap();
+        assert_eq!(result["released"], true);
+        assert_eq!(
+            result["release"]["tooling_image"],
+            candidate["binding"]["tooling_image"]
+        );
+        session
+            .progress
+            .get_mut("day2-app/links")
+            .unwrap()
+            .done
+            .insert(Stage::Init);
+        assert_eq!(
+            session.operation("day2-app/links", "selected").unwrap(),
+            json!({"ok": false})
+        );
+        assert_eq!(
+            session.progress["day2-app/links"].failed,
+            Some(Failure::Release)
+        );
+        // Selected: the check passes and the receipt records the selection it checked.
+        let (_scratch, mut session) = deploy(selection(&candidate), &record);
+        session.operation("day2-app/links", "release").unwrap();
+        session
+            .progress
+            .get_mut("day2-app/links")
+            .unwrap()
+            .done
+            .insert(Stage::Init);
+        assert_eq!(
+            session.operation("day2-app/links", "selected").unwrap(),
+            json!({"ok": true})
+        );
+        let receipt = session.receipt().unwrap();
+        let root = &receipt["roots"][0];
+        assert_eq!(receipt["format"], RECEIPT_FORMAT);
+        assert_eq!(receipt["mode"], "deploy");
+        assert_eq!(root["status"], "not_applied");
+        assert_eq!(root["release"]["source"], "candidate");
+        assert_eq!(root["release"]["status"], "ready");
+        assert_eq!(root["release"]["generation"], "1700000000000001");
+        assert_eq!(root["target"], Value::Null);
+        // Another candidate in the selection is refused.
+        let mut other = candidate.clone();
+        other["source_commit"] = json!("89abcdef0123456789abcdef0123456789abcdef");
+        let (_scratch, mut session) = deploy(selection(&other), &record);
+        session.operation("day2-app/links", "release").unwrap();
+        session
+            .progress
+            .get_mut("day2-app/links")
+            .unwrap()
+            .done
+            .insert(Stage::Init);
+        assert_eq!(
+            session.operation("day2-app/links", "selected").unwrap()["ok"],
+            false
+        );
+        // A candidate for another app, or a file that is not a record, fails the release.
+        let mut notes = candidate.clone();
+        notes["binding"]["app"] = json!("notes");
+        for file in [
+            crate::instance_candidate::record::encode(&notes).unwrap(),
+            b"not json".to_vec(),
+        ] {
+            let (_scratch, mut session) = deploy(selection(&candidate), &file);
+            assert_eq!(
+                session.operation("day2-app/links", "release").unwrap()["ok"],
+                false
+            );
+            assert_eq!(
+                session.progress["day2-app/links"].failed,
+                Some(Failure::Release)
+            );
+        }
+    }
+
+    #[test]
+    fn a_receipt_reports_unreleased_and_skipped_day2_app_roots() {
+        let (candidate, manifest) = crate::instance_candidate::tests::selected_candidate();
+        let (_scratch, mut session) = staged(
+            app_request(Mode::Apply),
+            selection(&candidate),
+            &manifest,
+            &[],
+        );
+        for label in ["project", "cluster", "tenancy"] {
+            session.progress.get_mut(label).unwrap().done =
+                [Stage::Init, Stage::Plan, Stage::Show, Stage::Apply].into();
+        }
+        // The app's edge failed, so its day2-app root never ran.
+        session.progress.get_mut("app-edge/links").unwrap().failed = Some(Failure::Destroys);
+        let receipt = session.receipt().unwrap();
+        let statuses: Vec<&str> = receipt["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|root| root["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                "no_changes",
+                "no_changes",
+                "no_changes",
+                "refused_destroy",
+                "skipped"
+            ]
+        );
+        assert_eq!(receipt["ok"], false);
+        fs::remove_file(session.output.join("receipt.json")).unwrap();
+        // An unreleased root is not a failure.
+        session.progress.get_mut("app-edge/links").unwrap().failed = None;
+        session.progress.get_mut("app-edge/links").unwrap().done =
+            [Stage::Init, Stage::Plan, Stage::Show, Stage::Apply].into();
+        session
+            .progress
+            .get_mut("day2-app/links")
+            .unwrap()
+            .unreleased = true;
+        let receipt = session.receipt().unwrap();
+        assert_eq!(receipt["roots"][4]["status"], "unreleased");
+        assert_eq!(receipt["roots"][4]["release"], Value::Null);
+        assert_eq!(receipt["ok"], true);
     }
 }

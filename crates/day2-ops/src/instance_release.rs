@@ -925,6 +925,21 @@ impl Publish {
     }
 }
 
+/// Only `reference`'s manifest, through `cache`: decoded as the one supported
+/// profile and pinned under `registry`. A day2-app root reads it to check a
+/// selected release's profile and native evidence; its distribution and
+/// evidence are not fetched.
+pub fn manifest(
+    cache: &Cache,
+    registry: &str,
+    reference: &BlobIdentity,
+    tools: &mut dyn Tools,
+) -> Result<Release> {
+    let release = Release::decode(&cache.read(reference, MANIFEST_LIMIT, tools)?)?;
+    release.pinned_under(registry)?;
+    Ok(release)
+}
+
 /// A release's manifest and its native evidence in the cache, verified and
 /// bound with its distribution and strict evidence exactly as a fetch binds
 /// them, without installing its operator.

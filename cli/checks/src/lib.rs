@@ -2080,12 +2080,15 @@ mod tests {
         assert_eq!(code, "plan_failed");
         assert!(message.contains("gcp/config/project.tfvars"), "{message}");
         fs::create_dir_all(instance.join("gcp/config/app-edge")).unwrap();
+        fs::create_dir_all(instance.join("gcp/config/apps")).unwrap();
         for inputs in [
             "project",
             "cluster",
             "tenancy",
             "app-edge/go",
             "app-edge/home",
+            "apps/go",
+            "apps/home",
         ] {
             fs::write(instance.join(format!("gcp/config/{inputs}.tfvars")), "").unwrap();
         }
@@ -2167,12 +2170,15 @@ mod tests {
         // without the platform commit is refused before anything is written.
         fs::write(instance.join("day2.json"), SPEC).unwrap();
         fs::create_dir_all(instance.join("gcp/config/app-edge")).unwrap();
+        fs::create_dir_all(instance.join("gcp/config/apps")).unwrap();
         for inputs in [
             "project",
             "cluster",
             "tenancy",
             "app-edge/go",
             "app-edge/home",
+            "apps/go",
+            "apps/home",
         ] {
             fs::write(instance.join(format!("gcp/config/{inputs}.tfvars")), "").unwrap();
         }
