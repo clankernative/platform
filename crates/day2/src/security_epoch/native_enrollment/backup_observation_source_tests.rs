@@ -1634,8 +1634,7 @@ fn outer_bypass_primary_catch(source: &str, owner: &str, name: &str) -> String {
                     let syn::Stmt::Local(local) = &mut method.block.stmts[0] else {
                         unreachable!();
                     };
-                    local.init.as_mut().unwrap().expr =
-                        Box::new(syn::parse_quote!(Ok((||#body)())));
+                    *local.init.as_mut().unwrap().expr = syn::parse_quote!(Ok((||#body)()));
                     count += 1;
                 }
             }
