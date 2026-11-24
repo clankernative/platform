@@ -603,17 +603,38 @@ expect match InstanceSpec.from_json(sample) {
 	Err(_) => Bool.False
 }
 
+request_summary :
+	Str ->
+		Try(
+			{
+				mode : Str,
+				reviewed : Try(Str, [Null]),
+				roots : List(InstanceRender.RootRequest),
+				releases : { bucket : Str, registry : Str, forge : { server : Str, org : Str } },
+				candidate : Try(Str, [Null]),
+			},
+			Str,
+		)
+request_summary = |request| Json.parse(request).map_err(|_| "invalid app root request")
+
 # Plan and apply run every root, the day2-app roots last, with where the instance's releases live.
 expect match InstanceSpec.from_json(sample) {
 	Ok(spec) => {
 		request = InstanceRender.request(spec, InstanceRender.Mode.Plan, { instance: "i", checkout: "p", output: "o" })
-		request.contains("\"label\":\"day2-app/home\",\"stack\":\"day2-app\",\"app_id\":\"home\"")
-			and request.contains(
-				"\"bucket\":\"exampleco-tools-home-state\",\"prefix\":\"day2-app/home\",\"inputs\":\"gcp/config/apps/home.tfvars\"",
-			)
-				and request.contains(
-					"\"releases\":{\"bucket\":\"exampleco-tools-tofu-state\",\"registry\":\"us-central1-docker.pkg.dev/exampleco-tools\",\"forge\":{\"server\":\"https://git.example.com\",\"org\":\"tools\"}}",
-				)
+		match request_summary(request) {
+			Ok(decoded) => match decoded.roots.last() {
+				Ok(home) =>
+					home.label == "day2-app/home" and home.stack == "day2-app" and home.app_id == Ok("home")
+						and home.bucket == "exampleco-tools-home-state" and home.prefix == "day2-app/home"
+							and home.inputs == "gcp/config/apps/home.tfvars" and decoded.releases == {
+								bucket: "exampleco-tools-tofu-state",
+								registry: "us-central1-docker.pkg.dev/exampleco-tools",
+								forge: { server: "https://git.example.com", org: "tools" },
+							}
+				Err(_) => Bool.False
+			}
+			Err(_) => Bool.False
+		}
 	}
 	Err(_) => Bool.False
 }
@@ -623,12 +644,12 @@ expect match InstanceSpec.from_json(sample) {
 	Ok(spec) => {
 		paths = { instance: "i", checkout: "p", output: "o/roots" }
 		match InstanceRender.deploy_request(spec, "go", "/c/candidate.json", paths) {
-			Ok(request) =>
-				request.contains("\"mode\":\"deploy\",\"reviewed\":null")
-					and request.contains("\"roots\":[{\"label\":\"day2-app/go\",")
-						and !request.contains("app-edge/go")
-							and !request.contains("day2-app/home")
-								and request.contains("\"candidate\":\"/c/candidate.json\"")
+			Ok(request) => match request_summary(request) {
+				Ok(decoded) => decoded.mode == "deploy" and decoded.reviewed == Err(Null)
+					and decoded.roots.map(|root| root.label) == ["day2-app/go"]
+						and decoded.candidate == Ok("/c/candidate.json")
+				Err(_) => Bool.False
+			}
 			Err(_) => Bool.False
 		}
 			and InstanceRender.deploy_request(spec, "notes", "/c/candidate.json", paths) == Err(UnknownApp("notes"))
