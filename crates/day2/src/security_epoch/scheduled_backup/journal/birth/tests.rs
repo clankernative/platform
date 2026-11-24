@@ -655,7 +655,10 @@ fn retain_confirmation_failure(
     expected: &[(bool, bool)],
     actual: &[(bool, bool)],
 ) -> Result<std::path::PathBuf> {
-    use std::{io::Write, os::unix::fs::{OpenOptionsExt, PermissionsExt}};
+    use std::{
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
     let failed = expected
         .iter()
         .zip(actual)
