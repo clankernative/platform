@@ -603,6 +603,16 @@ fn the_binding_is_validated_as_python_did_then_against_day2_json() -> Result<()>
         },
         "the binding's repository is not in day2.json's forge.org",
     );
+    // The platform's own repositories (day2-<name>, in any case) are never an app's source.
+    for platform in ["tools/day2-ci", "tools/day2-instance", "tools/Day2-Ci"] {
+        refused(
+            &|value| {
+                value["repository"] = json!(platform);
+                value["source"]["repository"] = json!(platform);
+            },
+            "the binding's repository is a platform repository (day2-<name>), not an app's",
+        );
+    }
     refused(
         &|value| value["qualified_release"]["digest"] = json!(day2::digest(b"another release")),
         "the binding's qualified release is not day2.json's apps.links.sdk",
@@ -616,6 +626,15 @@ fn the_binding_is_validated_as_python_did_then_against_day2_json() -> Result<()>
     let mut named = scenario.binding.clone();
     named["source"]["repository_id"] = json!("repo:42");
     assert!(Binding::check(named, &instance).is_ok());
+    // Only a name starting with day2- is the platform's.
+    for name in ["tools/day2ci", "tools/links-day2-app", "tools/day2"] {
+        let mut named = scenario.binding.clone();
+        named["repository"] = json!(name);
+        named["source"]["repository"] = json!(name);
+        assert!(Binding::check(named, &instance).is_ok(), "{name}");
+    }
+    assert!(platform_repository("tools/day2-") && platform_repository("tools/DAY2-x"));
+    assert!(!platform_repository("tools/day2") && !platform_repository("day2-tools/links"));
     Ok(())
 }
 

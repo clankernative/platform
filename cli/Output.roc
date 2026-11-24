@@ -64,7 +64,7 @@ Output :: { outcome : Outcome }.{
 	roots_failed : InstanceRender.Mode, Str -> Problem
 	roots_failed = |mode, detail| match mode {
 		InstanceRender.Mode.Plan => Problem.PlanFailed(detail)
-		InstanceRender.Mode.Apply(_) => Problem.ApplyFailed(detail)
+		InstanceRender.Mode.Apply(_) | InstanceRender.Mode.Deploy => Problem.ApplyFailed(detail)
 	}
 
 	safe : Str -> Str
@@ -245,10 +245,6 @@ roots_actions = |request| [
 	Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(request.instance())),
 ]
 
-## The roots `instance plan` and `apply` leave to the release controller.
-not_planned : InstanceSpec -> List(Str)
-not_planned = |spec| InstanceRender.roots(spec).drop_if(|root| root.plannable()).map(|root| root.label())
-
 ran_json : Cli.Roots, Names.LocalPath, InstanceSpec, InstanceRender.Receipt -> Str
 # Keep the wire record concrete, as success_json does for the same compiler reason.
 ran_json = |request, path, spec, receipt| {
@@ -264,7 +260,6 @@ ran_json = |request, path, spec, receipt| {
 		result: {
 			installation: spec.derived().installation,
 			receipt,
-			not_planned: not_planned(spec),
 		},
 		error,
 		next_actions: roots_actions(request).map(|action| action.dto()),
@@ -288,10 +283,15 @@ root_status = |root| {
 		"no_changes" => "no changes"
 		"changes" => "${root.changes.len().to_str()} to change"
 		"applied" => "applied ${root.changes.len().to_str()} changes"
-		"skipped" => "not run: a shared root before it failed"
+		"unreleased" => "not run: the app has no release selection yet"
+		"not_applied" => "not applied: the deploy stopped before its apply"
+		"skipped" => "not run: a root it reads failed"
 		"refused_destroy" => "refused: the plan deletes, replaces or forgets a resource; nothing applied"
-		"refused_unreviewed" => "refused: its plan differs from the reviewed plan; nothing applied"
+		"refused_unreviewed" => "refused: its plan or release differs from the reviewed plan's; nothing applied"
 		"failed_credentials" => "not run: its cluster or DNS credentials could not be read"
+		"failed_inputs" => "not run: its committed inputs set a variable the platform owns; see ${root.logs}"
+		"failed_release" => "not run: its release could not be read or was refused; see ${root.logs}"
+		"failed_target" => "failed at its target render; logs in ${root.logs}"
 		"failed_init" => "failed at init; logs in ${root.logs}"
 		"failed_plan" => "failed at plan; logs in ${root.logs}"
 		"failed_show" => "failed at show; logs in ${root.logs}"
@@ -322,8 +322,17 @@ ran_text = |request, path, spec, receipt| {
 					root_status(
 						{ status: root.status, new_root: root.new_root, changes: root.changes, logs: root.logs },
 					)
+				# A day2-app root's release: its source commit, image digest and selection status.
+				released = match root.release {
+					Ok(release) => {
+						digest = release.image.split_on("@").last() ?? release.image
+						state = release.status ?? release.source
+						["      release ${Output.safe(release.commit)}  ${Output.safe(digest)}  ${Output.safe(state)}"]
+					}
+					Err(_) => []
+				}
 				Str.join_with(
-					["${column(root.label)}${Output.safe(status)}"].concat(
+					["${column(root.label)}${Output.safe(status)}"].concat(released).concat(
 						root.changes.map(
 							|
 								change,
@@ -341,7 +350,6 @@ ran_text = |request, path, spec, receipt| {
 		),
 		"\n",
 	)
-	skipped = not_planned(spec)
 	next =
 		Str.join_with(
 			roots_actions(request)
@@ -351,10 +359,10 @@ ran_text = |request, path, spec, receipt| {
 		)
 	title = match mode {
 		InstanceRender.Mode.Plan => "OpenTofu plan, read-only"
-		InstanceRender.Mode.Apply(_) => "OpenTofu apply"
+		InstanceRender.Mode.Apply(_) | InstanceRender.Mode.Deploy => "OpenTofu apply"
 	}
 	reviewed = match mode {
-		InstanceRender.Mode.Plan => []
+		InstanceRender.Mode.Plan | InstanceRender.Mode.Deploy => []
 		InstanceRender.Mode.Apply(directory) => ["REVIEWED PLAN", "  ${Output.safe(directory)}/receipt.json", ""]
 	}
 	review = match mode {
@@ -362,16 +370,10 @@ ran_text = |request, path, spec, receipt| {
 			"",
 			"REVIEW",
 			"  Each root's plan.txt shows what it would change. instance apply applies a root only if its new",
-			"  plan makes exactly the changes this plan shows.",
+			"  plan makes exactly the changes this plan shows, and a day2-app root only with the same release.",
 		]
-		InstanceRender.Mode.Apply(_) => []
+		InstanceRender.Mode.Apply(_) | InstanceRender.Mode.Deploy => []
 	}
-	not_run =
-		if skipped.is_empty() [] else [
-			"",
-			"NOT RUN  /  their image and artifact inputs come from the release controller",
-			Str.join_with(skipped.map(|label| "  ${Output.safe(label)}"), "\n"),
-		]
 	Str.join_with(
 		[
 			"DAY2  /  instance ${spec.derived().installation}  /  ${title}",
@@ -385,9 +387,8 @@ ran_text = |request, path, spec, receipt| {
 			"",
 		]
 			.concat(reviewed)
-			.concat(["CORE ROOTS  /  ${receipt.roots.len().to_str()}, in apply order", planned])
+			.concat(["ROOTS  /  ${receipt.roots.len().to_str()}, in apply order", planned])
 			.concat(review)
-			.concat(not_run)
 			.concat(["", "RECEIPT", "  ${Output.safe(receipt.directory)}/receipt.json", "", "NEXT", next]),
 		"\n",
 	)
@@ -1147,13 +1148,22 @@ planned_spec =
 
 planned_receipt : Str
 planned_receipt =
-	\\{"format":1,"mode":"plan","ok":false,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
+	\\{"format":2,"mode":"plan","ok":false,"commit":"c","stacks_tree":"t","checkout":"/p","instance":"/i",
 	\\"instance_commit":"","instance_clean":false,"engine":{"version":"1.12.3","digest":"sha256:e"},
 	\\"roots":[{"label":"project","stack":"project","backend":{"bucket":"b","prefix":"foundation"},"new_root":false,
 	\\"inputs":{"path":"gcp/config/project.tfvars","digest":"sha256:i"},"variables":"sha256:v","status":"failed_plan","review":"",
-	\\"changes":[],"plan_digest":"","show_digest":"","logs":"/o/project"}],"directory":"/o"}
+	\\"changes":[],"plan_digest":"","show_digest":"","logs":"/o/project","release":null,"target":null},
+	\\{"label":"day2-app/go","stack":"day2-app","backend":{"bucket":"exampleco-tools-go-state","prefix":"day2-app/go"},
+	\\"new_root":false,"inputs":{"path":"gcp/config/apps/go.tfvars","digest":"sha256:i"},"variables":"sha256:v",
+	\\"status":"no_changes","review":"sha256:r","changes":[],"plan_digest":"sha256:p","show_digest":"sha256:s",
+	\\"logs":"/o/day2-app-go","release":{"source":"selection",
+	\\"record":"gs://exampleco-tools-tofu-state/day2/app-releases/go/selection.json","generation":"7","status":"ready",
+	\\"digest":"sha256:d","candidate":"sha256:c","commit":"abababababababababababababababababababab",
+	\\"image":"us-central1-docker.pkg.dev/exampleco-tools/go/go@sha256:66","artifact_id":"ef",
+	\\"tooling_image":"us-central1-docker.pkg.dev/exampleco-tools/go/day2-tooling@sha256:22",
+	\\"qualified_release":{"digest":"sha256:q","bytes":1236},"variables":"sha256:r"},"target":null}],"directory":"/o"}
 
-# A plan whose root failed exits 6 and reports plan_failed beside its receipt.
+# A plan whose root failed exits 6 and reports plan_failed beside its receipt; a day2-app root names its release.
 expect match (
 	Cli.parse(["instance", "plan", "d", "p", "o", "--agent"]),
 	InstanceSpec.from_json(planned_spec),
@@ -1166,7 +1176,27 @@ expect match (
 			== 6
 			and response.body().contains("\"code\":\"plan_failed\"")
 				and response.body().contains("\"command\":\"instance.plan\"")
-					and response.body().contains("1 of 1 roots failed: project")
+					and response.body().contains("1 of 2 roots failed: project")
+						and response
+							.body()
+							.contains("\"image\":\"us-central1-docker.pkg.dev/exampleco-tools/go/go@sha256:66\"")
+							and !response.body().contains("not_planned")
+	}
+	_ => Bool.False
+}
+
+# The text output names a day2-app root's release: its commit, image digest and selection status.
+expect match (
+	Cli.parse(["instance", "plan", "d", "p", "o"]),
+	InstanceSpec.from_json(planned_spec),
+	Names.LocalPath.from_str("d/day2.json"),
+	InstanceRender.receipt(planned_receipt, InstanceRender.Mode.Plan),
+) {
+	(Ok(Cli.Request.Roots(request)), Ok(spec), Ok(path), Ok(receipt)) => {
+		body = Output.new(Output.Outcome.Ran(request, path, spec, receipt)).body()
+		body.contains("ROOTS  /  2, in apply order")
+			and body.contains("release abababababababababababababababababababab  sha256:66  ready")
+				and !body.contains("NOT RUN")
 	}
 	_ => Bool.False
 }

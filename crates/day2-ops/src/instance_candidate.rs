@@ -40,7 +40,7 @@ pub mod record;
 pub mod tools;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::{
     instance_release,
@@ -146,6 +146,16 @@ impl Instance {
             registry: self.registry.clone(),
             bucket: self.bucket.clone(),
             apps: self.apps.clone(),
+        }
+    }
+
+    /// Where this instance admits candidate records from.
+    pub(crate) fn scope(&self) -> record::Scope<'_> {
+        record::Scope {
+            server: &self.server,
+            org: &self.org,
+            registry: &self.registry,
+            bucket: &self.bucket,
         }
     }
 
@@ -698,12 +708,7 @@ impl Job {
             return Ok(json!({"found": false}));
         };
         let value = record::decode(&bytes)?;
-        record::check(
-            &value,
-            &self.app,
-            &self.instance.registry,
-            &self.instance.bucket,
-        )?;
+        record::check(&value, &self.app, &self.instance.scope())?;
         ensure!(
             value["binding"] == self.binding()?.value && value["source_commit"] == self.commit()?,
             "stored candidate does not match the selected source"
@@ -823,12 +828,7 @@ impl Job {
         let cached = self.cached.clone().context("cached result")?;
         let inputs = self.inputs.clone().context("source inputs")?;
         let commit = self.commit()?.to_owned();
-        record::check(
-            &cached,
-            &self.app,
-            &self.instance.registry,
-            &self.instance.bucket,
-        )?;
+        record::check(&cached, &self.app, &self.instance.scope())?;
         ensure!(
             cached["binding"] == self.binding()?.value
                 && cached["source_inputs"] == inputs
@@ -845,12 +845,7 @@ impl Job {
             tools::write_private(&path, &record::encode(&proof)?)?;
             self.store.put(&path, &log)?;
             let reused = record::reused(&cached, &commit, &log);
-            record::check(
-                &reused,
-                &self.app,
-                &self.instance.registry,
-                &self.instance.bucket,
-            )?;
+            record::check(&reused, &self.app, &self.instance.scope())?;
             reused
         };
         self.candidate = Some(candidate);
@@ -1117,12 +1112,7 @@ impl Job {
         );
         let log = self.log_uri(&commit)?;
         result["build_log"] = json!(log);
-        record::check(
-            &result,
-            &self.app,
-            &self.instance.registry,
-            &self.instance.bucket,
-        )?;
+        record::check(&result, &self.app, &self.instance.scope())?;
         self.store.put(&work.join("build.log"), &log)?;
         let uri = record::inputs_uri(&self.instance.bucket, &self.app, self.digest()?, &inputs);
         let generation = self.inputs_generation.clone();
@@ -1152,12 +1142,7 @@ impl Job {
         let bytes = match self.stored.clone() {
             Some(bytes) => bytes,
             None => {
-                record::check(
-                    &candidate,
-                    &self.app,
-                    &self.instance.registry,
-                    &self.instance.bucket,
-                )?;
+                record::check(&candidate, &self.app, &self.instance.scope())?;
                 ensure!(
                     candidate["binding"] == self.binding()?.value
                         && candidate["source_commit"] == commit,
@@ -1206,12 +1191,7 @@ impl Job {
                 .to_owned();
             self.instance.app(&self.app)?;
         }
-        record::check(
-            &value,
-            &self.app,
-            &self.instance.registry,
-            &self.instance.bucket,
-        )?;
+        record::check(&value, &self.app, &self.instance.scope())?;
         let receipt = Receipt {
             app_id: Some(self.app.clone()),
             commit: value["source_commit"].as_str().map(str::to_owned),

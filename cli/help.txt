@@ -53,19 +53,22 @@ COMMANDS
                   initializes against and the variables derived for it, as
                   .tfvars.json. Reads one file only; writes nothing.
   instance plan   Validate and render <directory>/day2.json, then run a
-                  read-only OpenTofu 1.12.3 plan of its core roots except
-                  day2-app, on stacks exported from the spec's platform
-                  commit in the <platform> repository. Plans, logs and
-                  receipt.json go to <new directory>. Never locks state,
-                  creates state or applies; exits 6 if a root fails.
+                  read-only OpenTofu 1.12.3 plan of its core roots, each
+                  app's day2-app root with the release its selection names,
+                  on stacks exported from the spec's platform commit in the
+                  <platform> repository. An app with no release selection is
+                  not planned. Plans, logs and receipt.json go to <new
+                  directory>. Never locks state, creates state or applies;
+                  exits 6 if a root fails.
   instance apply  For operators, on a clean checkout of the instance. Plans
                   the same roots with the state lock and applies each saved
                   plan, in apply order, only if its changes equal the ones
                   reviewed in <plan directory>, a prior instance plan's
                   output. Refuses a plan that deletes, replaces or forgets a
                   resource. A failed project, cluster or tenancy root stops
-                  the roots after it; a failed app edge stops only itself.
-                  Exits 6 if a root fails or is refused.
+                  the roots after it; a failed app edge stops only itself and
+                  its app's day2-app root. Exits 6 if a root fails or is
+                  refused.
   instance release publish
                   For operators. Validate <directory>/day2.json, then publish
                   the qualified SDK release <request> describes into the

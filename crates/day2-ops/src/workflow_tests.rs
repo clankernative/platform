@@ -764,8 +764,17 @@ fn failed_infrastructure_validation_prevents_plan_and_receipt() -> Result<()> {
 }
 
 /// Runs an instance session against a fake host: `failing` lists the
-/// `label operation` steps that fail. Returns the effects in order.
+/// `label operation` steps that fail, and `unreleased` the day2-app roots whose
+/// app has no release selection. Returns the effects in order.
 fn instance_session(session: &str, failing: &[&str]) -> Result<Vec<String>> {
+    instance_session_with(session, failing, &[])
+}
+
+fn instance_session_with(
+    session: &str,
+    failing: &[&str],
+    unreleased: &[&str],
+) -> Result<Vec<String>> {
     assert!(
         automation::SOURCES
             .iter()
@@ -783,10 +792,12 @@ fn instance_session(session: &str, failing: &[&str]) -> Result<Vec<String>> {
                     assert_eq!(input, json!({"request": "/private/instance/request.json"}));
                     effects.push("prepare".to_owned());
                     Ok(json!({"roots":[
-                        {"label":"project","shared":true},
-                        {"label":"cluster","shared":true},
-                        {"label":"app-edge/home","shared":false},
-                        {"label":"app-edge/go","shared":false},
+                        {"label":"project","shared":true,"needs":[],"release":false},
+                        {"label":"cluster","shared":true,"needs":[],"release":false},
+                        {"label":"app-edge/home","shared":false,"needs":[],"release":false},
+                        {"label":"app-edge/go","shared":false,"needs":[],"release":false},
+                        {"label":"day2-app/home","shared":false,"needs":["app-edge/home"],"release":true},
+                        {"label":"day2-app/go","shared":false,"needs":["app-edge/go"],"release":true},
                     ]}))
                 }
                 "instance-roots-credentials" => {
@@ -800,8 +811,14 @@ fn instance_session(session: &str, failing: &[&str]) -> Result<Vec<String>> {
                         input["operation"].as_str().unwrap()
                     );
                     let ok = !failing.contains(&step.as_str());
+                    let released = !unreleased.contains(&input["label"].as_str().unwrap());
+                    let release = input["operation"] == "release";
                     effects.push(step);
-                    Ok(json!({ "ok": ok }))
+                    Ok(if release {
+                        json!({ "ok": ok, "released": ok && released, "release": null })
+                    } else {
+                        json!({ "ok": ok })
+                    })
                 }
                 "instance-roots-receipt" => {
                     effects.push("receipt".to_owned());
@@ -835,8 +852,30 @@ fn instance_plan_reads_credentials_once_and_stops_only_the_failed_root() -> Resu
             "app-edge/go init",
             "app-edge/go plan",
             "app-edge/go show",
+            "day2-app/home release",
+            "day2-app/home init",
+            "day2-app/home plan",
+            "day2-app/home show",
+            "day2-app/go release",
+            "day2-app/go init",
+            "day2-app/go plan",
+            "day2-app/go show",
             "receipt",
         ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_day2_app_root_reads_its_release_first_and_an_unreleased_app_runs_nothing_else() -> Result<()> {
+    let effects = instance_session_with(
+        "instance-plan-session",
+        &["day2-app/go release"],
+        &["day2-app/home"],
+    )?;
+    assert_eq!(
+        effects[effects.len() - 3..],
+        ["day2-app/home release", "day2-app/go release", "receipt"]
     );
     Ok(())
 }
@@ -846,12 +885,18 @@ fn instance_apply_stops_at_a_failed_shared_root_but_not_at_an_app_edge() -> Resu
     let applied = |label: &str| {
         ["init", "plan", "show", "apply"].map(|operation| format!("{label} {operation}"))
     };
-    // An app edge that fails stops only itself.
+    let released = |label: &str| {
+        let mut steps = vec![format!("{label} release")];
+        steps.extend(applied(label));
+        steps
+    };
+    // An app edge that fails stops only itself and its app's day2-app root.
     let mut expected = vec!["prepare".to_owned(), "credentials".to_owned()];
     expected.extend(applied("project"));
     expected.extend(applied("cluster"));
     expected.extend(applied("app-edge/home"));
     expected.extend(applied("app-edge/go"));
+    expected.extend(released("day2-app/go"));
     expected.push("receipt".to_owned());
     assert_eq!(
         instance_session("instance-apply-session", &["app-edge/home apply"])?,
@@ -864,6 +909,25 @@ fn instance_apply_stops_at_a_failed_shared_root_but_not_at_an_app_edge() -> Resu
     expected.push("receipt".to_owned());
     assert_eq!(
         instance_session("instance-apply-session", &["cluster apply"])?,
+        expected
+    );
+    // A day2-app root that fails stops only itself; an unreleased one runs nothing after its release.
+    let mut expected = vec!["prepare".to_owned(), "credentials".to_owned()];
+    for label in ["project", "cluster", "app-edge/home", "app-edge/go"] {
+        expected.extend(applied(label));
+    }
+    expected.extend([
+        "day2-app/home release".to_owned(),
+        "day2-app/home init".to_owned(),
+    ]);
+    expected.push("day2-app/go release".to_owned());
+    expected.push("receipt".to_owned());
+    assert_eq!(
+        instance_session_with(
+            "instance-apply-session",
+            &["day2-app/home init"],
+            &["day2-app/go"]
+        )?,
         expected
     );
     Ok(())

@@ -394,19 +394,24 @@ fn host(value: &str) -> bool {
         })
 }
 
-pub(crate) fn validate_instance(instance: &Instance) -> Result<()> {
+/// The instance's forge: an https host and a lowercase org.
+pub(crate) fn validate_forge(server: &str, org: &str) -> Result<()> {
     ensure!(
-        instance.server.strip_prefix("https://").is_some_and(host),
+        server.strip_prefix("https://").is_some_and(host),
         "the instance forge must be https://<host>"
     );
     ensure!(
-        !instance.org.is_empty()
-            && instance
-                .org
+        !org.is_empty()
+            && org
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
         "the instance forge org must be lowercase"
     );
+    Ok(())
+}
+
+pub(crate) fn validate_instance(instance: &Instance) -> Result<()> {
+    validate_forge(&instance.server, &instance.org)?;
     let bucket_project = instance
         .bucket
         .strip_suffix("-tofu-state")
@@ -777,12 +782,43 @@ pub(crate) fn identity(value: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Whether a forge repository (`owner/name`) is one the platform owns in an
+/// instance's org: every such repository is named `day2-<name>`. Gitea names
+/// are case-insensitive, so the prefix is too.
+pub(crate) fn platform_repository(repository: &str) -> bool {
+    let name = repository
+        .split_once('/')
+        .map_or(repository, |(_, name)| name);
+    name.len() >= 5 && name.as_bytes()[..5].eq_ignore_ascii_case(b"day2-")
+}
+
+/// A binding's source is an app repository on the instance's forge: its server
+/// is forge.server, its repository is in forge.org, and it is not one of the
+/// platform's own `day2-` repositories.
+pub(crate) fn on_forge(binding: &Value, server: &str, org: &str) -> Result<()> {
+    ensure!(
+        binding["source"]["server"] == server,
+        "the binding's source server is not day2.json's forge.server"
+    );
+    let repository = binding["repository"].as_str().unwrap_or_default();
+    ensure!(
+        repository.split_once('/').map(|(owner, _)| owner) == Some(org),
+        "the binding's repository is not in day2.json's forge.org"
+    );
+    ensure!(
+        !platform_repository(repository),
+        "the binding's repository is a platform repository (day2-<name>), not an app's"
+    );
+    Ok(())
+}
+
 impl Binding {
     /// Validate `value` as Python did, then require it to describe one of the
     /// instance's apps on the instance's forge: the source server is
-    /// forge.server, the repository is in forge.org, and the qualified release
-    /// and verification cases are the app's sdk and verification. The
-    /// repository name itself is not derived; it may differ from `<org>/<app>`.
+    /// forge.server, the repository is in forge.org and is not a platform
+    /// `day2-` repository, and the qualified release and verification cases are
+    /// the app's sdk and verification. The repository name itself is not
+    /// derived; it may differ from `<org>/<app>`.
     pub fn check(value: Value, instance: &Instance) -> Result<Self> {
         unported_binding(&value)?;
         ensure!(
@@ -831,14 +867,7 @@ impl Binding {
         let Some(spec) = instance.apps.iter().find(|spec| spec.id == app) else {
             bail!("the binding's app {app} is not in day2.json");
         };
-        ensure!(
-            source["server"] == instance.server.as_str(),
-            "the binding's source server is not day2.json's forge.server"
-        );
-        ensure!(
-            repository_name.split_once('/').map(|(owner, _)| owner) == Some(instance.org.as_str()),
-            "the binding's repository is not in day2.json's forge.org"
-        );
+        on_forge(&value, &instance.server, &instance.org)?;
         ensure!(
             qualified_release.digest == spec.sdk,
             "the binding's qualified release is not day2.json's apps.{app}.sdk"
