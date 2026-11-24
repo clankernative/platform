@@ -92,6 +92,7 @@ pub(in crate::security_epoch::native_enrollment) struct ObservedScheduledBackupS
 /// configuration switch or fixture can construct this prerequisite.
 struct ProtectedScheduledCreate {
     _unavailable: std::convert::Infallible,
+    _local: std::marker::PhantomData<Rc<()>>,
 }
 
 /// Closed future request input, NOT a presently accepting source supplier.

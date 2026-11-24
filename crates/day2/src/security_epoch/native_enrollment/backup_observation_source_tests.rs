@@ -296,7 +296,8 @@ fn admission_post(source: &str, owner: &str, method: &str, local: &str, expected
 fn closed_admission_contract(source: &str) -> bool {
     let file = syn::parse_file(source).unwrap();
     for (name, fields) in [
-        ("ProtectedScheduledCreate", vec![("_unavailable", "std::convert::Infallible")]),
+        ("ProtectedScheduledCreate", vec![("_unavailable", "std::convert::Infallible"),
+            ("_local", "std::marker::PhantomData<Rc<()>>")]),
         ("AdmittedScheduledBackupRequest", vec![("observation", "ObservedScheduledBackupSubmit"),
             ("create", "ProtectedScheduledCreate"), ("refused", "bool")]),
     ] {
@@ -349,6 +350,7 @@ fn actual_request_admission_has_an_uninhabited_create_gate_and_same_whole_observ
     assert!(closed_admission_contract(source));
     for (old, new) in [
         ("_unavailable: std::convert::Infallible", "_unavailable: bool"),
+        ("_local: std::marker::PhantomData<Rc<()>>", "_local: ()"),
         ("observation: ObservedScheduledBackupSubmit", "observation: NativeOriginalRefusal"),
         ("observation: self", "observation: fresh_request()"),
     ] {
