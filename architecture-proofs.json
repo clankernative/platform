@@ -155,6 +155,12 @@
       "registration": null
     },
     {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+      "scope": "const",
+      "fingerprint": "sha256:ea67f3983b852d2aa61d24e6cda504fa75cc9dd0077b93fc1c664a97d6911630",
+      "registration": null
+    },
+    {
       "source": "crates/day2/src/security_epoch/native_enrollment/owner.rs",
       "scope": "const",
       "fingerprint": "sha256:893c53348f0e524c2b1c484fc4289182b2cc43cf07672f3819c7c0e9f0e43be8",
@@ -8711,7 +8717,15 @@
       ],
       "proof_uses": [],
       "destructor": "sha256:cdf1a62f5f8d550e4d8a7f6a536b6d9615b22e2a2e74ec8995d77a445b6319f7",
-      "owning_children": []
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+            "module": "outer_request"
+          }
+        }
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
@@ -8758,7 +8772,15 @@
         }
       ],
       "proof_uses": [],
-      "owning_children": []
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+            "module": "outer_request"
+          }
+        }
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
@@ -8787,7 +8809,15 @@
       ],
       "proof_uses": [],
       "destructor": "sha256:d3b76571f353d8b05bba772fa3106863f656e9cd0fb33cb532fafa772a5712fb",
-      "owning_children": []
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+            "module": "outer_request"
+          }
+        }
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
@@ -8821,7 +8851,15 @@
       ],
       "proof_uses": [],
       "destructor": "sha256:891cb8734b44eca64a6ef426d5c57683168de3c61e66ebf9d564bb62353b215b",
-      "owning_children": []
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+            "module": "outer_request"
+          }
+        }
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
@@ -8845,7 +8883,15 @@
         }
       ],
       "proof_uses": [],
-      "owning_children": []
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+            "module": "outer_request"
+          }
+        }
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
@@ -8873,7 +8919,15 @@
         }
       ],
       "proof_uses": [],
-      "owning_children": []
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+            "module": "outer_request"
+          }
+        }
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
@@ -8882,6 +8936,7 @@
       "consuming_methods": [],
       "methods": [
         "pub (in crate :: security_epoch :: native_enrollment) fn accept (& mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < ScheduledBackupConnection >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn admit_action < 'controller > (& mut self , controller : & 'controller mut crate :: security_epoch :: native_enrollment :: EnrolledProcessRoleOwner) -> Result < outer_request :: RetainedScheduledBackupAction < 'controller > >",
         "pub (in crate :: security_epoch :: native_enrollment) fn bind (stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < Self >",
         "fn check (& self) -> Result < () >"
       ],
@@ -8893,16 +8948,32 @@
       ],
       "material_uses": [
         {
+          "owner": "PendingScheduledBackupAction < 'controller >",
+          "signature": "pub (super) fn receive (mut self , listener : & mut ScheduledBackupSocketListener) -> Result < RetainedScheduledBackupAction < 'controller > >"
+        },
+        {
           "owner": "ScheduledBackupSocketListener",
           "signature": "fn check (& self) -> Result < () >"
         },
         {
           "owner": "ScheduledBackupSocketListener",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn accept (& mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < ScheduledBackupConnection >"
+        },
+        {
+          "owner": "ScheduledBackupSocketListener",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn admit_action < 'controller > (& mut self , controller : & 'controller mut crate :: security_epoch :: native_enrollment :: EnrolledProcessRoleOwner) -> Result < outer_request :: RetainedScheduledBackupAction < 'controller > >"
         }
       ],
       "proof_uses": [],
-      "owning_children": []
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+            "module": "outer_request"
+          }
+        }
+      ]
     },
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
@@ -8925,6 +8996,82 @@
         }
       ],
       "proof_uses": [],
+      "owning_children": [
+        {
+          "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+            "module": "outer_request"
+          }
+        }
+      ]
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+      "type_name": "PendingScheduledBackupAction",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "fn check (& mut self) -> Result < () >",
+        "fn check_native (& mut self) -> Result < () >",
+        "pub (super) fn receive (mut self , listener : & mut ScheduledBackupSocketListener) -> Result < RetainedScheduledBackupAction < 'controller > >",
+        "fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub (super) fn capture_scheduled_backup_action (controller : & mut EnrolledProcessRoleOwner) -> Result < PendingScheduledBackupAction < '_ > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingScheduledBackupAction < 'controller >",
+          "signature": "fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PendingScheduledBackupAction < 'controller >",
+          "signature": "fn check_native (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PendingScheduledBackupAction < 'controller >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "PendingScheduledBackupAction < 'controller >",
+          "signature": "pub (super) fn receive (mut self , listener : & mut ScheduledBackupSocketListener) -> Result < RetainedScheduledBackupAction < 'controller > >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:2f688fe7e58fafa04a666f6e8cfeeba29e583f849b6d87648185a81a7828b976",
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
+      "type_name": "RetainedScheduledBackupAction",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn check (& mut self) -> Result < () >",
+        "fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "PendingScheduledBackupAction < 'controller >",
+          "signature": "pub (super) fn receive (mut self , listener : & mut ScheduledBackupSocketListener) -> Result < RetainedScheduledBackupAction < 'controller > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RetainedScheduledBackupAction < '_ >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "RetainedScheduledBackupAction < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn check (& mut self) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:5331210042a816d1d948c7dc599cfc34d2f94f04b14e502d7555da4d85380d51",
       "owning_children": []
     },
     {

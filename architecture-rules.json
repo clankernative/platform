@@ -547,6 +547,7 @@
     "crates/day2/src/security_epoch/native_enrollment/channel.rs",
     "crates/day2/src/security_epoch/native_enrollment/channel/protected_restore.rs",
     "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+    "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup/outer_request.rs",
     "crates/day2/src/security_epoch/native_enrollment/channel/serving.rs",
     "crates/day2/src/security_epoch/native_enrollment/channel/serving/tests.rs",
     "crates/day2/src/security_epoch/native_enrollment/channel/storage.rs",
