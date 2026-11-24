@@ -510,6 +510,7 @@ mod tests {
     fn fresh_sealed_member_refuses_writes_growth_shrink_and_unsealed_substitution() -> Result<()> {
         use rustix::fs::SealFlags;
         let mut file = create_sealed_target()?;
+        assert!(rustix::io::fcntl_getfd(&file)?.contains(rustix::io::FdFlags::CLOEXEC));
         file.write_all(b"controlled historical DATA, not an authority fixture")?;
         let bytes = file.metadata()?.len();
         let mut prior_alias = file.try_clone()?;
@@ -530,6 +531,20 @@ mod tests {
         )?;
         assert!(check_target(&unsealed, bytes).is_err());
         assert!(seal_target(&unsealed, bytes).is_err());
+        let required = SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL;
+        for absent in [
+            SealFlags::WRITE,
+            SealFlags::GROW,
+            SealFlags::SHRINK,
+            SealFlags::SEAL,
+        ] {
+            let mut target = create_sealed_target()?;
+            target.write_all(b"fixture")?;
+            let mut incomplete = required;
+            incomplete.remove(absent);
+            rustix::fs::fcntl_add_seals(&target, incomplete)?;
+            assert!(check_target(&target, 7).is_err());
+        }
         Ok(())
     }
 }
