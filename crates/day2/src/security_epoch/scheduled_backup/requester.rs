@@ -71,6 +71,20 @@ pub(in crate::security_epoch) fn require_submit_original_data(
 #[cfg(test)]
 mod tests;
 
+/// Synthetic comparison DATA for sibling codec tests, never native resources.
+#[cfg(test)]
+pub(in crate::security_epoch) fn comparison_fixture_data()
+-> Result<(RequesterPolicy, Value, WorkloadData)> {
+    tests::comparison_fixture_data()
+}
+
+#[cfg(test)]
+pub(in crate::security_epoch) fn fixture_intent_bytes(value: Value) -> Result<Vec<u8>> {
+    let intent: Intent = serde_json::from_value(value)?;
+    intent.validate_data()?;
+    Ok(serde_json::to_vec(&intent)?)
+}
+
 /// Reviewed selection, not a producer or an enable switch. Absence from the
 /// actual native policy disables this purpose; no incoming request selects it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,8 +338,7 @@ pub(in crate::security_epoch) fn validate_workload_data(
     object(&account, "v1", "ServiceAccount", &selected.service_account)?;
     require_namespace(&account, &selected.namespace.name)?;
     let EpochIam::GkeWorkloadIdentityV1 {
-        service_account,
-        service_account_uid,
+        service_account, ..
     } = &selected.uploader;
     ensure!(
         account
@@ -505,25 +518,7 @@ pub(in crate::security_epoch) fn validate_workload_data(
             && restart_count == 0,
         "backup_requester_container_current"
     );
-    ensure!(
-        intent.policy_generation == selected.generation
-            && intent.slot.scope == selected.scope
-            && intent.slot.cron_job_uid.0 == selected.cron_job.uid
-            && intent.slot.scheduled_at.0 == slot
-            && intent.cron_job_spec == selected.cron_spec
-            && intent.admission_generation == selected.admission_generation_data()?
-            && intent.requester.cluster == selected.cluster
-            && intent.requester.node == selected.node
-            && intent.requester.namespace_uid.0 == selected.namespace.uid
-            && intent.requester.job_uid.0 == job_uid
-            && intent.requester.pod_uid.0 == pod_uid
-            && intent.requester.ksa_uid.0 == selected.service_account.uid
-            && intent.requester.uploader_uid == *service_account_uid
-            && intent.requester.image == selected.image
-            && intent.requester.executable == selected.executable,
-        "backup_requester_intent_join"
-    );
-    Ok(WorkloadData {
+    let data = WorkloadData {
         pod_name: pod_name.to_owned(),
         pod_uid: pod_uid.to_owned(),
         job_name: job_name.to_owned(),
@@ -532,7 +527,53 @@ pub(in crate::security_epoch) fn validate_workload_data(
         container_id: container_id.to_owned(),
         restart_count,
         admission_generation: selected.admission_generation_data()?,
-    })
+    };
+    require_workload_intent(selected, &intent, &data)?;
+    Ok(data)
+}
+
+/// The signed receiver uses the SAME comparison join as the actual producer.
+/// This checks DATA coherence, not CREATE provenance or source admission.
+pub(in crate::security_epoch) fn require_observed_workload_data(
+    selected: &RequesterPolicy,
+    bytes: &[u8],
+    data: &WorkloadData,
+) -> Result<()> {
+    selected.validate_data()?;
+    require_workload_intent(selected, &Intent::decode_data(bytes)?, data)
+}
+
+fn require_workload_intent(
+    selected: &RequesterPolicy,
+    intent: &Intent,
+    data: &WorkloadData,
+) -> Result<()> {
+    let EpochIam::GkeWorkloadIdentityV1 {
+        service_account_uid,
+        ..
+    } = &selected.uploader;
+    ensure!(
+        intent.policy_generation == selected.generation
+            && intent.slot.scope == selected.scope
+            && intent.slot.cron_job_uid.0 == selected.cron_job.uid
+            && intent.slot.scheduled_at.0 == data.scheduled_slot
+            && intent.cron_job_spec == selected.cron_spec
+            && intent.admission_generation == selected.admission_generation_data()?
+            && intent.requester.cluster == selected.cluster
+            && intent.requester.node == selected.node
+            && intent.requester.namespace_uid.0 == selected.namespace.uid
+            && intent.requester.job_uid.0 == data.job_uid
+            && intent.requester.pod_uid.0 == data.pod_uid
+            && intent.requester.ksa_uid.0 == selected.service_account.uid
+            && intent.requester.uploader_uid == *service_account_uid
+            && intent.requester.image == selected.image
+            && intent.requester.executable == selected.executable
+            && data.admission_generation == selected.admission_generation_data()?
+            && data.scheduled_slot.as_str() >= selected.eligible_from.as_str()
+            && data.restart_count == 0,
+        "backup_requester_intent_join"
+    );
+    Ok(())
 }
 
 fn decode(bytes: &[u8]) -> Result<Value> {

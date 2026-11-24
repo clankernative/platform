@@ -5,7 +5,7 @@ use super::EnrolledStorageStage;
 use crate::security_epoch::native_clock::NativeAcquisition;
 use crate::security_epoch::native_enrollment::{
     NativeRole,
-    protocol::ProcessData,
+    protocol::{BackupObserverIdentityData, ProcessData},
     storage_peer_wire::{Body, Message, StageStatement},
 };
 #[cfg(target_os = "linux")]
@@ -24,6 +24,113 @@ fn require_ordinary_storage_body(body: &Body) -> Result<()> {
 }
 
 impl EnrolledStorageStage<'_, '_> {
+    /// Fixed scheduled-observer comparison DATA only. This returns no actual
+    /// owner, stage, original, private key or descriptor. Absence disables it.
+    pub(in crate::security_epoch::native_enrollment) fn backup_observer_identity_data(
+        &mut self,
+        original: &mut NativeAcquisition,
+    ) -> Result<BackupObserverIdentityData> {
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<BackupObserverIdentityData> {
+                self.check_storage_acquisition(original)?;
+                self.scheduled_backup_root_selection()?;
+                #[cfg(target_os = "linux")]
+                {
+                    let controller = self
+                        .stage
+                        .owner
+                        .current
+                        .try_borrow()
+                        .map_err(|_| anyhow::anyhow!("native_enrollment_resource_busy"))?
+                        .data
+                        .clone();
+                    Ok(BackupObserverIdentityData {
+                        policy: self.stage.owner.policy.clone(),
+                        certificate: self.stage.owner.certificate.clone(),
+                        controller,
+                        public_key: self.stage.owner.key.public(),
+                    })
+                }
+                #[cfg(not(target_os = "linux"))]
+                anyhow::bail!("native_backup_platform_unsupported")
+            },
+        ));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check_storage_acquisition(original)
+        }));
+        if !matches!(&requested, Ok(Ok(_))) || !matches!(&checked, Ok(Ok(()))) {
+            self.stage.refuse_serving();
+            original.refuse();
+        }
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(value)) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => {
+                    result?;
+                    Ok(value)
+                }
+            },
+        }
+    }
+
+    /// One bounded identity Bind statement, never a signer capability or
+    /// source/handoff signature. Its domain/body cannot be selected by callers.
+    pub(in crate::security_epoch::native_enrollment) fn sign_backup_observer_bind(
+        &mut self,
+        expected: &BackupObserverIdentityData,
+        intent: &[u8],
+        nonces: (&Digest, &Digest),
+        original: &mut NativeAcquisition,
+    ) -> Result<String> {
+        let requested =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<String> {
+                let current = self.backup_observer_identity_data(original)?;
+                ensure!(current == *expected, "backup_observer_controller_changed");
+                #[cfg(target_os = "linux")]
+                {
+                    let intent =
+                        crate::security_epoch::scheduled_backup::requester::intent_digest_data(
+                            intent,
+                        )?;
+                    self.stage.owner.key.sign(
+                        "scheduled-backup-observe-bind",
+                        &(
+                            &current.policy.digest()?,
+                            &current.public_key,
+                            nonces.0,
+                            nonces.1,
+                            &intent,
+                        ),
+                    )
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = (intent, nonces);
+                    anyhow::bail!("native_backup_platform_unsupported")
+                }
+            }));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check_storage_acquisition(original)
+        }));
+        if !matches!(&requested, Ok(Ok(_))) || !matches!(&checked, Ok(Ok(()))) {
+            self.stage.refuse_serving();
+            original.refuse();
+        }
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(value)) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => {
+                    result?;
+                    Ok(value)
+                }
+            },
+        }
+    }
+
     /// Selection from THIS checked enrolled Controller, never an incoming DTO.
     /// This is metadata preparation only, not protected requester provenance.
     pub(in crate::security_epoch) fn scheduled_backup_root_selection(

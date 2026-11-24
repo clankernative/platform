@@ -149,6 +149,96 @@ pub(super) struct SignedBackupObservation {
     pub signature: String,
 }
 
+/// Public comparison selections only, not a native stage, key, receipt or
+/// authority. The fixed client still retains and checks all actual owners.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct BackupObserverIdentityData {
+    pub policy: EnrollmentPolicy,
+    pub certificate: IssuerCertificate,
+    pub controller: ProcessData,
+    pub public_key: String,
+}
+
+impl SignedBackupObservation {
+    /// Historical comparison DATA only. The caller must separately retain the
+    /// actual submitted Job/socket and both actual kernel issuer receipts.
+    /// Success never creates a role, original, CREATE proof or source grant.
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn verify_data(
+        &self,
+        policy: &EnrollmentPolicy,
+        certificate: &IssuerCertificate,
+        controller: (&ProcessData, &str),
+        intent: &[u8],
+        nonces: (&Digest, &Digest),
+        now: std::time::Duration,
+    ) -> Result<()> {
+        certificate.verify(policy)?;
+        let selected = policy
+            .scheduled_backup
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("native_backup_requester_disabled"))?;
+        let data = &self.data;
+        ensure!(
+            data.issuer == certificate.digest()?
+                && data.policy == policy.digest()?
+                && data.controller == *controller.0
+                && data.controller_key == controller.1
+                && data.request == *nonces.0
+                && data.challenge == *nonces.1,
+            "native_backup_observation_changed"
+        );
+        let job = Digest::of(&("day2-scheduled-backup-process-v1", &data.job))?;
+        let controller = Digest::of(&(
+            "day2-scheduled-backup-controller-v1",
+            &data.controller_key,
+            &data.controller,
+        ))?;
+        ensure!(
+            crate::security_epoch::scheduled_backup::requester::validate_process_commitments_data(
+                intent,
+                &job,
+                &controller
+            )? == data.intent,
+            "native_backup_observation_intent_changed"
+        );
+        crate::security_epoch::scheduled_backup::requester::require_observed_workload_data(
+            selected,
+            intent,
+            &data.workload,
+        )?;
+        let runtime = &data.runtime;
+        ensure!(
+            runtime.node_uid == policy.runtime.node_uid
+                && runtime.boot == data.job.boot
+                && runtime.boot == data.controller.boot
+                && runtime.container.pod_name == data.workload.pod_name
+                && runtime.container.pod_uid == data.workload.pod_uid
+                && runtime.container.container_id == data.workload.container_id
+                && runtime.container.restart_count == data.workload.restart_count
+                && runtime.container.node_name == selected.node_name
+                && runtime.container.container_name == selected.container
+                && runtime.container.image == selected.image,
+            "native_backup_observation_runtime_changed"
+        );
+        let origin = std::time::Duration::from_nanos(data.origin_ns);
+        let deadline = std::time::Duration::from_nanos(data.deadline_ns);
+        ensure!(
+            origin < deadline
+                && deadline - origin <= std::time::Duration::from_secs(5)
+                && origin <= now
+                && now < deadline,
+            "native_backup_observation_expired"
+        );
+        verify(
+            &certificate.data.public_key,
+            "scheduled-backup-observation",
+            data,
+            &self.signature,
+        )
+    }
+}
+
 /// Selection DATA for one irreversible issuer-closure attempt. The real
 /// requester still needs its retained role key, native message process and
 /// original. A signed statement alone is NOT business-rights Stop.

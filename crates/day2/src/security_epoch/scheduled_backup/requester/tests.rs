@@ -214,6 +214,12 @@ impl Fixture {
     }
 }
 
+pub(super) fn comparison_fixture_data() -> Result<(RequesterPolicy, Value, WorkloadData)> {
+    let f = Fixture::new()?;
+    let data = f.check()?;
+    Ok((f.policy, serde_json::to_value(&f.intent)?, data))
+}
+
 #[test]
 fn full_selected_workload_returns_only_bounded_comparison_data() -> Result<()> {
     let f = Fixture::new()?;
@@ -227,6 +233,38 @@ fn full_selected_workload_returns_only_bounded_comparison_data() -> Result<()> {
     );
     assert!(serde_json::to_vec(&data)?.len() < 1024);
     assert!(!serde_json::to_string(&data)?.contains("config-writer"));
+    Ok(())
+}
+
+#[test]
+fn signed_workload_comparison_reuses_the_producer_join_and_rejects_changed_data() -> Result<()> {
+    let f = Fixture::new()?;
+    let data = f.check()?;
+    let bytes = serde_json::to_vec(&f.intent)?;
+    require_observed_workload_data(&f.policy, &bytes, &data)?;
+    for cut in 0..6 {
+        let mut changed = data.clone();
+        match cut {
+            0 => changed.job_uid = uid(90),
+            1 => changed.pod_uid = uid(91),
+            2 => changed.scheduled_slot = "2026-11-22T18:00:00Z".into(),
+            3 => changed.admission_generation = digest("different-admission"),
+            4 => changed.restart_count = 1,
+            _ => changed.scheduled_slot = "2026-11-22T16:00:00Z".into(),
+        }
+        assert!(
+            require_observed_workload_data(&f.policy, &bytes, &changed).is_err(),
+            "cut {cut}"
+        );
+    }
+    let mut changed = f.intent.clone();
+    changed.policy_generation = digest("different-policy");
+    assert!(
+        require_observed_workload_data(&f.policy, &serde_json::to_vec(&changed)?, &data).is_err()
+    );
+    let mut selected = f.policy;
+    selected.generation = digest("different-selection");
+    assert!(require_observed_workload_data(&selected, &bytes, &data).is_err());
     Ok(())
 }
 

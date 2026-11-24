@@ -869,6 +869,26 @@ impl Transcript {
         !self.refused && !self.busy && self.position == self.messages().len()
     }
 
+    /// Local completed receive DATA only. It permits no next frame and proves
+    /// neither the issuer's later ParentAfter nor remote business completion.
+    pub(super) fn require_completed_backup_observation_data(
+        &mut self,
+        observation: Observation,
+    ) -> Result<()> {
+        let result = (|| {
+            ensure!(
+                self.protocol == Protocol::Enrollment
+                    && self.actor == Actor::Client
+                    && self.purpose == StagePurpose::CurrentRole
+                    && self.complete()
+                    && !self.waiting,
+                "backup_observation_cursor_incomplete"
+            );
+            self.observe(observation)
+        })();
+        self.finish_result(result)
+    }
+
     pub(super) fn refuse(&mut self) {
         self.refused = true;
     }
