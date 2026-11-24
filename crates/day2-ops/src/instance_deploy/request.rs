@@ -76,22 +76,12 @@ pub fn suffix(value: &str) -> bool {
     value.len() == SUFFIX_LENGTH && value.bytes().all(|byte| SUFFIX_ALPHABET.contains(&byte))
 }
 
-/// A suffix from secure random bytes, by rejection sampling.
-pub fn random_suffix() -> Result<String> {
-    use ring::rand::SecureRandom;
-    let random = ring::rand::SystemRandom::new();
-    let limit = (256 / SUFFIX_ALPHABET.len() * SUFFIX_ALPHABET.len()) as u8;
-    let mut out = String::new();
-    while out.len() < SUFFIX_LENGTH {
-        let mut byte = [0_u8; 1];
-        random
-            .fill(&mut byte)
-            .map_err(|_| anyhow::anyhow!("no secure random source"))?;
-        if byte[0] < limit {
-            out.push(SUFFIX_ALPHABET[usize::from(byte[0]) % SUFFIX_ALPHABET.len()] as char);
-        }
-    }
-    Ok(out)
+/// A suffix from random bytes: each of the first 8 picks a character.
+pub fn suffix_from(random: [u8; 16]) -> String {
+    random[..SUFFIX_LENGTH]
+        .iter()
+        .map(|byte| SUFFIX_ALPHABET[usize::from(*byte) % SUFFIX_ALPHABET.len()] as char)
+        .collect()
 }
 
 /// One attempt's private paths under `/tmp`: the operator's backup directory,

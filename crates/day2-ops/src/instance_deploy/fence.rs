@@ -295,8 +295,8 @@ pub fn within(now: u64, deadline: Option<u64>, path: Path) -> Result<()> {
     let needed = remaining(path);
     ensure!(
         now.saturating_add(needed) <= deadline,
-        "deploy_deadline: the {} path needs up to {needed} s, but the job's deadline is {} s away; nothing was \
-         stopped, retry with more time",
+        "deploy_deadline: the {} path needs up to {needed} s, but the job's deadline is {} s away; retry with \
+         more time",
         path.name(),
         deadline.saturating_sub(now)
     );
