@@ -89,16 +89,17 @@ pub const ROOTS_APPLY: Deadline = Deadline {
     grace: Duration::from_secs(1800),
 };
 
-/// A deploy's one day2-app root, applied while the app is stopped and within its job's budget: a plan 15 minutes, an
-/// apply 30 minutes, then two minutes' grace. The lock wait is `LOCK_TIMEOUT`, as for every root.
+/// A deploy's one day2-app root, applied while the app is stopped and within its job's budget: a plan 10 minutes, an
+/// apply 15 minutes, then one minute's grace. The lock wait is `LOCK_TIMEOUT`, as for every root.
 pub const DEPLOY_PLAN: Deadline = Deadline {
-    run: Duration::from_secs(900),
-    grace: Duration::from_secs(120),
+    run: Duration::from_secs(600),
+    grace: Duration::from_secs(60),
 };
 pub const DEPLOY_APPLY: Deadline = Deadline {
-    run: Duration::from_secs(1800),
-    grace: Duration::from_secs(120),
+    run: Duration::from_secs(900),
+    grace: Duration::from_secs(60),
 };
+pub const DEPLOY_SHOW: Duration = Duration::from_secs(60);
 
 /// The engine every instance session runs, by version and by the digest of the
 /// official release binary for each supported host.
@@ -450,6 +451,7 @@ pub fn invocation(
             args.push(format!("-var-file={}", layout.rendered.display()).into());
             if root.stack == DAY2_APP {
                 args.push(format!("-var-file={}", layout.release.display()).into());
+                args.extend(release::PROFILE.map(OsString::from));
             }
             let out = if stage == Stage::Target {
                 &layout.target
@@ -1574,7 +1576,12 @@ impl Session {
         let mut command = self.engine(&[])?;
         command.args(args.clone()).envs(env.clone());
         if stage == Stage::Show {
-            let shown = capture(command, Some(&log), Duration::from_secs(300), SHOW_LIMIT)?;
+            let timeout = if self.request.mode == Mode::Deploy {
+                DEPLOY_SHOW
+            } else {
+                Duration::from_secs(300)
+            };
+            let shown = capture(command, Some(&log), timeout, SHOW_LIMIT)?;
             // The same plan as text, which is what an operator reviews before an
             // apply; OpenTofu masks sensitive values in it.
             let mut text = self.engine(&[])?;
@@ -1583,7 +1590,7 @@ impl Session {
             let readable = capture(
                 text,
                 Some(&directory.join("plan-text.log")),
-                Duration::from_secs(300),
+                timeout,
                 SHOW_LIMIT,
             )?;
             fs::write(directory.join("plan.txt"), readable)?;
@@ -1823,6 +1830,10 @@ impl Session {
             else {
                 return Ok(None);
             };
+            ensure!(
+                self.request.mode != Mode::Apply || selection.status == release::Status::Ready,
+                "the app's release is still activating; finish it through the deployment controller before applying"
+            );
             let checked = release::check(&selection.candidate, &app, &releases, &cache, tools)?;
             Ok(Some((checked, Some(selection))))
         })();
@@ -1948,7 +1959,7 @@ impl Session {
             let shown = capture(
                 command,
                 Some(&directory.join("target-show.log")),
-                Duration::from_secs(300),
+                DEPLOY_SHOW,
                 SHOW_LIMIT,
             )?;
             let mut text = self.engine(&[])?;
@@ -1957,7 +1968,7 @@ impl Session {
             let readable = capture(
                 text,
                 Some(&directory.join("target-text.log")),
-                Duration::from_secs(300),
+                DEPLOY_SHOW,
                 SHOW_LIMIT,
             )?;
             ensure!(
@@ -3428,6 +3439,10 @@ mod tests {
                 "-var-file=/out/root/inputs.tfvars",
                 "-var-file=/out/root/rendered.tfvars.json",
                 "-var-file=/out/root/release.tfvars.json",
+                "-var=release_managed=false",
+                "-var=rolling_deploys=false",
+                "-var=workload_name=",
+                "-var=security_shell_contract=null",
                 "-out=/out/root/plan.bin",
                 "-var=kubeconfig_path=/private/kubeconfig",
             ]
@@ -3465,6 +3480,10 @@ mod tests {
                 "-var-file=/out/root/inputs.tfvars",
                 "-var-file=/out/root/rendered.tfvars.json",
                 "-var-file=/out/root/release.tfvars.json",
+                "-var=release_managed=false",
+                "-var=rolling_deploys=false",
+                "-var=workload_name=",
+                "-var=security_shell_contract=null",
                 "-out=/out/root/target.bin",
                 "-var=kubeconfig_path=/private/kubeconfig",
             ]
@@ -3542,21 +3561,22 @@ mod tests {
         assert_eq!(
             Mode::Deploy.deadline(Stage::Apply),
             Deadline {
-                run: Duration::from_secs(1800),
-                grace: Duration::from_secs(120)
+                run: Duration::from_secs(900),
+                grace: Duration::from_secs(60)
             }
         );
         assert_eq!(
             Mode::Deploy.deadline(Stage::Plan),
             Deadline {
-                run: Duration::from_secs(900),
-                grace: Duration::from_secs(120)
+                run: Duration::from_secs(600),
+                grace: Duration::from_secs(60)
             }
         );
         assert_eq!(Mode::Apply.deadline(Stage::Apply), ROOTS_APPLY);
         assert_eq!(Mode::Apply.deadline(Stage::Plan), ROOTS_PLAN);
         assert_eq!(ROOTS_APPLY.run, Duration::from_secs(7200));
         assert_eq!(ROOTS_APPLY.grace, Duration::from_secs(1800));
+        assert_eq!(DEPLOY_SHOW, Duration::from_secs(60));
         assert_eq!(LOCK_TIMEOUT, "-lock-timeout=300s");
     }
 
@@ -4001,13 +4021,8 @@ mod tests {
     #[test]
     fn an_apply_refuses_a_release_that_changed_since_the_reviewed_plan() {
         let (candidate, manifest) = crate::instance_candidate::tests::selected_candidate();
-        let applied = || {
-            let (scratch, mut session) = staged(
-                app_request(Mode::Apply),
-                selection(&candidate),
-                &manifest,
-                &[],
-            );
+        let applied = |objects| {
+            let (scratch, mut session) = staged(app_request(Mode::Apply), objects, &manifest, &[]);
             for label in ["project", "cluster", "tenancy", "app-edge/links"] {
                 session.progress.get_mut(label).unwrap().done =
                     [Stage::Init, Stage::Plan, Stage::Show, Stage::Apply].into();
@@ -4015,19 +4030,34 @@ mod tests {
             (scratch, session)
         };
         let variables = day2::digest(&release::variables(&candidate).unwrap());
-        let (_scratch, mut session) = applied();
-        session.reviewed.releases = [("day2-app/links".to_owned(), Some(variables))].into();
+        let (_scratch, mut session) = applied(selection(&candidate));
+        session.reviewed.releases = [("day2-app/links".to_owned(), Some(variables.clone()))].into();
         assert_eq!(
             session.operation("day2-app/links", "release").unwrap()["ok"],
             true
         );
-        let (_scratch, mut session) = applied();
+        let (_scratch, mut session) = applied(selection(&candidate));
         session.reviewed.releases = [("day2-app/links".to_owned(), None)].into();
         session.operation("day2-app/links", "release").unwrap();
         assert_eq!(
             session.progress["day2-app/links"].failed,
             Some(Failure::Unreviewed)
         );
+        // A matching reviewed plan cannot substitute for activation or a guarded first install.
+        let activating = release::tests::stored(
+            &json!({"version": 1, "status": "activating", "candidate": candidate}),
+        );
+        let (_scratch, mut session) = applied(activating);
+        session.reviewed.releases = [("day2-app/links".to_owned(), Some(variables))].into();
+        assert_eq!(
+            session.operation("day2-app/links", "release").unwrap()["ok"],
+            false
+        );
+        assert_eq!(
+            session.progress["day2-app/links"].failed,
+            Some(Failure::Release)
+        );
+        assert!(session.operation("day2-app/links", "init").is_err());
     }
 
     #[test]

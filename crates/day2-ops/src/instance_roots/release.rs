@@ -42,6 +42,15 @@ pub const OWNED: [&str; 5] = [
     "security_shell_contract",
 ];
 
+/// Pin the direct release profile and derived workload identity at OpenTofu's highest
+/// variable precedence. The committed-input check supplies the early diagnostic.
+pub const PROFILE: [&str; 4] = [
+    "-var=release_managed=false",
+    "-var=rolling_deploys=false",
+    "-var=workload_name=",
+    "-var=security_shell_contract=null",
+];
+
 /// Where an instance keeps and admits releases, rendered by the CLI from day2.json.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

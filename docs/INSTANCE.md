@@ -240,7 +240,9 @@ switches `release_managed` and `rolling_deploys` (with either, the stack would
 ignore the release inputs; the platform deploys only the direct single-app
 profile), of `workload_name` (a deploy derives `day2-<id>`) or of
 `security_shell_contract` (the security shell is not a rendered root yet). That
-root fails with `failed_inputs`. A committed `image` and `artifact_id` are
+root fails with `failed_inputs`. OpenTofu receives the direct release profile,
+derived workload name and absent security shell at command-line precedence.
+A committed `image` and `artifact_id` are
 allowed but never used: the release inputs win over them, and an app with no
 release is not run. The instance's own deploy controller still reads the
 committed `image` as its source binding's image repository until the
@@ -262,9 +264,10 @@ before the root's init:
   and nothing ever falls back to a committed image.
 - **Shape.** Exactly `version` (the integer 1), `status` (`activating` or
   `ready`) and `candidate`. A rolling selection is refused: the platform
-  deploys only the single-app profile. Both statuses select the candidate,
-  including an activation interrupted after `maintain activate`; the stack's
-  own activation guards decide whether that plan can proceed.
+  deploys only the single-app profile. Plans may inspect an `activating`
+  candidate while the stack's activation guards still govern what it can plan.
+  A normal apply requires `ready`. The deployment controller finishes
+  activations and guarded first installs before recording that status.
 - **Candidate.** Checked as [`instance candidate check`](#candidate) checks a
   record, never against the app's current `sdk`, so a selection stays
   deployable across an SDK bump until the next release.
@@ -451,8 +454,9 @@ and apply render it, and the candidate record file being deployed.
   nothing is planned. The selection is the approval record: there is no
   reviewed plan, and destructive plans are still refused.
 - **Deadlines.** Shorter than an apply's, because the app is stopped while it
-  runs: a lock wait of five minutes, 15 minutes for a plan and 30 for the
-  apply, then two minutes' grace after an interrupt.
+  runs: a lock wait of up to five minutes within each step, 10 minutes for a
+  plan and 15 for the apply, then one minute's grace after an interrupt.
+  Each OpenTofu show capture has one minute.
 - **Output.** As for an apply, with statuses `no_changes`, `applied`,
   `not_applied` (the deploy stopped before the apply), `refused_destroy` and the
   failures, including `failed_target`. The root's `release` records the
