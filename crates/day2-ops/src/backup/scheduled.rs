@@ -421,6 +421,59 @@ mod tests {
     }
 
     #[test]
+    fn actual_broker_refuses_changed_source_toolchain_and_executable_before_session_creation()
+    -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let executable = root.path().join("not-an-executable");
+        std::fs::write(&executable, b"unexecutable public fixture DATA")?;
+        for (sources, toolchain, digest, expected) in [
+            (
+                "changed".into(),
+                automation::toolchain_digest(),
+                day2::digest(b"unexecutable public fixture DATA"),
+                "Roc workflow sources changed; run xtask workflows",
+            ),
+            (
+                automation::source_digest(),
+                "changed".into(),
+                day2::digest(b"unexecutable public fixture DATA"),
+                "Roc workflow compiler changed; run xtask workflows",
+            ),
+            (
+                automation::source_digest(),
+                automation::toolchain_digest(),
+                day2::digest(b"different bytes"),
+                "Roc workflow executable changed",
+            ),
+        ] {
+            std::fs::write(
+                executable.with_extension("json"),
+                serde_json::to_vec(&automation::Distribution {
+                    sources,
+                    toolchain,
+                    executable: digest,
+                })?,
+            )?;
+            // The nonexistent source would fail with IO instead if production
+            // bypassed pin admission and tried to create a Session first.
+            let output = root.path().join("must-not-exist");
+            let result = run_with_runner(
+                &executable,
+                &root.path().join("missing-instance"),
+                "app",
+                &output,
+                &[],
+                &[],
+                None,
+            );
+            assert_eq!(result.unwrap_err().to_string(), expected);
+            assert!(!output.exists());
+            assert!(!root.path().join(".state").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn request_codec_requires_unique_exact_objects_and_original_protocol() -> Result<()> {
         for input in [
             "[]",
