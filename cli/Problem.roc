@@ -32,6 +32,10 @@ Problem := [
 	DeployUnavailable(Str),
 	DeployFenced(Str),
 	CiCheckFailed(Str),
+	CiFetchFailed(Str),
+	CiFetchUnavailable(Str),
+	CiStoreFailed(Str),
+	CiWorkflowFailed(Str),
 ].{
 	Dto : { code : Str, message : Str, hint : Str, exit_code : I32, retryable : Bool }
 
@@ -61,8 +65,11 @@ Problem := [
 		| SourceFailed(_)
 		| CandidateFailed(_)
 		| DeployFailed(_)
-		| CiCheckFailed(_) => 6
-		SourceUnavailable(_) | DeployUnavailable(_) => 7
+		| CiCheckFailed(_)
+		| CiFetchFailed(_)
+		| CiStoreFailed(_)
+		| CiWorkflowFailed(_) => 6
+		SourceUnavailable(_) | DeployUnavailable(_) | CiFetchUnavailable(_) => 7
 		DeployFenced(_) => 8
 	}
 
@@ -100,11 +107,15 @@ Problem := [
 		DeployUnavailable(_) => "deploy_unavailable"
 		DeployFenced(_) => "deploy_fenced"
 		CiCheckFailed(_) => "ci_check_failed"
+		CiFetchFailed(_) => "ci_fetch_failed"
+		CiFetchUnavailable(_) => "ci_fetch_unavailable"
+		CiStoreFailed(_) => "ci_store_failed"
+		CiWorkflowFailed(_) => "ci_workflow_failed"
 	}
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This CLI implements app describe <app>, instance check|render|plan|apply|release|source|candidate|deploy <directory> and ci check <head>."
+		UnknownCommand => "This CLI implements app describe <app>, instance check|render|plan|apply|release|source|candidate|deploy|ci-workflow <directory> and ci check|fetch|store."
 		MissingCommand => "Describe options require the command app describe <app>."
 		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
@@ -136,7 +147,11 @@ Problem := [
 		| DeployFailed(detail)
 		| DeployUnavailable(detail)
 		| DeployFenced(detail)
-		| CiCheckFailed(detail) => detail
+		| CiCheckFailed(detail)
+		| CiFetchFailed(detail)
+		| CiFetchUnavailable(detail)
+		| CiStoreFailed(detail)
+		| CiWorkflowFailed(detail) => detail
 	}
 
 	hint : Problem -> Str
@@ -181,6 +196,18 @@ Problem := [
 		CiCheckFailed(
 			_,
 		) => "Fix the reported findings, or the source the build refused, and run again. A failed build keeps its log in the platform's artifacts/operations directory; the new output directory is written only after every lane passes."
+		CiFetchFailed(
+			_,
+		) => "Run in the org-scoped app CI workflow, which sets GITHUB_TOKEN for this step. A pull request from a fork, a push to a branch other than main and any other event are never checked."
+		CiFetchUnavailable(
+			_,
+		) => "A forge read failed transiently for 120 s: a 408, 429 or 5xx, a dropped connection, a short body or a timeout. Nothing was checked; rerun the job."
+		CiStoreFailed(
+			_,
+		) => "Run in the org-scoped app CI workflow after ci fetch and ci check, which sets the git-oidc request token and the app's bucket, audience and SDK for this step. Objects are never replaced: rerun the job as a new attempt."
+		CiWorkflowFailed(
+			_,
+		) => "Render with gcloud signed in for the instance project: reading the project's number needs resourcemanager.projects.get, and each app's selected SDK release needs read access to the state bucket."
 		InvalidAppName(_) => "Use a lowercase identifier up to 48 bytes; day2_ and sqlite_ prefixes are reserved."
 		InvalidOperationName(_) => "Use dot-separated lowercase identifiers, at most 80 bytes in total."
 		_ => "Run day2 --help for usage and examples."
@@ -197,7 +224,7 @@ Problem := [
 				hint: hint(problem),
 				exit_code: exit_code(problem),
 				retryable: match problem {
-					SourceUnavailable(_) | DeployUnavailable(_) => Bool.True
+					SourceUnavailable(_) | DeployUnavailable(_) | CiFetchUnavailable(_) => Bool.True
 					_ => Bool.False
 				},
 			}

@@ -58,7 +58,7 @@ use std::{
     time::Duration,
 };
 
-pub use inputs::source_inputs;
+pub use inputs::{Unpacked, source_inputs, unpack};
 
 /// The instance's build host: the qualification runner stack's VM.
 pub const BUILD_HOST: &str = "day2-x86-qualify";

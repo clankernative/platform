@@ -19,7 +19,10 @@ import InstanceRelease
 import InstanceSource
 import InstanceCandidate
 import InstanceDeploy
+import InstanceCiWorkflow
 import CiCheck
+import CiFetch
+import CiStore
 import Names
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
@@ -78,6 +81,9 @@ main! = |args| {
 		Cli.Request.Candidate(candidate) => candidated!(candidate)
 		Cli.Request.Deploy(deploy) => deployed!(deploy)
 		Cli.Request.CiCheck(check) => ci_checked!(check)
+		Cli.Request.CiFetch(run) => ci_fetched!(run)
+		Cli.Request.CiStore(run) => ci_stored!(run)
+		Cli.Request.CiWorkflow(render) => ci_workflow_rendered!(render)
 	}
 	emit!(Output.new(outcome))
 }
@@ -285,7 +291,7 @@ ci_checked! = |check| {
 		|directory| {
 			file = Path.join(directory, "request.json")
 			Path.write_utf8!(file, CiCheck.request(check)).map_err(|_| "cannot write the ci check request")?
-			Host.ci_check!(Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+			Host.ci!("check", Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
 		},
 	)
 	match ran {
@@ -295,6 +301,82 @@ ci_checked! = |check| {
 		}
 		Err(CallbackErr(error)) => failed(CiCheck.problem(error))
 		Err(_) => failed(Problem.CiCheckFailed("cannot use a private temporary directory"))
+	}
+}
+
+## Fetch an app CI run's trees and record through the platform host, which reads the CI environment and the job token
+## itself and validates the request again. Any failure exits 6 with the host's message.
+ci_fetched! : Cli.CiRun => Output.Outcome
+ci_fetched! = |run| {
+	failed = |problem| Output.Outcome.Failed(problem, run.parts().format, Cli.Command.CiFetch)
+	# The request travels as a private temporary file, as ci check requests do.
+	ran = Env.with_temp_dir!(
+		|directory| {
+			file = Path.join(directory, "request.json")
+			Path.write_utf8!(file, CiFetch.request(run)).map_err(|_| "cannot write the ci fetch request")?
+			Host.ci!("fetch", Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+		},
+	)
+	match ran {
+		Ok(raw) => match CiFetch.report(raw) {
+			Ok(report) => Output.Outcome.CiFetched(run, report)
+			Err(_) => failed(Problem.CiFetchFailed("the platform host returned an unreadable report"))
+		}
+		Err(CallbackErr(error)) => failed(CiFetch.problem(error))
+		Err(_) => failed(Problem.CiFetchFailed("cannot use a private temporary directory"))
+	}
+}
+
+## Validate the spec, have the platform host read the project number and each app's tooling image, then render app
+## CI's org-scoped workflow here, purely. The host validates the request again.
+ci_workflow_rendered! : Cli.Instance => Output.Outcome
+ci_workflow_rendered! = |render| {
+	parts = render.parts()
+	failed = |problem| Output.Outcome.Failed(problem, parts.format, Cli.Command.InstanceCiWorkflow)
+	(path, spec) = match InstanceSpec.load!(parts.directory) {
+		Ok(loaded) => loaded
+		Err(problem) => return failed(problem)
+	}
+	ran = Env.with_temp_dir!(
+		|directory| {
+			file = Path.join(directory, "request.json")
+			Path.write_utf8!(file, InstanceCiWorkflow.request(spec))
+				.map_err(|_| "cannot write the ci-workflow request")?
+			Host.instance_ci_workflow!(Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+		},
+	)
+	match ran {
+		Ok(raw) => match InstanceCiWorkflow.inputs(raw) {
+			Ok(given) => match InstanceCiWorkflow.render(spec, given) {
+				Ok(workflow) => Output.Outcome.CiWorkflowRendered(render, path, spec, workflow)
+				Err(Unrendered(detail)) => failed(InstanceCiWorkflow.problem(detail))
+			}
+			Err(_) => failed(Problem.CiWorkflowFailed("the platform host returned unreadable inputs"))
+		}
+		Err(CallbackErr(error)) => failed(InstanceCiWorkflow.problem(error))
+		Err(_) => failed(Problem.CiWorkflowFailed("cannot use a private temporary directory"))
+	}
+}
+
+## Store an app CI run's checked artifact through the platform host, which reads the store inputs and the git-oidc
+## request token itself and validates the request again. Any failure exits 6, so the required job fails.
+ci_stored! : Cli.CiRun => Output.Outcome
+ci_stored! = |run| {
+	failed = |problem| Output.Outcome.Failed(problem, run.parts().format, Cli.Command.CiStore)
+	ran = Env.with_temp_dir!(
+		|directory| {
+			file = Path.join(directory, "request.json")
+			Path.write_utf8!(file, CiStore.request(run)).map_err(|_| "cannot write the ci store request")?
+			Host.ci!("store", Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+		},
+	)
+	match ran {
+		Ok(raw) => match CiStore.report(raw) {
+			Ok(report) => Output.Outcome.CiStored(run, report)
+			Err(_) => failed(Problem.CiStoreFailed("the platform host returned an unreadable report"))
+		}
+		Err(CallbackErr(error)) => failed(CiStore.problem(error))
+		Err(_) => failed(Problem.CiStoreFailed("cannot use a private temporary directory"))
 	}
 }
 

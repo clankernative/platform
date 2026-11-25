@@ -175,7 +175,9 @@ pub struct Session {
 impl Session {
     /// Validate the request, read the tooling's SDK identity and the head tree.
     pub fn prepare(path: &Path, platform: &Path) -> Result<Self> {
-        Self::with_sdk(path, platform, sdk_distribution(platform)?)
+        let session = Self::with_sdk(path, platform, sdk_distribution(platform)?)?;
+        seed_abi(platform, Path::new(ABI_SEED))?;
+        Ok(session)
     }
 
     fn with_sdk(
@@ -616,6 +618,31 @@ fn operations(platform: &Path, prefix: &str) -> Result<tempfile::TempDir> {
     Ok(tempfile::Builder::new()
         .prefix(prefix)
         .tempdir_in(platform.join("artifacts/operations"))?)
+}
+
+/// Where the SDK tooling image keeps the reviewed worker ABI, outside the
+/// bounded `crates/worker/generated` mount app CI's job puts over its copy:
+/// the build host's newest seed.
+pub const ABI_SEED: &str = crate::instance_candidate::native::SEEDS[0];
+
+/// A job that mounts a fresh `crates/worker/generated` (app CI's bounded
+/// tmpfs) hides the reviewed ABI the build compares its generated glue with:
+/// initialize it from the tooling image's seed, as the instance build host
+/// does. The build still requires the glue it generates to equal it, so a
+/// wrong seed fails the build; an existing ABI is never replaced.
+fn seed_abi(platform: &Path, seed: &Path) -> Result<()> {
+    let target = platform.join("crates/worker/generated/roc_platform_abi.rs");
+    if fs::symlink_metadata(&target).is_ok() {
+        return Ok(());
+    }
+    let bytes = day2_assets::read_regular(seed, 16 << 20).with_context(|| {
+        format!(
+            "the platform's worker ABI is missing and {} holds no reviewed seed",
+            seed.display()
+        )
+    })?;
+    fs::create_dir_all(target.parent().context("worker ABI directory")?)?;
+    crate::instance_source::write_new(&target, &bytes)
 }
 
 /// The SDK identity this tooling knows: its precompiled tooling distribution,

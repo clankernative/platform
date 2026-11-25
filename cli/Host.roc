@@ -75,12 +75,21 @@ Host :: [].{
 		)
 	}
 
-	## `day2 ci check`: the action starts the CI session; the host reads the request from this file and validates it
-	## again. The host's progress goes to stderr.
-	ci_check! : Str => Try(Str, Str)
-	ci_check! = |request| {
+	## `day2 instance ci-workflow`: the host reads the project number and each app's tooling image the rendered
+	## workflow needs, under the names in the request file, which it validates again.
+	instance_ci_workflow! : Str => Try(Str, Str)
+	instance_ci_workflow! = |request| {
+		call!(
+			Json.to_str({ protocol: 1.U32, action: "instance-ci-workflow", input: Json.to_str({ request: request }) }),
+		)
+	}
+
+	## `day2 ci check|fetch|store`: the action starts that CI session; the host reads the request from this file and
+	## validates it again. The host's progress goes to stderr.
+	ci! : Str, Str => Try(Str, Str)
+	ci! = |verb, request| {
 		exchange!(
-			Json.to_str({ protocol: 1.U32, action: "ci-check", input: Json.to_str({ request: request }) }),
+			Json.to_str({ protocol: 1.U32, action: "ci-${verb}", input: Json.to_str({ request: request }) }),
 			Progress,
 		)
 	}

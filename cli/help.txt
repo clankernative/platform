@@ -25,7 +25,10 @@ USAGE
   day2 instance candidate native-probe <job directory> [--agent]
   day2 instance deploy <directory> <platform> <app> <candidate>
                        <new directory> [--deadline <unix seconds>] [--agent]
+  day2 instance ci-workflow <directory> [--agent]
   day2 ci check <head> [<base>] <cases> <new directory> [--agent]
+  day2 ci fetch <new directory> [--agent]
+  day2 ci store <directory> [--agent]
   day2 platform --help
 
 PLATFORM OPERATIONS
@@ -143,6 +146,18 @@ COMMANDS
                   app changes, or 8 if recovery must roll forward from the
                   migration fence. With --deadline, refuse to start a
                   stopped-app phase that can outlast the job's time limit.
+  instance ci-workflow
+                  Validate <directory>/day2.json and print app CI's
+                  org-scoped workflow for <org>/day2-ci,
+                  .gitea/scoped_workflows/verification.yml: workflow day2,
+                  job verification, on pull requests and pushes to main, for
+                  the app repositories of an inline map (tooling image,
+                  cases, CI bucket, provider audience, SDK and its tooling
+                  distribution), running ci fetch, ci check and ci store;
+                  store requests its OIDC token from forge.oidc, without
+                  which it refuses to render. Reads the project's number
+                  with gcloud and each app's tooling image and distribution
+                  from its selected SDK release through the release cache.
   ci check        An app repository's CI over the source tree <head>, whose
                   app is in app/. A push run passes no <base>: every lane
                   runs. A pull request may pass its <base> tree as a gate
@@ -166,6 +181,42 @@ COMMANDS
                   is a qualified SDK's (its precompiled distribution names
                   it); the report says why otherwise. Reads no network or
                   git. Exits 6 when a lane fails.
+  ci fetch        The first step of an app's org-scoped CI run in Gitea
+                  Actions. Read the run from GITHUB_EVENT_NAME,
+                  GITHUB_EVENT_PATH, GITHUB_REPOSITORY, GITHUB_SERVER_URL,
+                  GITHUB_SHA, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT and, when
+                  the runner exports it, GITHUB_WORKFLOW_SHA; check it
+                  against the forge with the job token in GITHUB_TOKEN;
+                  then write the head tree to <new directory>/head, a pull
+                  request's merge base tree (the one its event names) to
+                  <new directory>/base and
+                  the run's record to <new directory>/event.json. Only a
+                  pull request whose head is its base repository and a
+                  push to main are checked; a push has no base, so every
+                  lane runs. Trees are the commits' Gitea archives,
+                  unpacked with deploy's refusals, so the head's app has
+                  deploy's source inputs. Transient forge failures are
+                  retried for up to 120 s, then exit 7. Exits 6 on any
+                  refusal.
+  ci store        The last step of an app's org-scoped CI run, after ci fetch
+                  <directory> and ci check <directory>/head [<directory>/base]
+                  <cases> <directory>/out. When ci check wrote an artifact,
+                  mint an OIDC token through git-oidc
+                  (ACTIONS_ID_TOKEN_REQUEST_URL and _TOKEN; transient answers
+                  are retried for up to 120 s), exchange it at Google STS for
+                  a storage-only access token, and upload artifact.tar.gz,
+                  then receipt.json last, create-only, to
+                  gs://<DAY2_CI_BUCKET>/<sdk>/<source inputs>-<cases>/<run>/
+                  <attempt>/, each with the run as object metadata. The
+                  token request, bucket, provider audience
+                  (DAY2_CI_AUDIENCE), SDK release (DAY2_CI_SDK) and its
+                  tooling distribution (DAY2_CI_DISTRIBUTION) come from the
+                  rendered workflow; the receipt must name that distribution
+                  and the fetched head app's source inputs.
+                  Only main's push run is stored: a pull request run is
+                  verified, not stored, and reaches no service; a push run
+                  must store. Exits 6 on any failure, so the
+                  required job fails.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
@@ -202,8 +253,8 @@ FOR AGENTS
   Help/version JSON lists implemented_commands and explicit capability flags.
   Exit codes: 0 success/help; 2 usage; 3 context/read failure; 4 not found;
               5 invalid or unsupported metadata; 6 an instance root, a
-              release, a source, a candidate or a ci check command
-              failed, or the platform host could not run; 7 a source
+              release, a source, a candidate or a ci command failed, or
+              the platform host could not run; 7 a source or ci fetch
               read failed transiently (retryable); 1 output failure.
 
 PROTOTYPE SCOPE

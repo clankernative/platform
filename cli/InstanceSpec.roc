@@ -16,6 +16,7 @@ InstanceSpec :: {
 	zone : Str,
 	server : Str,
 	org : Str,
+	oidc : Try(Str, [Null]),
 	people : Str,
 	domain : Str,
 	operators : List(Str),
@@ -56,6 +57,9 @@ InstanceSpec :: {
 		edge_state_prefix : Str,
 		backup_bucket : Str,
 
+		## App CI's result bucket: the required workflow stores each checked artifact and its receipt here.
+		ci_bucket : Str,
+
 		## The size preset's runtime limits, exactly day2-app's runtime_resources.
 		runtime_resources : Resources,
 
@@ -87,6 +91,10 @@ InstanceSpec :: {
 		forge_kind : Str,
 		forge_server : Str,
 		forge_org : Str,
+
+		## The instance's OIDC broker for its forge's Actions jobs (git-oidc), an https origin. Gitea mints no OIDC token
+		## itself; app CI's store step requests one here.
+		forge_oidc : Try(Str, [Null]),
 		gcp_project : Str,
 		gcp_region : Str,
 		gcp_zone : Str,
@@ -100,6 +108,14 @@ InstanceSpec :: {
 		instance_repository : Str,
 		ci_repository : Str,
 		required_check : Str,
+
+		## The workload identity pool and provider app CI's store step federates through: Google STS exchanges the
+		## git-oidc token for their audience, which also needs the project's number, discovered when the workflow renders.
+		ci_workload_identity : { pool : Str, provider : Str },
+
+		## The OIDC token request app CI's store step sends, before it names its repository: `<forge.oidc>/token?v=1`.
+		## None without forge.oidc: such an instance cannot render app CI's workflow yet.
+		ci_token_request : Try(Str, [Null]),
 
 		## The project's Artifact Registry, <region>-docker.pkg.dev/<project>. Every derived image is under it, and so are
 		## the images a qualified SDK release pins.
@@ -144,6 +160,7 @@ InstanceSpec :: {
 			forge_kind: "gitea",
 			forge_server: spec.server,
 			forge_org: spec.org,
+			forge_oidc: spec.oidc,
 			gcp_project: spec.project,
 			gcp_region: spec.region,
 			gcp_zone: spec.zone,
@@ -154,6 +171,8 @@ InstanceSpec :: {
 			instance_repository: "${spec.org}/day2-instance",
 			ci_repository: "${spec.org}/day2-ci",
 			required_check: "${spec.org}/day2-ci: ${required_context}",
+			ci_workload_identity: { pool: "day2-ci", provider: "gitea" },
+			ci_token_request: spec.oidc.map_ok(|oidc| "${oidc}/token?v=1"),
 			artifact_registry: registry,
 			sdk_registry: "${registry}/day2",
 			tofu_state_bucket,
@@ -267,6 +286,7 @@ derive_app = |org, domain, project, registry, apply_identity, bound| {
 		state_prefix: "day2-app/${id}",
 		edge_state_prefix: "${platform_state_prefixes.app_edge}/${id}",
 		backup_bucket: "${project}-${id}-backups",
+		ci_bucket: "${project}-${id}-ci",
 		runtime_resources: preset.runtime_resources,
 		sqlite_storage_gb: preset.sqlite_storage_gb,
 	}
@@ -328,7 +348,9 @@ checked = |raw| {
 		return Err(BadJson("gcp.zone must be a zone of gcp.region, such as ${region}-a"))
 	}
 	forge = root.get("forge")?
-	exact(forge, "forge", ["kind", "server", "org"])?
+	# forge.oidc is optional, so an instance can add it once its platform pin reads it; forge is exact otherwise.
+	has_oidc = forge.get("oidc").is_ok()
+	exact(forge, "forge", if has_oidc ["kind", "server", "org", "oidc"] else ["kind", "server", "org"])?
 	forge_kind = text(forge, "kind")?
 	if forge_kind != "gitea" {
 		return Err(BadJson("forge.kind must be gitea"))
@@ -340,6 +362,20 @@ checked = |raw| {
 	org = text(forge, "org")?
 	if !valid_org(org) {
 		return Err(BadJson("forge.org must be 2-24 lowercase letters, digits or inner hyphens, starting with a letter"))
+	}
+	oidc : Try(Str, [Null])
+	oidc = if has_oidc {
+		broker = text(forge, "oidc")?
+		if !(broker.starts_with("https://") and valid_domain(broker.drop_prefix("https://"))) or broker == server {
+			return Err(
+				BadJson(
+					"forge.oidc must be https:// and a lowercase host other than forge.server, with no port or path",
+				),
+			)
+		}
+		Ok(broker)
+	} else {
+		Err(Null)
 	}
 	domains = root.get("domains")?
 	exact(domains, "domains", ["people", "apps"])?
@@ -387,6 +423,7 @@ checked = |raw| {
 			zone,
 			server,
 			org,
+			oidc,
 			people,
 			domain,
 			operators,
@@ -624,7 +661,8 @@ sample =
 	\\{"kind":"instance","version":1,"installation":"exampleco",
 	\\"platform":"fe4320b189b98ed08fccc183db3e70aee76319ee",
 	\\"gcp":{"project":"exampleco-tools","region":"us-central1","zone":"us-central1-a"},
-	\\"forge":{"kind":"gitea","server":"https://git.example.com","org":"tools"},
+	\\"forge":{"kind":"gitea","server":"https://git.example.com","org":"tools",
+	\\"oidc":"https://git-oidc.example.com"},
 	\\"domains":{"people":"example.com","apps":"apps.example.com"},
 	\\"operators":["ada@example.com","grace@example.com"],
 	\\"apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic",
@@ -671,6 +709,7 @@ expect match InstanceSpec.from_json(sample) {
 									state_prefix: "day2-app/go",
 									edge_state_prefix: "platform/app/go",
 									backup_bucket: "exampleco-tools-go-backups",
+									ci_bucket: "exampleco-tools-go-ci",
 									runtime_resources: {
 										memory_mib: 512,
 										cpu_millis: 1000,
@@ -686,6 +725,38 @@ expect match InstanceSpec.from_json(sample) {
 
 expect match InstanceSpec.from_json(sample) {
 	Ok(spec) => spec.derived().apply_identity == "tools-infra@exampleco-tools.iam.gserviceaccount.com"
+	Err(_) => Bool.False
+}
+
+# forge.oidc is optional: without it the spec checks and derives no token request. forge is exact otherwise.
+expect match InstanceSpec.from_json(sample.replace_first(",\n\"oidc\":\"https://git-oidc.example.com\"", "")) {
+	Ok(spec) => spec.derived().forge_oidc == Err(Null) and spec.derived().ci_token_request == Err(Null)
+	Err(_) => Bool.False
+}
+expect InstanceSpec.from_json(sample.replace_first("\"oidc\":", "\"broker\":")).is_err()
+expect InstanceSpec.from_json(sample.replace_first("\"oidc\":\"https://git-oidc.example.com\"", "\"oidc\":null"))
+	.is_err()
+
+# App CI requests its OIDC token from forge.oidc and federates through one derived pool and provider; each app stores
+# its results in its own bucket. The broker is an https origin other than the forge.
+expect InstanceSpec.from_json(sample.replace_first("\"oidc\":\"https://git-oidc", "\"oidc\":\"http://git-oidc"))
+	.is_err()
+expect InstanceSpec.from_json(
+	sample.replace_first("\"oidc\":\"https://git-oidc.example.com\"", "\"oidc\":\"https://git.example.com\""),
+)
+	.is_err()
+expect InstanceSpec.from_json(
+	sample
+		.replace_first("\"oidc\":\"https://git-oidc.example.com\"", "\"oidc\":\"https://git-oidc.example.com/token\""),
+)
+	.is_err()
+expect match InstanceSpec.from_json(sample) {
+	Ok(spec) => {
+		names = spec.derived()
+		names.ci_token_request == Ok("https://git-oidc.example.com/token?v=1")
+			and names.ci_workload_identity == { pool: "day2-ci", provider: "gitea" }
+				and names.apps.map(|bound| bound.ci_bucket) == ["exampleco-tools-go-ci", "exampleco-tools-home-ci"]
+	}
 	Err(_) => Bool.False
 }
 

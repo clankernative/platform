@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "directory": "/work/ci",
+  "event": {
+    "format": 1,
+    "repository": "tools/links",
+    "repository_id": 17,
+    "event": "pull_request",
+    "head": "1111111111111111111111111111111111111111",
+    "base": "2222222222222222222222222222222222222222",
+    "pull_request": 9,
+    "run": 41,
+    "attempt": 2,
+    "workflow_commit": "3333333333333333333333333333333333333333"
+  },
+  "head": {
+    "path": "/work/ci/head",
+    "commit": "1111111111111111111111111111111111111111",
+    "archive": {
+      "digest": "sha256:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "bytes": 2048
+    },
+    "files": 5,
+    "bytes": 65,
+    "directories": 4,
+    "links": 1
+  },
+  "base": {
+    "path": "/work/ci/base",
+    "commit": "2222222222222222222222222222222222222222",
+    "archive": {
+      "digest": "sha256:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "bytes": 2047
+    },
+    "files": 5,
+    "bytes": 69,
+    "directories": 4,
+    "links": 1
+  },
+  "source_inputs": "sha256:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+}

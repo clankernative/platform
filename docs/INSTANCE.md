@@ -24,6 +24,9 @@ day2 instance candidate check DIRECTORY APP CANDIDATE [--agent]
 day2 instance candidate native-build JOB [--agent]
 day2 instance candidate native-probe JOB [--agent]
 day2 instance deploy DIRECTORY PLATFORM APP CANDIDATE NEW_DIRECTORY [--deadline UNIX_SECONDS] [--agent]
+day2 instance ci-workflow DIRECTORY [--agent]
+day2 ci fetch NEW_DIRECTORY [--agent]
+day2 ci store DIRECTORY [--agent]
 ```
 
 `instance check` reads exactly `DIRECTORY/day2.json` and prints every derived
@@ -35,7 +38,8 @@ and `instance apply` [applies](#apply) them. `instance release`
 [publishes and fetches](#release) the qualified SDK releases apps pin, and
 `instance source` [reads an app's source and checked artifact](#source) from the
 forge, and `instance candidate` [builds, probes and checks](#candidate) an app's
-deployment candidate. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
+deployment candidate. `ci fetch` and `ci store` are steps of [app CI](#app-ci), the
+required org-scoped workflow. [InstanceSpec.roc](../cli/InstanceSpec.roc) is the parser and the
 derivation; there is no second schema.
 
 ## The spec
@@ -47,7 +51,12 @@ derivation; there is no second schema.
   "installation": "exampleco",
   "platform": "fe4320b189b98ed08fccc183db3e70aee76319ee",
   "gcp": { "project": "exampleco-tools", "region": "us-central1", "zone": "us-central1-a" },
-  "forge": { "kind": "gitea", "server": "https://git.example.com", "org": "tools" },
+  "forge": {
+    "kind": "gitea",
+    "server": "https://git.example.com",
+    "org": "tools",
+    "oidc": "https://git-oidc.example.com"
+  },
   "domains": { "people": "example.com", "apps": "apps.example.com" },
   "operators": ["ada@example.com", "grace@example.com"],
   "apps": {
@@ -73,7 +82,8 @@ derivation; there is no second schema.
 }
 ```
 
-- Every object is exact. Each field is required and unknown fields fail.
+- Every object is exact. Each field is required, except `forge.oidc`, and unknown
+  fields fail.
 - `operators` and the `apps` keys must be strictly sorted, so one spec has
   exactly one spelling.
 - `platform` is a full commit of `github.com/clankernative/platform`. The
@@ -83,6 +93,13 @@ derivation; there is no second schema.
 - `forge.org` is 2–24 lowercase letters, digits or inner hyphens, starting with
   a letter. It also names the instance's apply identity, `<org>-infra`, and GCP
   caps a service-account ID at 30 bytes.
+- `forge.oidc` is the instance's OIDC broker for its forge's Actions jobs
+  (git-oidc), `https://<host>` other than `forge.server`. Gitea mints no OIDC
+  token itself, and which broker an instance federates through is its own
+  choice. App CI's store step requests its token there. It is optional, so an
+  instance adds it once its platform pin reads it. `instance check` passes
+  without it. `instance ci-workflow` refuses to render without it, and so
+  does `ci store` when a push run needs the token request.
 - `domains.people` is not a service-account domain: owners become rendered
   admins, and day2-app requires a person among them.
 - Operators are lowercase addresses in `domains.people`. Every address is at
@@ -117,6 +134,8 @@ Nothing below can be configured, restated or overridden.
 | Instance repository | `<org>/day2-instance` |
 | CI repository | `<org>/day2-ci` |
 | Required app check | `<org>/day2-ci: day2 / verification (pull_request)` |
+| App CI workload identity | pool `day2-ci`, provider `gitea`; the store step's audience is `https://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/day2-ci/providers/gitea` |
+| App CI token request | `<forge.oidc>/token?v=1&repository=<org>/<id>`, rendered into the store step when `forge.oidc` is set |
 | Artifact registry | `<region>-docker.pkg.dev/<project>` |
 | SDK image registry | `<region>-docker.pkg.dev/<project>/day2` |
 | Shared OpenTofu state bucket | `<project>-tofu-state` |
@@ -131,6 +150,7 @@ Nothing below can be configured, restated or overridden.
 | App state | bucket `<project>-<id>-state`, prefix `day2-app/<id>` |
 | App edge state | bucket `<project>-tofu-state`, prefix `platform/app/<id>` |
 | App backups | `<project>-<id>-backups` |
+| App CI results | `<project>-<id>-ci`, where the required workflow's store step writes |
 | App resources | from `size`: `standard` 512 MiB, `large` 2048 MiB; both 1000m CPU, 1024 processes, 4 concurrent requests, 30 s shutdown and a 5 GiB SQLite volume |
 | Extension downloads | `/downloads/<id>.crx` and `/downloads/updates.xml`, when `extension` is set |
 | Extension update URL | `https://<id>.<domains.apps>/downloads/updates.xml`, when `extension` is set |
@@ -618,8 +638,9 @@ writes is valid to the other.
     are:
     - a pax global header with a record other than `comment`, or after a
       pending extension, and an extension with no member after it;
-    - a GNU long name beside a different pax path, two pax headers for one
-      member, and a duplicate `path` or `size` record;
+    - a GNU long name or link beside a different pax path or link path, two
+      pax headers for one member, and a duplicate `path`, `size` or
+      `linkpath` record;
     - `GNU.sparse.*` records, and a pax `size` that is not canonical decimal or
       differs from the header's;
     - a name with a NUL, and a non-ustar header with a prefix field;
@@ -841,6 +862,205 @@ failure-injection and first-install checks use local substitutes for the
 operator, kubectl, gcloud, and the app-root runner. Production rollout and
 recovery behavior still needs live qualification.
 
+## App CI
+
+App CI is the [required check](#derived-names): one org-scoped workflow in
+`<org>/day2-ci` runs for every app repository, so an app repository can neither
+edit, skip nor impersonate it. Its job runs three `day2` commands and nothing
+else. The YAML holds no logic beyond choosing the check's optional base (see
+[Workflow](#workflow)).
+
+1. `day2 ci fetch DIRECTORY` reads the run and its trees from the forge.
+2. `day2 ci check DIRECTORY/head [DIRECTORY/base] CASES DIRECTORY/out`
+   checks them, reading only local trees (see the CLI's
+   [README](../cli/README.md)).
+3. `day2 ci store DIRECTORY` stores what the check wrote in the app's CI
+   bucket.
+
+### Workflow
+
+`day2 instance ci-workflow DIRECTORY` prints the workflow file,
+`.gitea/scoped_workflows/verification.yml` in `<org>/day2-ci`, rendered from
+`day2.json` by a pure renderer
+([InstanceCiWorkflow.roc](../cli/InstanceCiWorkflow.roc)). The host reads two
+inputs for it, with the ambient Google credentials. `--agent` returns the file in
+`result.workflow`. [cli/fixtures/ci-workflow.yml](../cli/fixtures/ci-workflow.yml)
+pins the fixture instance's file.
+
+- **Inputs.** The project's number (`gcloud projects describe`), which the
+  provider audience names. Each app's tooling image and tooling distribution:
+  the digest-pinned `tooling.image` and the `distribution` digest of the
+  release manifest its `sdk` selects, read through the [release cache](#release)
+  and pinned under the instance's registry, as a binding's `tooling_image` is.
+- **Name.** The workflow is `day2` with one job, `verification`, so the
+  statuses are `day2 / verification (pull_request)` and
+  `day2 / verification (push)`.
+- **Triggers.** `pull_request` and `push` to `main`.
+- **Repositories.** A map, keyed by app repository and rendered inline into
+  each expression that needs it, gives each app its tooling image, `verification`
+  cases, CI bucket, provider audience, `sdk` and tooling distribution. The
+  job's `if:` runs only for
+  repositories in the map. The map is never a repository or org variable: a
+  repository variable overrides an org one, so an app could redirect its own CI.
+- **Job.** `runs-on: [self-hosted, <org>, linux, X64]`, the SDK tooling image
+  as the container, with the apps' earlier `roc` job's options: 6 GiB, 4 CPUs,
+  512 processes and the bounded tmpfs mounts over `/workspace/platform/artifacts`
+  and `/workspace/platform/crates/worker/generated`. `ci check` initializes that
+  generated mount from the image's reviewed ABI seed, and the build still
+  requires its glue to equal it. `permissions` are `contents: read` and
+  `id-token: write`, as the instance CI workflow has; fetch reads the merge
+  base from the event, so no pull request permission is needed.
+- **Steps.** fetch, check and store, each one `/workspace/platform/cli/day2`
+  command in `/tmp/day2-ci`. Only fetch receives `GITHUB_TOKEN`, and only store
+  `ACTIONS_ID_TOKEN_REQUEST_TOKEN` (both `${{ secrets.GITHUB_TOKEN }}`) and the
+  store inputs. The step `env:` holds every store input, the token request
+  `ACTIONS_ID_TOKEN_REQUEST_URL: <forge.oidc>/token?v=1&repository=${{
+  github.repository }}` included: Gitea mints no OIDC token itself, and a
+  value in a step's own `env:` is one an earlier step cannot replace through
+  `$GITHUB_ENV`.
+- **Logic.** The check step passes `/tmp/day2-ci/base` only for
+  `pull_request` (`${{ github.event_name == 'pull_request' && ... || '' }}`),
+  because `ci check` takes its base as an optional positional. That expression
+  is the one choice the YAML makes.
+- **Trust.** Check runs the app's code (its Roc build and tests, its
+  verification campaign) in the same container as the other steps, and the
+  platform claims no hostile-code containment. Keeping the tokens out of the
+  check step's `env:` therefore stops only accidental exposure. Code that
+  check runs could still:
+  - rewrite `DIRECTORY`, including the artifact, the receipt and the record;
+  - set variables for later steps through `$GITHUB_ENV` (such as
+    `LD_PRELOAD`);
+  - replace platform files that are writable in the image;
+  - read a token that a runner exports to every step. act's
+    `ACTIONS_RUNTIME_TOKEN` is unverified here.
+
+  So a pull request run's artifact cannot be trusted, and store keeps none
+  ([Store](#store)). Main's push run runs reviewed code. Store checks a
+  push run's record, receipt and inputs for consistency, not for tampering,
+  and it ignores proxy variables. Running check as another user, with the
+  platform and the run directory read-only except `out/`, is the open fix.
+
+### Fetch
+
+`ci fetch NEW_DIRECTORY` is the job's first step and the only one, with the
+store step, that receives the job token.
+
+- **Run.** It reads the Gitea Actions variables `GITHUB_EVENT_NAME`,
+  `GITHUB_EVENT_PATH`, `GITHUB_REPOSITORY`, `GITHUB_SERVER_URL`, `GITHUB_SHA`,
+  `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`, all required, and
+  `GITHUB_WORKFLOW_SHA` when the runner exports it. A scoped run's
+  repository, commit and token are the consuming app repository's.
+  `GITHUB_REPOSITORY` must be `<org>/<id>` for an app ID, never a `day2-`
+  repository. A refusal names a variable, never its value.
+- **Events.** The payload must describe the same repository and commit.
+  - `pull_request`: the head is the pull request's head commit. The base is
+    its merge base, as the apps' earlier routing used (`git merge-base` of the
+    base and head commits). The event names it: `pull_request.merge_base`, the
+    merge base Gitea computed. Gitea's compare API reports none. A pull request
+    whose head repository is not the base repository is refused: a fork's, or
+    one whose head repository was deleted. Gitea's AGit-flow pull requests
+    have the base repository as their head, so they are not refused.
+  - `push`: only to `refs/heads/main`, with no base, so every lane runs and
+    the run produces its artifact.
+  - Any other event is refused.
+- **Forge reads.** The job token comes from `GITHUB_TOKEN`, which the workflow
+  sets for this step alone, and goes only to the run's own repository on
+  `GITHUB_SERVER_URL`. It is never printed. The repository the token reads must
+  have the payload's ID and name. A failed connection or HTTP 408, 429 or 5xx is
+  retried as the instance workflows wait for git-oidc: a pause of 2 s doubling
+  to 16 s plus up to as much jitter, while the pause and 5 s more fit in 120 s.
+  Any other status fails at once with [`instance source`](#source)'s code.
+- **Trees.** Each tree is its commit's Gitea archive, read by the code deploy
+  uses (`instance_source::Forge::archive`, at most 64 MiB). It is unpacked into
+  `NEW_DIRECTORY/head` or `NEW_DIRECTORY/base` by the walk that computes deploy's
+  source inputs, so `app/` in the head tree has exactly the source inputs a
+  deploy of that commit computes. The report prints them. Both trees get the
+  walk's refusals: one root directory, safe paths, deploy's budgets, and only
+  directories, regular files and symlinks. A symlink is refused inside the
+  head's `app/`, where deploy refuses it. Outside `app/` it is kept with its
+  target unresolved, as Home's top-level module links are. Beyond deploy,
+  every path is written once and nothing is written below a file or a link,
+  so no entry leaves the tree. A name must be UTF-8. A file is 0755 when any
+  execute bit is set and 0644 otherwise.
+- **Record.** `NEW_DIRECTORY/event.json` is written last. It holds exactly
+  `format` (1), `repository`, `repository_id`, `event`, `head`, `base` (null for
+  a push), `pull_request` (null for a push), `run`, `attempt` and
+  `workflow_commit` (null when the runner does not export it).
+  `NEW_DIRECTORY` must be new and is created 0700.
+- **Failures** exit 6 with `ci_fetch_failed` and the host's message. A forge
+  read that stayed transient for 120 s exits 7 with `ci_fetch_unavailable`,
+  `"retryable": true` and `source_temporarily_unavailable`, as
+  [`instance source`](#source) does.
+
+### Store
+
+`ci store DIRECTORY` is the job's last step. For main's push run it stores the
+artifact `ci check` wrote to `DIRECTORY/out`, write-once, in the app's CI bucket:
+
+```text
+gs://<project>-<id>-ci/<sdk>/<source inputs>-<cases>/<run>/<attempt>/artifact.tar.gz
+gs://<project>-<id>-ci/<sdk>/<source inputs>-<cases>/<run>/<attempt>/receipt.json
+```
+
+`<sdk>` is the hex of the app's selected release manifest digest, `<source
+inputs>` the hex of the receipt's source inputs and `<cases>` its verification
+cases. `<run>` and `<attempt>` are the run's.
+
+- **Only push runs.** A `pull_request` record stores nothing, whether or not
+  `ci check` wrote an artifact. The command reports "pull_request runs are
+  verified, not stored" and succeeds. It reads no store input, mints no token
+  and reaches no service. A push run checks every lane, so a missing artifact
+  is a failure. The workload identity provider admits only `push` runs on
+  `refs/heads/main`, so git-oidc needs no pull request grant for this audience.
+- **Not a goal: reusing a pull request's result on main.** The check step runs
+  the pull request's code in the job's container. That code can rewrite
+  `DIRECTORY` and set later steps' variables through `$GITHUB_ENV` (see
+  [Workflow](#workflow)), so a pull request run's artifact is its author's
+  evidence, not the platform's. Main's push run, of reviewed code, builds
+  and stores its own. Reuse waits until check is isolated from store.
+- **Run.** `DIRECTORY/event.json` must be this run's record: its repository,
+  event, head commit, run, attempt and workflow commit are checked against the
+  step's own `GITHUB_*` variables.
+- **Inputs.** They come from the rendered workflow, never from the app
+  repository, and are read only when there is an artifact:
+  - `ACTIONS_ID_TOKEN_REQUEST_URL` must be exactly
+    `https://<host>/token?v=1&repository=<the run's repository>`, with no
+    port, credentials or other query.
+  - `DAY2_CI_BUCKET` must be `<project>-<id>-ci` for the run's app.
+  - `DAY2_CI_AUDIENCE` is the workload identity provider's audience,
+    `https://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`.
+  - `DAY2_CI_SDK` is the app's selected release.
+  - `DAY2_CI_DISTRIBUTION` is that release's tooling distribution.
+- **Output.** `DIRECTORY/out` must hold exactly `app.tar.gz` and
+  `receipt.json`.
+  - The receipt is a complete run's: every lane, seed 42, 4 to 100 cases,
+    and an archive of the file's size.
+  - Its `sdk_distribution` must be `DAY2_CI_DISTRIBUTION`.
+  - Its `source_inputs` must be those of `DIRECTORY/head/app`, recomputed.
+- **Credential.** git-oidc mints an OIDC token as the instance workflows
+  request it: `GET ${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=<audience>` with
+  `Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}`, reading `.value`. A failed connection,
+  408, 429 or 5xx is retried with the wait [fetch](#fetch) uses; any other
+  answer fails at once with git-oidc's reason. Google STS exchanges the token
+  for a federated access token: the audience is the provider's resource name
+  (`//iam.googleapis.com/...`), the scope only
+  `https://www.googleapis.com/auth/devstorage.read_write`. There is no service
+  account and no key. No token is ever printed, and proxy variables are
+  ignored.
+- **Uploads.** Each is a multipart upload with `ifGenerationMatch=0`, so an
+  object is never replaced. The object's custom metadata holds `run`,
+  `attempt`, `head`, `event` and, when the runner exports it,
+  `workflow_commit`. Uploads go in this order:
+  1. `artifact.tar.gz`. Its bytes are read once, and their digest must still
+     be the receipt's, immediately before they are sent.
+  2. `receipt.json` last, the commit marker, unchanged since it was checked.
+
+  The response must name the object in the bucket with its size, a generation
+  and the metadata sent.
+- **Failures** exit 6 with `ci_store_failed`: a refused mint or exchange, a
+  precondition failure (this run and attempt already stored), a changed
+  artifact or receipt, anything. The required job fails with it.
+
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
@@ -863,7 +1083,8 @@ recovery behavior still needs live qualification.
    with narrow Rust capabilities. Instance workflows become rendered shims that
    call `day2 instance plan` and `day2 instance apply`; any edit to a shim fails
    the check.
-4. **Fixed forge layout.** Apply reconciles the forge org: the fixed
+4. **Fixed forge layout (started: [app CI](#app-ci)'s `ci check`, `ci fetch` and
+   `ci store` and its rendered workflow, `instance ci-workflow`).** Apply reconciles the forge org: the fixed
    repositories, a protection rule on every app's default branch (which is what
    subjects it to the required org workflow) and webhooks. App CI is the required org-scoped workflow in `<org>/day2-ci`, so an
    app repository can neither edit, skip nor impersonate it. App repositories

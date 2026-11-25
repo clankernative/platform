@@ -410,6 +410,10 @@ mod tests {
             "fixtures/candidate-receipt.json",
             "fixtures/deploy-receipt.json",
             "fixtures/ci-check-report.json",
+            "fixtures/ci-fetch-report.json",
+            "fixtures/ci-store-report.json",
+            "fixtures/ci-workflow-inputs.json",
+            "fixtures/ci-workflow.yml",
         ] {
             fs::copy(root().join(fixture), scratch.0.join(fixture)).unwrap();
         }
@@ -1044,7 +1048,10 @@ mod tests {
                     "instance.candidate.native-build",
                     "instance.candidate.native-probe",
                     "instance.deploy",
-                    "ci.check"
+                    "instance.ci-workflow",
+                    "ci.check",
+                    "ci.fetch",
+                    "ci.store"
                 ])
             );
             assert_eq!(value["result"]["supports_authentication"], false);
@@ -1307,7 +1314,8 @@ mod tests {
     const SPEC: &str = r#"{"kind":"instance","version":1,"installation":"exampleco",
 "platform":"fe4320b189b98ed08fccc183db3e70aee76319ee",
 "gcp":{"project":"exampleco-tools","region":"us-central1","zone":"us-central1-a"},
-"forge":{"kind":"gitea","server":"https://git.example.com","org":"tools"},
+"forge":{"kind":"gitea","server":"https://git.example.com","org":"tools",
+"oidc":"https://git-oidc.example.com"},
 "domains":{"people":"example.com","apps":"apps.example.com"},
 "operators":["ada@example.com","grace@example.com"],
 "apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic",
@@ -1377,6 +1385,10 @@ mod tests {
         );
         assert_eq!(result["app_namespace_prefix"], "app-");
         assert_eq!(
+            result["ci_workload_identity"],
+            json!({"pool": "day2-ci", "provider": "gitea"})
+        );
+        assert_eq!(
             result["operators"],
             json!(["ada@example.com", "grace@example.com"])
         );
@@ -1411,6 +1423,7 @@ mod tests {
                     "state_prefix": "day2-app/go",
                     "edge_state_prefix": "platform/app/go",
                     "backup_bucket": "exampleco-tools-go-backups",
+                    "ci_bucket": "exampleco-tools-go-ci",
                     "runtime_resources": {"memory_mib": 512, "cpu_millis": 1000, "process_limit": 1024,
                                           "http_concurrency": 4, "shutdown_seconds": 30},
                     "sqlite_storage_gb": 5
@@ -1433,6 +1446,7 @@ mod tests {
                     "state_prefix": "day2-app/home",
                     "edge_state_prefix": "platform/app/home",
                     "backup_bucket": "exampleco-tools-home-backups",
+                    "ci_bucket": "exampleco-tools-home-ci",
                     "runtime_resources": {"memory_mib": 2048, "cpu_millis": 1000, "process_limit": 1024,
                                           "http_concurrency": 4, "shutdown_seconds": 30},
                     "sqlite_storage_gb": 5

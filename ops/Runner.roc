@@ -14,11 +14,14 @@ import ops.InstanceRelease
 import ops.InstanceSource
 import ops.InstanceCandidate
 import ops.InstanceDeploy
+import ops.InstanceCiWorkflow
 import ops.Build
 import ops.Delegation
 import ops.Check
 import ops.Ci
 import ops.CiCheck
+import ops.CiFetch
+import ops.CiStore
 import ops.Verify
 import ops.Linux
 import ops.RuntimeImage
@@ -95,8 +98,11 @@ run! = |args| match args {
 	["instance-candidate-native-build-session", request] => InstanceCandidate.native_build!(request, call!)
 	["instance-candidate-native-probe-session", request] => InstanceCandidate.native_probe!(request, call!)
 	["instance-deploy-session", request, roots] => InstanceDeploy.run!(request, roots, call!)
-	# Only the host starts this, for `day2 ci check`; it has no `platform` entry.
+	["instance-ci-workflow-session", request] => InstanceCiWorkflow.run!(request, call!)
+	# Only the host starts these, for `day2 ci check`, `fetch` and `store`; they have no `platform` entry.
 	["ci-check-session", request] => CiCheck.run!(request, call!)
+	["ci-fetch-session", request] => CiFetch.run!(request, call!)
+	["ci-store-session", request] => CiStore.run!(request, call!)
 	["build-recipe"] => Build.recipe!(call!)
 	["build-tested-recipe"] => Build.tested_recipe!(call!)
 	["build-delegation"] => Delegation.build!(call!)

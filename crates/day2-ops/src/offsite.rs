@@ -17,6 +17,7 @@ use reqwest::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -153,16 +154,77 @@ fn access_token(client: &Client, url: &str) -> Result<response::PrivateText> {
     Ok(response::token(&mut response, status.as_u16())?)
 }
 
-struct Uploader<'a> {
+/// Create-only uploads into one bucket, with one bearer token. App CI's store
+/// step (`ci_store`) uploads through this too, so its objects get the same
+/// total request deadline and the same closed provider replies.
+pub(crate) struct Uploader<'a> {
     client: Client,
     endpoint: Url,
     bucket: &'a str,
     token: response::PrivateText,
 }
 
-impl Uploader<'_> {
+/// What one create-only upload sends with an object's bytes.
+#[derive(Clone, Copy)]
+enum Upload<'m> {
+    /// A media upload: the object's name in the query, then its bytes.
+    Media,
+    /// A multipart upload: the object's resource with this custom metadata,
+    /// then its bytes. The reply must echo exactly that metadata.
+    Multipart(&'m BTreeMap<String, String>),
+}
+
+impl<'a> Uploader<'a> {
+    /// An uploader for a bearer token obtained elsewhere (app CI's federated
+    /// access token).
+    pub(crate) fn new(
+        client: Client,
+        endpoint: &str,
+        bucket: &'a str,
+        token: String,
+    ) -> Result<Self> {
+        validate_bucket(bucket)?;
+        Ok(Self {
+            client,
+            endpoint: Url::parse(endpoint)?,
+            bucket,
+            token: response::PrivateText::new(token),
+        })
+    }
+
     fn put(&self, name: &str, body: Body, bytes: u64, content_type: &str) -> Result<Value> {
         self.put_bounded(name, body, bytes, content_type, OBJECT_TIMEOUT)
+    }
+
+    /// One create-only multipart upload under the fixed production bound: the
+    /// object's resource (its name, content type and custom `metadata`), then
+    /// its bytes. The boundary is derived from the bytes' sha256, which those
+    /// bytes cannot contain without a hash collision.
+    pub(crate) fn put_with_metadata(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        content_type: &str,
+        metadata: &BTreeMap<String, String>,
+    ) -> Result<Value> {
+        let boundary = format!("day2-{}", &day2::digest(bytes)["sha256:".len()..]);
+        let resource = json!({"name": name, "contentType": content_type, "metadata": metadata});
+        let mut body = format!(
+            "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{resource}\r\n\
+             --{boundary}\r\nContent-Type: {content_type}\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let multipart = format!("multipart/related; boundary={boundary}");
+        self.send(
+            name,
+            Upload::Multipart(metadata),
+            Body::from(body),
+            u64::try_from(bytes.len())?,
+            &multipart,
+            OBJECT_TIMEOUT,
+        )
     }
 
     // The same fixed production bound is explicit on the asynchronous request,
@@ -177,18 +239,37 @@ impl Uploader<'_> {
         content_type: &str,
         timeout: Duration,
     ) -> Result<Value> {
+        self.send(name, Upload::Media, body, bytes, content_type, timeout)
+    }
+
+    /// The one request site for every upload: `bytes` is the object's size.
+    fn send(
+        &self,
+        name: &str,
+        upload: Upload<'_>,
+        body: Body,
+        bytes: u64,
+        content_type: &str,
+        timeout: Duration,
+    ) -> Result<Value> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut()
             .map_err(|()| anyhow::anyhow!("GCS upload URL"))?
             .extend(["b", self.bucket, "o"]);
+        let (kind, fields) = match upload {
+            Upload::Media => ("media", "name,bucket,size,generation"),
+            Upload::Multipart(_) => ("multipart", "name,bucket,size,generation,metadata"),
+        };
         url.query_pairs_mut()
-            .append_pair("uploadType", "media")
+            .append_pair("uploadType", kind)
             .append_pair("ifGenerationMatch", "0")
             // GCS's common fields parameter applies to JSON API uploads too.
             // Select the exact response contract rather than parsing its full
             // Object resource or keeping arbitrary provider metadata.
-            .append_pair("fields", "name,bucket,size,generation")
-            .append_pair("name", name);
+            .append_pair("fields", fields);
+        if let Upload::Media = upload {
+            url.query_pairs_mut().append_pair("name", name);
+        }
         let mut response = self
             .client
             .post(url)
@@ -198,9 +279,18 @@ impl Uploader<'_> {
             .timeout(timeout)
             .send()
             .map_err(|_| response::Refused::transport(response::Stage::Object))?;
-        let status = response.status();
-        let generation =
-            response::object(&mut response, status.as_u16(), name, self.bucket, bytes)?;
+        let status = response.status().as_u16();
+        let generation = match upload {
+            Upload::Media => response::object(&mut response, status, name, self.bucket, bytes)?,
+            Upload::Multipart(metadata) => response::object_with_metadata(
+                &mut response,
+                status,
+                name,
+                self.bucket,
+                bytes,
+                metadata,
+            )?,
+        };
         Ok(json!({"name":name,"bytes":bytes,"generation":generation.to_string()}))
     }
 }
