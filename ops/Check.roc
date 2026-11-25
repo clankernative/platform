@@ -13,13 +13,13 @@ Check :: [].{
 
 	run! : Str, U64, U64, (Str => Try(Str, Str)) => Try(Str, Str)
 	run! = |source, seed, count, host!| {
-		_ = ChromeExtension.verify!(source, host!)?
-		# The build runs this seed and count as its required verification before it
-		# selects the artifact, so that evidence is the check. A second campaign over
-		# the same artifact would repeat the build's own.
-		built = Build.checked!(source, seed, count, host!)?
+		built = checked!(source, seed, count, Untested, host!)?
 		Ok(Json.to_str(built.verification))
 	}
+
+	## `day2 ci check`'s native lane: the same check, whose build also runs the top-level expects of every captured app module.
+	tested! : Str, U64, U64, (Str => Try(Str, Str)) => Try(Build.Receipt, Str)
+	tested! = |source, seed, count, host!| checked!(source, seed, count, Tested, host!)
 
 	campaign! : Settings, (Str => Try(Str, Str)) => Try(Str, Str)
 	campaign! = |settings, host!| {
@@ -70,6 +70,18 @@ Check :: [].{
 		}
 		_ = Capability.call!("dev-errors", "{}", host!)?
 		Capability.call!("dev-finish", "{}", host!)
+	}
+
+	checked! : Str, U64, U64, [Tested, Untested], (Str => Try(Str, Str)) => Try(Build.Receipt, Str)
+	checked! = |source, seed, count, tests, host!| {
+		_ = ChromeExtension.verify!(source, host!)?
+		# The build runs this seed and count as its required verification before it
+		# selects the artifact, so that evidence is the check. A second campaign over
+		# the same artifact would repeat the build's own.
+		match tests {
+			Tested => Build.tested!(source, seed, count, host!)
+			Untested => Build.checked!(source, seed, count, host!)
+		}
 	}
 
 	step! : Step, (Str => Try(Str, Str)) => Try({}, Str)

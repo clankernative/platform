@@ -31,6 +31,7 @@ Problem := [
 	DeployFailed(Str),
 	DeployUnavailable(Str),
 	DeployFenced(Str),
+	CiCheckFailed(Str),
 ].{
 	Dto : { code : Str, message : Str, hint : Str, exit_code : I32, retryable : Bool }
 
@@ -54,7 +55,13 @@ Problem := [
 		| InvalidCatalog(_)
 		| UnsupportedArtifact(_)
 		| MetadataTooLarge => 5
-		PlanFailed(_) | ApplyFailed(_) | ReleaseFailed(_) | SourceFailed(_) | CandidateFailed(_) | DeployFailed(_) => 6
+		PlanFailed(_)
+		| ApplyFailed(_)
+		| ReleaseFailed(_)
+		| SourceFailed(_)
+		| CandidateFailed(_)
+		| DeployFailed(_)
+		| CiCheckFailed(_) => 6
 		SourceUnavailable(_) | DeployUnavailable(_) => 7
 		DeployFenced(_) => 8
 	}
@@ -92,11 +99,12 @@ Problem := [
 		DeployFailed(_) => "deploy_failed"
 		DeployUnavailable(_) => "deploy_unavailable"
 		DeployFenced(_) => "deploy_fenced"
+		CiCheckFailed(_) => "ci_check_failed"
 	}
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This CLI implements app describe <app> and instance check|render|plan|apply|release|source|candidate|deploy <directory>."
+		UnknownCommand => "This CLI implements app describe <app>, instance check|render|plan|apply|release|source|candidate|deploy <directory> and ci check <head>."
 		MissingCommand => "Describe options require the command app describe <app>."
 		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
@@ -127,7 +135,8 @@ Problem := [
 		| CandidateFailed(detail)
 		| DeployFailed(detail)
 		| DeployUnavailable(detail)
-		| DeployFenced(detail) => detail
+		| DeployFenced(detail)
+		| CiCheckFailed(detail) => detail
 	}
 
 	hint : Problem -> Str
@@ -169,6 +178,9 @@ Problem := [
 		DeployFenced(
 			_,
 		) => "Use the same selected candidate to roll forward. Follow the archived maintenance journal for recovery."
+		CiCheckFailed(
+			_,
+		) => "Fix the reported findings, or the source the build refused, and run again. A failed build keeps its log in the platform's artifacts/operations directory; the new output directory is written only after every lane passes."
 		InvalidAppName(_) => "Use a lowercase identifier up to 48 bytes; day2_ and sqlite_ prefixes are reserved."
 		InvalidOperationName(_) => "Use dot-separated lowercase identifiers, at most 80 bytes in total."
 		_ => "Run day2 --help for usage and examples."

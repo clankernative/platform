@@ -17,6 +17,7 @@ import ops.Build
 import ops.Delegation
 import ops.Check
 import ops.Ci
+import ops.CiCheck
 import ops.Verify
 import ops.Linux
 import ops.RuntimeImage
@@ -79,7 +80,10 @@ run! = |args| match args {
 	["instance-candidate-native-build-session", request] => InstanceCandidate.native_build!(request, call!)
 	["instance-candidate-native-probe-session", request] => InstanceCandidate.native_probe!(request, call!)
 	["instance-deploy-session", request, roots] => InstanceDeploy.run!(request, roots, call!)
+	# Only the host starts this, for `day2 ci check`; it has no `platform` entry.
+	["ci-check-session", request] => CiCheck.run!(request, call!)
 	["build-recipe"] => Build.recipe!(call!)
+	["build-tested-recipe"] => Build.tested_recipe!(call!)
 	["build-delegation"] => Delegation.build!(call!)
 	["build-delegation-business"] => Delegation.business!(call!)
 	["exercise", example, count] => Check.exercise!(example, U64.from_str(count).map_err(|_| "invalid count")?, call!)

@@ -11,6 +11,7 @@ package
 		Delegation,
 		Check,
 		Ci,
+		CiCheck,
 		Verify,
 		Linux,
 		RuntimeImage,

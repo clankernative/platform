@@ -1,0 +1,10 @@
+{
+  "version": "1.80.0",
+  "target": "x86_64-unknown-linux-gnu",
+  "archive": "https://github.com/oxc-project/oxc/releases/download/apps_v1.80.0/oxlint-x86_64-unknown-linux-gnu.tar.gz",
+  "archive_sha256": "5215500640e696b833736c401591b9a00326a3fb10f59d5c3bb3014410ad56e9",
+  "archive_bytes": 6578837,
+  "binary": "oxlint-x86_64-unknown-linux-gnu",
+  "binary_sha256": "45dfe8992db09d0ec18da627be6a53d42e9ef70693493fd7951de3a3ba3e6787",
+  "binary_bytes": 15860216
+}

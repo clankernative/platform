@@ -15,6 +15,9 @@ use std::{
 pub(crate) struct VerificationProfile {
     seed: u64,
     cases: u64,
+    /// `day2 ci check` also runs the top-level `expect`s of every captured app module, imported or not, on
+    /// the checked stage, through Build.roc's tested recipe.
+    tests: bool,
 }
 
 impl VerificationProfile {
@@ -29,7 +32,16 @@ impl VerificationProfile {
         Ok(Self {
             seed,
             cases: cases.max(Self::MINIMUM_CASES),
+            tests: false,
         })
+    }
+
+    /// The same profile, whose build also runs the app's own tests.
+    pub(crate) fn tested(self) -> Self {
+        Self {
+            tests: true,
+            ..self
+        }
     }
 }
 
@@ -45,6 +57,7 @@ impl Default for VerificationProfile {
         Self {
             seed: day2::development::DEFAULT_SEED,
             cases: Self::MINIMUM_CASES,
+            tests: false,
         }
     }
 }
@@ -86,6 +99,10 @@ impl VerificationSummary {
         }
     }
 }
+
+/// The generated `roc test` entry of a tested build; a module file name always
+/// starts with its capitalized declaration, so it cannot collide.
+pub(crate) const TEST_ENTRY: &str = "day2-tests.roc";
 
 struct Prepared {
     roc: PathBuf,
@@ -729,7 +746,13 @@ pub fn execute(
     let mut done = BTreeSet::new();
     let mut published = None;
     let mut verified = None;
-    let receipt = day2::automation::run(runner, &["build-recipe"], |request| {
+    // Build.roc owns both orders; the tested recipe adds `build-test`.
+    let recipe = if verification.tests {
+        "build-tested-recipe"
+    } else {
+        "build-recipe"
+    };
+    let receipt = day2::automation::run(runner, &[recipe], |request| {
         let parameters: BTreeMap<String, Value> = request.decode()?;
         ensure!(
             parameters.is_empty(),
@@ -994,12 +1017,38 @@ pub fn execute(
                         budget,
                     )?;
                 }
+                "build-test" => {
+                    ensure!(
+                        verification.tests && done.contains("build-check"),
+                        "app tests run on the checked stage of a tested build"
+                    );
+                    // The top-level `expect`s of every captured app module, imported
+                    // by the app or not, on the stage the build has just checked: a
+                    // generated entry imports each one. It is removed again before
+                    // anything else reads the stage.
+                    let modules: BTreeMap<String, PathBuf> =
+                        day2::json::decode(&fs::read(stage.join("app-modules.json"))?)?;
+                    let entry = stage.join("app").join(TEST_ENTRY);
+                    fs::write(
+                        &entry,
+                        day2::registry::test_entrypoint(modules.keys().map(String::as_str)),
+                    )?;
+                    let tested = day2::sandbox::compiler(root, stage, roc).and_then(|mut test| {
+                        run_build(root, test.args(["test", "--no-cache"]).arg(&entry), budget)
+                    });
+                    fs::remove_file(&entry)?;
+                    tested?;
+                }
                 "build-link" => {
                     ensure!(
                         done.contains("build-host")
                             && done.contains("build-check")
                             && done.contains("build-admission"),
                         "checked app and native host required"
+                    );
+                    ensure!(
+                        !verification.tests || done.contains("build-test"),
+                        "a tested build runs the app's tests before it links"
                     );
                     run_build(
                         root,
@@ -1112,17 +1161,23 @@ mod verification_profile_tests {
             VerificationProfile::default(),
             VerificationProfile {
                 seed: day2::development::DEFAULT_SEED,
-                cases: 2
+                cases: 2,
+                tests: false,
             }
         );
         assert_eq!(
             VerificationProfile::requested(42, 4)?,
-            VerificationProfile { seed: 42, cases: 4 }
+            VerificationProfile {
+                seed: 42,
+                cases: 4,
+                tests: false,
+            }
         );
         // A smaller check cannot lower the build's own required verification.
         assert_eq!(VerificationProfile::requested(42, 1)?.cases, 2);
         assert!(VerificationProfile::requested(42, 0).is_err());
         assert!(VerificationProfile::requested(42, 101).is_err());
+        assert!(VerificationProfile::requested(42, 4)?.tested().tests);
         Ok(())
     }
 

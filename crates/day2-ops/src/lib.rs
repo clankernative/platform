@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 pub mod backup;
 pub mod chrome_extension;
+pub mod ci_check;
 pub mod infra;
 pub mod instance_candidate;
 pub mod instance_deploy;
@@ -13,6 +14,7 @@ pub mod offsite;
 pub mod process;
 pub mod projection;
 pub mod protected_restore;
+pub mod source_inputs;
 
 #[cfg(test)]
 mod workflow_tests;

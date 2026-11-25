@@ -1,0 +1,73 @@
+{
+  "format": 1,
+  "lanes": [
+    "native",
+    "extension",
+    "javascript"
+  ],
+  "base": true,
+  "changed": 3,
+  "reasons": [
+    {
+      "path": "README.md",
+      "change": "modified",
+      "lanes": [],
+      "rules": []
+    },
+    {
+      "path": "app/.chrome-extension/src/background.js",
+      "change": "modified",
+      "lanes": [
+        "extension",
+        "javascript"
+      ],
+      "rules": [
+        "extension source",
+        "JavaScript"
+      ]
+    },
+    {
+      "path": "app/ui/app.js",
+      "change": "modified",
+      "lanes": [
+        "native",
+        "javascript"
+      ],
+      "rules": [
+        "build input",
+        "JavaScript"
+      ]
+    }
+  ],
+  "javascript_files": 3,
+  "roc_files": 12,
+  "extension_declared": true,
+  "source_inputs": "sha256:abababababababababababababababababababababababababababababababab",
+  "artifact": "written",
+  "output": "/work/ci",
+  "receipt": {
+    "version": 1,
+    "source_inputs": "sha256:abababababababababababababababababababababababababababababababab",
+    "artifact_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "sdk_distribution": {
+      "digest": "sha256:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "bytes": 1204
+    },
+    "verification": {
+      "version": 1,
+      "seed": 42,
+      "cases": 4
+    },
+    "archive": {
+      "digest": "sha256:a789e3fa1ffe742748bda51e387abc56427e3e1a35c1d220cf52be0d9a7f6195",
+      "bytes": 2900
+    },
+    "examples": 12,
+    "generated": 40,
+    "lanes": [
+      "native",
+      "extension",
+      "javascript"
+    ]
+  }
+}

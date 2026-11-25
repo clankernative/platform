@@ -20,6 +20,7 @@ cd ..
 ./cli/day2 instance release fetch ../my-instance sha256:<manifest digest> <manifest bytes>
 ./cli/day2 instance source controls /tmp/app-source.tar.gz
 ./cli/day2 instance candidate check ../my-instance links /tmp/candidate.json
+./cli/day2 ci check ../my-app-at-head ../my-app-at-base 4 /tmp/my-app-ci
 ./cli/day2 platform --help
 ./cli/day2 platform check examples/reports 42 16
 ./cli/day2 platform local-dev examples/reports
@@ -69,6 +70,22 @@ Use `--detach`, `--status`, `--stop`, `--logs` and `--follow` for background ses
 `check`/`test` report reproducible evidence paths. Backup and restore preserve
 online SQLite data and artifact identities. IaC currently qualifies a local
 OpenTofu resource subset. See [coverage](COVERAGE.md) for outstanding integrations.
+
+`ci check HEAD [BASE] CASES NEW_DIRECTORY` is an app repository's CI over local
+source trees, with the app in `HEAD/app/`. A push run passes no base, so every
+lane runs. Routing against a pull request's `BASE` is only a gate optimisation:
+the files that differ select its lanes by the build's own capture rules, and
+identical trees run every lane. It runs JavaScript syntax and formatting checks,
+the SDK's pinned oxlint with the platform's one ESLint-recommended
+configuration ([tools/oxlint](../tools/oxlint/README.md)), Roc formatting with the
+SDK's reviewed formatter, the top-level expects of every captured app module
+(imported or not) inside its tested build and the instance's campaign at seed 42.
+It writes `app.tar.gz` and `receipt.json` only when every lane ran and the tooling
+carries a qualified SDK's precompiled distribution, whose identity the receipt
+records; otherwise its report's `artifact` says why. A push run on the SDK's
+tooling image therefore always produces the artifact. The `--agent` report is
+pinned by `cli/fixtures/ci-check-report.json`. It reads no forge or network;
+fetching trees and publishing the artifact belong to the forge integration.
 
 `platform authority inspect` reads active database authority. `authority apply`
 and `authority activate` require a local operator assertion, expected authority

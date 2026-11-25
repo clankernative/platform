@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use day2_ops::{
-    backup, chrome_extension, infra, instance_candidate, instance_deploy, instance_release,
-    instance_roots, instance_source, local_dev, maintenance, process, projection,
+    backup, chrome_extension, ci_check, infra, instance_candidate, instance_deploy,
+    instance_release, instance_roots, instance_source, local_dev, maintenance, process, projection,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -44,6 +44,9 @@ struct Operations {
     candidate_mode: Option<instance_candidate::Mode>,
     candidate_session: Option<instance_candidate::Session>,
     deploy_session: Option<instance_deploy::Session>,
+    /// Whether the host action started `day2 ci check`, and its session.
+    ci_mode: bool,
+    ci_session: Option<ci_check::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
     maintenance_recovery: Option<maintenance::Recovery>,
@@ -432,7 +435,11 @@ impl Operations {
                 }
                 let parameters: Input = input(&request)?;
                 if request.action == "chrome-extension-verify" {
-                    chrome_extension::verify(&parameters.source)
+                    let verified = chrome_extension::verify(&parameters.source)?;
+                    if let Some(session) = self.ci_session.as_mut() {
+                        session.extension_verified(&parameters.source, &verified)?;
+                    }
+                    Ok(verified)
                 } else {
                     chrome_extension::policy(&parameters.source)
                 }
@@ -478,8 +485,23 @@ impl Operations {
                     seed: Option<String>,
                     #[serde(default)]
                     cases: Option<u64>,
+                    // `day2 ci check` alone also runs the app's own tests.
+                    #[serde(default)]
+                    tests: bool,
                 }
                 let parameters: Input = input(&request)?;
+                if let Some(session) = self.ci_session.as_ref() {
+                    session.building(
+                        &parameters.source,
+                        parameters.seed.as_deref().unwrap_or_default(),
+                        parameters.cases.unwrap_or_default(),
+                        parameters.tests,
+                    )?;
+                }
+                ensure!(
+                    !parameters.tests || self.ci_session.is_some(),
+                    "only day2 ci check runs a tested build"
+                );
                 let verification = match (parameters.seed, parameters.cases) {
                     (None, None) => None,
                     (Some(seed), Some(cases)) => {
@@ -509,6 +531,9 @@ impl Operations {
                 if let Some((seed, cases)) = &verification {
                     builder.arg(seed).arg(cases.to_string());
                 }
+                if parameters.tests {
+                    builder.arg("tested");
+                }
                 // Required application verification scales with the operation and
                 // obligation count, not with source size. A 26-operation app such as
                 // People Ops exceeds ten minutes on a developer machine while still
@@ -530,6 +555,9 @@ impl Operations {
                 }
                 let receipt: day2::development::BuildReceipt =
                     day2::json::decode(&fs::read(receipt)?)?;
+                if let Some(session) = self.ci_session.as_mut() {
+                    session.built(receipt.clone());
+                }
                 Ok(serde_json::to_value(receipt)?)
             }
             "dev-create" => {
@@ -823,6 +851,32 @@ impl Operations {
                     .step(&name)
                     .map_err(instance_source::reported)
             }
+            "ci-check-prepare" => {
+                ensure!(self.ci_session.is_none(), "one CI session per workflow");
+                ensure!(self.ci_mode, "only day2 ci check starts a CI session");
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                self.ci_session = Some(ci_check::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    &platform()?,
+                )?);
+                Ok(json!({}))
+            }
+            "ci-check-step" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    name: String,
+                }
+                let name = input::<Input>(&request)?.name;
+                self.ci_session
+                    .as_mut()
+                    .context("CI session required")?
+                    .step(&name)
+            }
             "instance-candidate-prepare" => {
                 ensure!(
                     self.candidate_session.is_none(),
@@ -1047,6 +1101,8 @@ fn run(request: Request) -> Result<Value> {
         candidate_mode: None,
         candidate_session: None,
         deploy_session: None,
+        ci_mode: false,
+        ci_session: None,
         local: None,
         maintenance: None,
         maintenance_recovery: None,
@@ -1059,6 +1115,7 @@ fn run(request: Request) -> Result<Value> {
         "instance-deploy",
         "instance-release-publish",
         "instance-release-fetch",
+        "ci-check",
     ]
     .contains(&request.action.as_str())
         && source_mode(&request.action).is_none()
@@ -1163,6 +1220,24 @@ fn run(request: Request) -> Result<Value> {
         let input: Input = input(&request)?;
         operations.instance_mode = Some(instance_roots::Mode::Deploy);
         vec!["instance-deploy-session".into(), input.request, input.roots]
+    } else if request.action == "ci-check" {
+        // `day2 ci check` only, as for the instance commands: the action
+        // starts the session and the adapter validates the request.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: PathBuf,
+        }
+        let input: Input = input(&request)?;
+        operations.ci_mode = true;
+        vec![
+            "ci-check-session".to_owned(),
+            input
+                .request
+                .to_str()
+                .context("CI check request path must be UTF-8")?
+                .to_owned(),
+        ]
     } else if request.action == "local-session" {
         let mut local = local_dev::Session::resolve(&platform()?, input(&request)?)?;
         local.detach_output();

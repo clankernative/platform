@@ -938,6 +938,12 @@ struct FixtureBuild {
     overrides: Option<PathBuf>,
     imports: Option<BuildImportContext>,
     _inputs: Option<tempfile::TempDir>,
+    /// Build with the tested recipe, which runs the top-level expects of every
+    /// captured module in the compiler sandbox, as `day2 ci check` does.
+    tests: bool,
+    /// A source overlay with a failing expect: after the positive build, its
+    /// tested build must fail at the test step, before linking or publishing.
+    refused: Option<PathBuf>,
 }
 
 impl FixtureBuild {
@@ -947,7 +953,25 @@ impl FixtureBuild {
             overrides: None,
             imports: None,
             _inputs: None,
+            tests: false,
+            refused: None,
         })
+    }
+
+    /// The same build through the tested recipe.
+    fn tested(self) -> Self {
+        Self {
+            tests: true,
+            ..self
+        }
+    }
+
+    /// The tested build, whose failing-expect overlay must be refused.
+    fn refusing(self, root: &Path, overlay: &str) -> Self {
+        Self {
+            refused: Some(root.join(overlay)),
+            ..self.tested()
+        }
     }
 
     fn overlay(root: &Path, app: &str, overrides: &str) -> Result<Self> {
@@ -958,15 +982,43 @@ impl FixtureBuild {
     }
 
     fn build(&self, root: &Path) -> Result<PathBuf> {
-        build_recipe(
+        let profile = if self.tests {
+            build_native::VerificationProfile::default().tested()
+        } else {
+            build_native::VerificationProfile::default()
+        };
+        let artifact = build_recipe(
             root,
             &self.app,
             self.overrides.as_deref(),
             None,
             self.imports.as_ref(),
-            build_native::VerificationProfile::default(),
-        )
-        .map(|built| built.artifact)
+            profile,
+        )?
+        .artifact;
+        if let Some(overlay) = &self.refused {
+            // A failing expect must fail the tested build at its test step.
+            let refused = build_recipe(
+                root,
+                &self.app,
+                Some(overlay),
+                None,
+                self.imports.as_ref(),
+                profile,
+            );
+            let error = match refused {
+                Ok(built) => bail!(
+                    "a failing expect did not fail the tested build: {}",
+                    built.artifact.display()
+                ),
+                Err(error) => format!("{error:#}"),
+            };
+            ensure!(
+                error.contains(build_native::TEST_ENTRY),
+                "the failing-expect build failed before its test step: {error}"
+            );
+        }
+        Ok(artifact)
     }
 }
 
@@ -1017,6 +1069,8 @@ fn fixture_build(
                 overrides: None,
                 imports: Some(BuildImportContext { instance, lock }),
                 _inputs: Some(inputs),
+                tests: false,
+                refused: None,
             })
         }
         "stock-ledger" => FixtureBuild::plain(root, "fixtures/stock-ledger"),
@@ -1046,6 +1100,8 @@ fn fixture_build(
                 overrides: None,
                 imports: Some(BuildImportContext { instance, lock }),
                 _inputs: Some(inputs),
+                tests: false,
+                refused: None,
             })
         }
         "reports" => FixtureBuild::plain(root, "examples/reports"),
@@ -1119,9 +1175,14 @@ fn fixture_build(
                 overrides: None,
                 imports: Some(BuildImportContext { instance, lock }),
                 _inputs: Some(inputs),
+                tests: false,
+                refused: None,
             })
         }
-        "redirect" => FixtureBuild::plain(root, "fixtures/redirect-conformance"),
+        // Its LinkNames expects run inside the native compiler sandbox, on every
+        // verified host.
+        "redirect" => Ok(FixtureBuild::plain(root, "fixtures/redirect-conformance")?
+            .refusing(root, "fixtures/redirect-failing-expect")),
         "relational-next" => FixtureBuild::overlay(
             root,
             "fixtures/relational-conformance",
