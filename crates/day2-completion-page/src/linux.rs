@@ -997,15 +997,15 @@ mod tests {
                         }
                     } else if op == 1 {
                         drop(ready.take());
-                    } else if op == 2 {
-                        if let Some(owner) = &ready {
-                            let _ = owner.inner.as_ref().unwrap().state().compare_exchange(
-                                PENDING,
-                                KNOWN,
-                                Ordering::Release,
-                                Ordering::Relaxed,
-                            );
-                        }
+                    } else if op == 2
+                        && let Some(owner) = &ready
+                    {
+                        let _ = owner.inner.as_ref().unwrap().state().compare_exchange(
+                            PENDING,
+                            KNOWN,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        );
                     }
                     actual.push((received.state_data().unwrap(), local_known));
                 }
