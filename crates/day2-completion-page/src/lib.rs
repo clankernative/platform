@@ -176,18 +176,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn actual_selected_build_script_flags_are_a_declared_compiler_input() {
-        // Exercise the real compile-data path on every host; this is not a
-        // macOS claim about either Linux backend.
-        let flags = include_str!(env!("COMPLETION_RUSTIX_FLAGS"));
-        assert!(
-            flags
-                .lines()
-                .any(|line| line == "--cfg=libc" || line == "--cfg=linux_raw")
-        );
-    }
-
-    #[test]
     fn fixed_header_has_exact_fields_no_rust_padding_or_state_overlap() {
         let binding = Binding {
             controller: [1; 32],

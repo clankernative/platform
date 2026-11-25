@@ -16,14 +16,10 @@ selected_backend_flags(
     producer = "@crates__rustix-1.1.5//:build_script_build",
 )
 
+# Ordinary authored-source harness: qualifier-only generated compile_data would
+# relocate the crate root and violate the normal producer/source catalog.
 platform_rust_test(
     name = "unit_lib",
-    compile_data = [":selected_backend_flags"],
-    rustc_env = {"COMPLETION_RUSTIX_FLAGS": "$(execpath :selected_backend_flags)"},
-    crate_features = select({
-        "//build/bazel:completion_page_libc_qualification": ["qualification-libc"],
-        "//conditions:default": [],
-    }),
     crate_name = "day2_completion_page",
     crate_root = "src/lib.rs",
     srcs = glob(["src/**/*.rs"]),

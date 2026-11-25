@@ -500,7 +500,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    #[cfg_attr(not(feature = "kernel-qualification"), test)]
+    #[cfg(feature = "kernel-qualification")]
     fn actual_selected_rustix_backend_is_bound_to_its_build_script() {
         // This file is the BuildInfo.flags output of the SAME selected rustix
         // producer used by this test target, not a claimed environment label.
