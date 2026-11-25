@@ -321,6 +321,28 @@
       "source": "crates/day2-contracts/src/lib.rs"
     },
     {
+      "package": "day2-completion-page",
+      "directory": "crates/day2-completion-page",
+      "target": "day2_completion_page",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-completion-page:lib",
+      "test": false,
+      "source": "crates/day2-completion-page/src/lib.rs"
+    },
+    {
+      "package": "day2-completion-page",
+      "directory": "crates/day2-completion-page",
+      "target": "day2_completion_page",
+      "kind": [
+        "lib"
+      ],
+      "label": "//crates/day2-completion-page:unit_lib",
+      "test": true,
+      "source": "crates/day2-completion-page/src/lib.rs"
+    },
+    {
       "package": "day2-control",
       "directory": "crates/day2-control",
       "target": "day2_control",

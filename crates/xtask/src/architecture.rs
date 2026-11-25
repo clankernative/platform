@@ -172,6 +172,7 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
     // A file reached solely through test-only module declarations is a test
     // source. Orphan files remain inspected, so moving code out of the module
     // graph cannot make it disappear from the ratchet.
+    require_completion_page_exception(&parsed)?;
     let test_only = test_only_sources(&parsed);
     require_canonical_external_crates(&parsed, &test_only)?;
     require_sql_callback_controls(root, &parsed, &test_only)?;
@@ -534,6 +535,89 @@ pub fn check(root: &Path) -> Result<()> {
             .map(|finding| finding.count)
             .sum::<usize>()
     );
+    Ok(())
+}
+
+// User-approved 2026-11-25 exception, not a crate-wide unsafe exemption.
+// The complete authored family is exactly two files; only linux.rs may opt out.
+fn require_completion_page_exception(parsed: &BTreeMap<String, syn::File>) -> Result<()> {
+    const ROOT: &str = "crates/day2-completion-page/src/lib.rs";
+    const ABI: &str = "crates/day2-completion-page/src/linux.rs";
+    let paths = parsed
+        .keys()
+        .filter(|p| p.starts_with("crates/day2-completion-page/"))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    ensure!(
+        paths == [ROOT, ABI],
+        "completion ABI exception requires exactly its reviewed source family"
+    );
+    let root = &parsed[ROOT];
+    ensure!(
+        root.attrs.iter().any(|a| a.path().is_ident("deny")
+            && a.parse_args::<syn::Path>()
+                .is_ok_and(|p| p.is_ident("unsafe_code"))),
+        "completion ABI root must deny unsafe code"
+    );
+    struct Boundary {
+        root: bool,
+        invalid: bool,
+    }
+    impl<'a> Visit<'a> for Boundary {
+        fn visit_item_mod(&mut self, node: &'a syn::ItemMod) {
+            if node.content.is_none()
+                && !(self.root
+                    && node.ident == "linux"
+                    && node.attrs.iter().all(|a| a.path().is_ident("cfg")))
+            {
+                self.invalid = true;
+            }
+            visit::visit_item_mod(self, node);
+        }
+        fn visit_attribute(&mut self, node: &'a Attribute) {
+            if self.root
+                && (path_is_ident(node.path(), "allow")
+                    || path_is_ident(node.path(), "expect")
+                    || path_is_ident(node.path(), "cfg_attr"))
+                && node
+                    .meta
+                    .to_token_stream()
+                    .to_string()
+                    .contains("unsafe_code")
+            {
+                self.invalid = true;
+            }
+            if path_is_ident(node.path(), "path") {
+                self.invalid = true;
+            }
+            visit::visit_attribute(self, node);
+        }
+        fn visit_macro(&mut self, node: &'a syn::Macro) {
+            if node
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| identifier_name(&segment.ident) == "include")
+            {
+                self.invalid = true;
+            }
+            visit::visit_macro(self, node);
+        }
+    }
+    for name in [ROOT, ABI] {
+        let mut boundary = Boundary {
+            root: name == ROOT,
+            invalid: false,
+        };
+        boundary.visit_file(&parsed[name]);
+        ensure!(
+            !boundary.invalid,
+            "completion ABI unsafe boundary cannot expand or include another implementation"
+        );
+    }
     Ok(())
 }
 
@@ -6622,6 +6706,47 @@ mod tests {
         rows.iter()
             .map(|(context, target, count)| ((context.to_string(), target.to_string()), *count))
             .collect()
+    }
+
+    #[test]
+    fn completion_page_unsafe_exception_cannot_expand_to_another_file_or_root() {
+        let root = syn::parse_file("#![deny(unsafe_code)] #[cfg(target_os=\"linux\")] mod linux;")
+            .unwrap();
+        let abi =
+            syn::parse_file("#![allow(unsafe_code)] pub struct Closed { value:usize }").unwrap();
+        let mut files = BTreeMap::from([
+            ("crates/day2-completion-page/src/lib.rs".to_owned(), root),
+            ("crates/day2-completion-page/src/linux.rs".to_owned(), abi),
+        ]);
+        require_completion_page_exception(&files).unwrap();
+        let original = files.clone();
+        files.insert(
+            "crates/day2-completion-page/src/extra.rs".to_owned(),
+            syn::parse_file("").unwrap(),
+        );
+        assert!(require_completion_page_exception(&files).is_err());
+        for (name, changed) in [
+            ("lib.rs", "#![allow(unsafe_code)] mod linux;"),
+            (
+                "lib.rs",
+                "#![deny(unsafe_code)] #[path=\"elsewhere.rs\"] mod linux;",
+            ),
+            ("linux.rs", "mod elsewhere;"),
+            ("linux.rs", "include!(\"elsewhere.rs\");"),
+            ("linux.rs", "std::include!(\"elsewhere.rs\");"),
+            ("linux.rs", "core::r#include!(\"elsewhere.rs\");"),
+            (
+                "lib.rs",
+                "#![deny(unsafe_code)] #![cfg_attr(all(), allow(unsafe_code))] mod linux;",
+            ),
+        ] {
+            let mut files = original.clone();
+            files.insert(
+                format!("crates/day2-completion-page/src/{name}"),
+                syn::parse_file(changed).unwrap(),
+            );
+            assert!(require_completion_page_exception(&files).is_err());
+        }
     }
 
     #[test]

@@ -869,6 +869,63 @@
       ]
     },
     {
+      "name": "day2-completion-page",
+      "manifest": "crates/day2-completion-page/Cargo.toml",
+      "role": "abi",
+      "dependencies": [
+        {
+          "name": "rustix",
+          "kind": "normal",
+          "target": "cfg(target_os = \"linux\")",
+          "rename": null,
+          "features": [
+            "fs",
+            "libc",
+            "libc_errno",
+            "mm",
+            "net",
+            "process",
+            "try_close"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "syn",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [
+            "full",
+            "visit"
+          ],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        },
+        {
+          "name": "tempfile",
+          "kind": "dev",
+          "target": null,
+          "rename": null,
+          "features": [],
+          "default_features": true,
+          "optional": false,
+          "local_path": null
+        }
+      ],
+      "production_targets": [
+        {
+          "name": "day2_completion_page",
+          "kind": [
+            "lib"
+          ],
+          "source": "crates/day2-completion-page/src/lib.rs"
+        }
+      ]
+    },
+    {
       "name": "day2-contracts",
       "manifest": "crates/day2-contracts/Cargo.toml",
       "role": "contracts",

@@ -171,3 +171,12 @@ config_setting(
 )
 
 exports_files(["toolchain.json", "targets.json", "roc-packages.json"])
+
+# Qualification-only selection. Production and other architectures remain on
+# their ordinary reviewed backend; there is no runtime selector.
+config_setting(
+    name = "completion_page_libc_qualification",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    define_values = {"DAY2_COMPLETION_BACKEND": "libc", "DAY2_PLATFORM_FEATURE_SCOPE": "verification"},
+    visibility = ["//visibility:public"],
+)

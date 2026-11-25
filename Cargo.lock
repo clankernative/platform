@@ -534,6 +534,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "day2-completion-page"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "syn 2.0.119",
+ "tempfile",
+]
+
+[[package]]
 name = "day2-contracts"
 version = "0.1.0"
 dependencies = [

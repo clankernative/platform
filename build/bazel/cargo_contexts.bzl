@@ -483,13 +483,17 @@ CARGO_CONTEXTS = {
                 "proc_macro_deps": []
             },
             "target": {
-                "aliases": {},
+                "aliases": {
+                    "@crates__errno-0.3.14//:errno": "libc_errno"
+                },
                 "build_aliases": {},
                 "build_deps": [],
                 "build_proc_macro_deps": [],
                 "deps": [
                     ":build_script_build",
                     "@crates__bitflags-2.13.1//:bitflags",
+                    "@crates__errno-0.3.14//:errno",
+                    "@crates__libc-0.2.189//:libc",
                     "@crates__linux-raw-sys-0.12.1//:linux_raw_sys"
                 ],
                 "features": [
@@ -497,6 +501,9 @@ CARGO_CONTEXTS = {
                     "default",
                     "event",
                     "fs",
+                    "libc",
+                    "libc_errno",
+                    "mm",
                     "net",
                     "process",
                     "pty",
@@ -504,7 +511,8 @@ CARGO_CONTEXTS = {
                     "stdio",
                     "system",
                     "termios",
-                    "time"
+                    "time",
+                    "try_close"
                 ],
                 "proc_macro_deps": []
             }
@@ -1186,13 +1194,17 @@ CARGO_CONTEXTS = {
                 "proc_macro_deps": []
             },
             "target": {
-                "aliases": {},
+                "aliases": {
+                    "@crates__errno-0.3.14//:errno": "libc_errno"
+                },
                 "build_aliases": {},
                 "build_deps": [],
                 "build_proc_macro_deps": [],
                 "deps": [
                     ":build_script_build",
                     "@crates__bitflags-2.13.1//:bitflags",
+                    "@crates__errno-0.3.14//:errno",
+                    "@crates__libc-0.2.189//:libc",
                     "@crates__linux-raw-sys-0.12.1//:linux_raw_sys"
                 ],
                 "features": [
@@ -1200,6 +1212,9 @@ CARGO_CONTEXTS = {
                     "default",
                     "event",
                     "fs",
+                    "libc",
+                    "libc_errno",
+                    "mm",
                     "net",
                     "process",
                     "pty",
@@ -1207,7 +1222,8 @@ CARGO_CONTEXTS = {
                     "stdio",
                     "system",
                     "termios",
-                    "time"
+                    "time",
+                    "try_close"
                 ],
                 "proc_macro_deps": []
             }

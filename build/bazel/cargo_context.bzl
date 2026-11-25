@@ -31,6 +31,17 @@ def _variants(name, version):
         fail("No reviewed native Cargo dependency context for " + key)
     return result
 
+def _owner_features(crate_name, context, features):
+    # Select the SAME owner feature for the library and its target build script.
+    # Only this x86_64 verification component's independent libc qualification
+    # enables it. No host-tool, Mac or production variant changes backend.
+    if crate_name == "rustix" and context == "linux_x86_64_target":
+        return features + select({
+            "@@//build/bazel:completion_page_libc_qualification": ["use-libc"],
+            "//conditions:default": [],
+        })
+    return features
+
 def cargo_context_rust_library(name, version, crate_features, deps = [], proc_macro_deps = [], aliases = {}, visibility = None, **kwargs):
     crate_name = kwargs.pop("crate_name", name)
     actual = {}
@@ -40,7 +51,7 @@ def cargo_context_rust_library(name, version, crate_features, deps = [], proc_ma
             name = variant,
             crate_name = crate_name,
             version = version,
-            crate_features = model["features"],
+            crate_features = _owner_features(crate_name, context, model["features"]),
             deps = model["deps"],
             proc_macro_deps = model["proc_macro_deps"],
             aliases = model["aliases"],
@@ -66,7 +77,7 @@ def cargo_context_build_script(name, pkg_name, version, crate_features, deps = [
             name = variant,
             pkg_name = pkg_name,
             version = version,
-            crate_features = model["features"],
+            crate_features = _owner_features(pkg_name.replace("-", "_"), context, model["features"]),
             deps = model["build_deps"],
             proc_macro_deps = model["build_proc_macro_deps"],
             aliases = model["build_aliases"],
