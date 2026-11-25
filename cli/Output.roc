@@ -315,6 +315,7 @@ root_status = |root| {
 		"refused_destroy" => "refused: the plan deletes, replaces or forgets a resource; nothing applied"
 		"refused_unreviewed" => "refused: its plan or release differs from the reviewed plan's; nothing applied"
 		"failed_credentials" => "not run: its cluster or DNS credentials could not be read"
+		"failed_forge" => "not run: its app CI repository could not be read from the forge; see ${root.logs}"
 		"failed_inputs" => "not run: its committed inputs set a variable the platform owns; see ${root.logs}"
 		"failed_release" => "not run: its release could not be read or was refused; see ${root.logs}"
 		"failed_target" => "failed at its target render; logs in ${root.logs}"
@@ -391,6 +392,10 @@ ran_text = |request, path, spec, receipt| {
 		InstanceRender.Mode.Plan | InstanceRender.Mode.Deploy => []
 		InstanceRender.Mode.Apply(directory) => ["REVIEWED PLAN", "  ${Output.safe(directory)}/receipt.json", ""]
 	}
+	app_ci = match mode {
+		InstanceRender.Mode.Plan | InstanceRender.Mode.Apply(_) => [""].concat(app_ci_lines(spec.derived()))
+		InstanceRender.Mode.Deploy => []
+	}
 	review = match mode {
 		InstanceRender.Mode.Plan => [
 			"",
@@ -414,6 +419,7 @@ ran_text = |request, path, spec, receipt| {
 		]
 			.concat(reviewed)
 			.concat(["ROOTS  /  ${receipt.roots.len().to_str()}, in apply order", planned])
+			.concat(app_ci)
 			.concat(review)
 			.concat(["", "RECEIPT", "  ${Output.safe(receipt.directory)}/receipt.json", "", "NEXT", next]),
 		"\n",
@@ -1122,7 +1128,7 @@ checked_text = |request, path, spec| {
 				"OIDC broker",
 				match names.forge_oidc {
 					Ok(broker) => broker
-					Err(Null) => "none: add forge.oidc to render app CI's workflow"
+					Err(Null) => "none: add forge.oidc to render app CI's workflow, federation and results buckets"
 				},
 			),
 			row("GCP", "${names.gcp_project} / ${names.gcp_zone}"),
@@ -1246,11 +1252,28 @@ rendered_text = |request, path, spec| {
 			"VARIABLES  /  rendered from the spec; the instance commits every other input",
 			Str.join_with(roots.map(variables), "\n\n"),
 			"",
-			"NEXT",
-			next,
-		],
+		]
+			.concat(app_ci_lines(names))
+			.concat(["", "NEXT", next]),
 		"\n",
 	)
+}
+
+## Whether the roots render app CI's federation and results buckets, and why not.
+app_ci_lines : InstanceSpec.Derived -> List(Str)
+app_ci_lines = |names| match names.forge_oidc {
+	Ok(issuer) => [
+		"APP CI",
+		"  project    pool ${Output.safe(names.ci_workload_identity.pool)}, provider ${
+			Output.safe(names.ci_workload_identity.provider)
+		}: ${Output.safe(names.ci_repository)}'s required workflow, through ${Output.safe(issuer)}",
+		"  app-edge   results bucket <project>-<id>-ci for each app's own repository",
+		"  Plan and apply read these repositories' forge IDs on every run.",
+	]
+	Err(Null) => [
+		"APP CI",
+		"  Not rendered: day2.json sets no forge.oidc, so no root federates app CI or holds its results.",
+	]
 }
 
 ## One rendered variable as a tfvars line: its JSON value is also a valid OpenTofu expression.

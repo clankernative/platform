@@ -1786,7 +1786,8 @@ mod tests {
                 "region": "us-central1",
                 "state_bucket_name": "exampleco-tools-tofu-state",
                 "state_prefixes": {"foundation": "foundation/", "cluster": "platform/cluster/",
-                                   "tenancy": "platform/tenancy/", "app": "platform/app/", "day2": "day2/"}
+                                   "tenancy": "platform/tenancy/", "app": "platform/app/", "day2": "day2/"},
+                "app_ci": {"issuer_uri": "https://git-oidc.example.com", "repository": "tools/day2-ci"}
             })
         );
         assert_eq!(
@@ -1822,6 +1823,12 @@ mod tests {
             ])
         );
         assert_eq!(edge["offsite_backup_readers"], operators);
+        // App CI's results bucket; only the apply identity reads it besides the app's own CI.
+        assert_eq!(
+            edge["app_ci"],
+            json!({"bucket": "exampleco-tools-home-ci",
+                   "reader": "serviceAccount:tools-infra@exampleco-tools.iam.gserviceaccount.com"})
+        );
         assert_eq!(edge["kube_dns_service_ip"], "10.30.0.10");
         assert_eq!(
             edge["cluster_cidrs"],
@@ -1862,6 +1869,61 @@ mod tests {
             ),
             "{stdout}"
         );
+        assert!(
+            stdout.contains("APP CI\n  project    pool day2-ci, provider gitea: tools/day2-ci's required workflow, through https://git-oidc.example.com\n"),
+            "{stdout}"
+        );
+    }
+
+    /// The spec without forge.oidc: an instance that has not turned app CI on.
+    fn spec_without_oidc() -> String {
+        let spec = SPEC.replacen(",\n\"oidc\":\"https://git-oidc.example.com\"", "", 1);
+        assert_ne!(spec, SPEC);
+        spec
+    }
+
+    #[test]
+    fn instance_render_without_forge_oidc_is_unchanged() {
+        // Golden: fixtures/instance-render-roots.json is this spec's render from before app CI's stacks existed.
+        let scratch = Scratch::new();
+        fs::write(scratch.0.join("day2.json"), spec_without_oidc()).unwrap();
+        let directory = scratch.0.to_str().unwrap();
+        let value = envelope(&run(&["instance", "render", directory, "--agent"], None), 0);
+        let golden: Value = serde_json::from_slice(
+            &fs::read(root().join("fixtures/instance-render-roots.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["result"]["roots"], golden);
+        // The text says why nothing renders.
+        let text = run(&["instance", "render", directory], None);
+        let stdout = String::from_utf8(text.stdout).unwrap();
+        assert!(
+            stdout.contains("APP CI\n  Not rendered: day2.json sets no forge.oidc, so no root federates app CI or holds its results.\n"),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("app_ci"), "{stdout}");
+        // With forge.oidc, only the project root and each app edge gain app_ci, as their last variable.
+        fs::write(scratch.0.join("day2.json"), SPEC).unwrap();
+        let value = envelope(&run(&["instance", "render", directory, "--agent"], None), 0);
+        let rendered = value["result"]["roots"].as_array().unwrap();
+        assert_eq!(rendered.len(), golden.as_array().unwrap().len());
+        for (entry, before) in rendered.iter().zip(golden.as_array().unwrap()) {
+            let variables: Value =
+                serde_json::from_str(entry["tfvars_json"].as_str().unwrap()).unwrap();
+            let unchanged = before["tfvars_json"].as_str().unwrap();
+            let expected = match entry["root"].as_str() {
+                Some("project" | "app-edge") => format!(
+                    "{},\"app_ci\":{}}}",
+                    unchanged.strip_suffix('}').unwrap(),
+                    variables["app_ci"]
+                ),
+                _ => unchanged.to_owned(),
+            };
+            let mut entry = entry.clone();
+            assert_eq!(entry["tfvars_json"], expected, "{entry}");
+            entry["tfvars_json"] = before["tfvars_json"].clone();
+            assert_eq!(&entry, before);
+        }
     }
 
     #[test]

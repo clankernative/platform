@@ -286,6 +286,38 @@ variable "offsite_backup_readers" {
   }
 }
 
+variable "app_ci" {
+  description = "App CI's results bucket (docs/INSTANCE.md, \"App CI\"), rendered from day2.json when it sets forge.oidc: its derived name, <project_id>-<app_id>-ci, and the instance's apply identity, which reads the results when it builds candidates. Null, without forge.oidc, creates nothing."
+  type = object({
+    bucket = string
+    reader = string
+  })
+  default = null
+
+  validation {
+    condition = var.app_ci == null ? true : (
+      var.app_ci.bucket == "${var.project_id}-${var.app_id}-ci" &&
+      can(regex("^serviceAccount:[a-z][a-z0-9-]{0,22}[a-z0-9]-infra@${var.project_id}\\.iam\\.gserviceaccount\\.com$", var.app_ci.reader))
+    )
+    error_message = "app_ci's bucket must be <project_id>-<app_id>-ci and its reader the apply identity, serviceAccount:<org>-infra@<project_id>.iam.gserviceaccount.com."
+  }
+}
+
+variable "app_ci_forge" {
+  description = "The forge id of the app's repository, <org>/<app_id>, which instance plan and apply read from the forge on every run: app CI runs for that repository alone store results here. Set exactly when app_ci is."
+  type = object({
+    repository_id = string
+  })
+  default = null
+
+  validation {
+    condition = (var.app_ci == null) == (var.app_ci_forge == null) && (var.app_ci_forge == null ? true : (
+      can(regex("^[1-9][0-9]{0,18}$", var.app_ci_forge.repository_id))
+    ))
+    error_message = "app_ci_forge is set exactly when app_ci is, with a positive decimal forge id."
+  }
+}
+
 variable "offsite_backup_service_account_id" {
   description = "Account id of the backup uploader's Google service account. Empty derives <app_id>-backup; set it when that exceeds 30 characters."
   type        = string

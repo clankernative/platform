@@ -30,10 +30,15 @@
 //!   candidate. It may render the instance ConfigMap with a targeted, unlocked
 //!   plan that is never applied, and applies only once the app's selection names
 //!   exactly that candidate, under its own shorter deadlines.
+//! - App CI's forge IDs: with `forge.oidc`, the project root and each app edge
+//!   are pinned to their repositories' native IDs, read from the forge once per
+//!   session (`app_ci`); a root whose repository cannot be read fails alone.
 //! - Secrets stay out of the output: the DNS token is held in memory and passed
 //!   to app-edge plans and applies only; the kubeconfig and its auth-plugin cache
-//!   live in a private temporary directory removed with the session; the receipt
-//!   step refuses unexpected files in the output.
+//!   live in a private temporary directory removed with the session; the forge
+//!   token is held in memory and sent only to the forge; the receipt step
+//!   refuses unexpected files in the output.
+pub mod app_ci;
 pub mod release;
 
 use crate::instance_candidate::record;
@@ -246,6 +251,9 @@ pub struct Root {
     /// The rendered .tfvars.json document. It is passed after `inputs`, so a
     /// rendered value wins over a committed copy of the same variable.
     pub variables: String,
+    /// With `forge.oidc`, the forge repository whose IDs this project or
+    /// app-edge root's app CI variable is pinned to (`app_ci`).
+    pub app_ci_repository: Option<String>,
 }
 
 /// One operation on one root. A day2-app root reads its release first; a deploy may render its target after init,
@@ -304,7 +312,9 @@ impl Stage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Failure {
     Credentials,
-    /// A committed day2-app input sets a variable the platform owns.
+    /// The forge could not show the repository this root's app CI trusts.
+    Forge,
+    /// A committed input sets a variable the platform owns.
     Inputs,
     /// The release could not be read or was refused, or a deploy's selection does not name its candidate.
     Release,
@@ -343,6 +353,8 @@ pub struct Layout {
     pub data: PathBuf,
     pub inputs: PathBuf,
     pub rendered: PathBuf,
+    /// An app CI root's `forge.tfvars.json`.
+    pub forge: PathBuf,
     /// A day2-app root's `release.tfvars.json`.
     pub release: PathBuf,
     pub plan: PathBuf,
@@ -449,6 +461,9 @@ pub fn invocation(
             }
             args.push(format!("-var-file={}", layout.inputs.display()).into());
             args.push(format!("-var-file={}", layout.rendered.display()).into());
+            if root.app_ci_repository.is_some() {
+                args.push(format!("-var-file={}", layout.forge.display()).into());
+            }
             if root.stack == DAY2_APP {
                 args.push(format!("-var-file={}", layout.release.display()).into());
                 args.extend(release::PROFILE.map(OsString::from));
@@ -713,6 +728,7 @@ pub fn validate(request: &Request) -> Result<()> {
             "day2-app roots need the instance's releases"
         ),
     }
+    app_ci::validate(request)?;
     if request.mode == Mode::Deploy {
         return Ok(());
     }
@@ -1134,22 +1150,30 @@ fn host() -> &'static str {
     }
 }
 
-/// What a session reads outside its engine runs: the instance's release state at an exact generation, and the
-/// release cache's tools and root (`$DAY2_RELEASE_CACHE`, else `~/.cache/day2-platform-releases`).
+/// What a session reads outside its engine runs: the instance's release state at an exact generation, the
+/// release cache's tools and root (`$DAY2_RELEASE_CACHE`, else `~/.cache/day2-platform-releases`), and the forge,
+/// for app CI's repository IDs, with the clock its retries wait on.
 pub struct Effects {
     pub store: Box<dyn crate::instance_candidate::tools::Store>,
     pub tools: Box<dyn crate::instance_release::Tools>,
     pub cache: Option<PathBuf>,
+    pub forge: Box<dyn crate::instance_source::Transport>,
+    pub token: Option<String>,
+    pub waiting: Box<dyn crate::ci_fetch::Waiting>,
 }
 
 impl Effects {
-    /// `gcloud storage` with the job's ambient credentials, as `instance candidate` reads release state.
-    pub fn native() -> Self {
-        Self {
+    /// `gcloud storage` with the job's ambient credentials, as `instance candidate` reads release state, and the
+    /// forge over HTTPS with `instance source`'s token.
+    pub fn native() -> Result<Self> {
+        Ok(Self {
             store: Box::new(crate::instance_candidate::tools::Gcloud::native()),
             tools: Box::new(crate::instance_release::Native),
             cache: None,
-        }
+            forge: Box::new(crate::instance_source::Native::new()?),
+            token: crate::instance_source::token()?,
+            waiting: Box::new(crate::instance_source::System::new()),
+        })
     }
 }
 
@@ -1177,6 +1201,9 @@ pub struct Session {
     kubeconfig_refreshed: bool,
     dns_token: Option<String>,
     credentials_read: bool,
+    /// Roots whose app CI repository could not be read or whose committed inputs set an app CI variable; each fails
+    /// at its init.
+    app_ci_failed: BTreeMap<String, Failure>,
     /// An apply's reviewed changes and releases per root label.
     reviewed: Reviewed,
     progress: BTreeMap<String, Progress>,
@@ -1374,6 +1401,7 @@ impl Session {
                 data: directory.join("data"),
                 inputs: directory.join("inputs.tfvars"),
                 rendered: directory.join("rendered.tfvars.json"),
+                forge: directory.join("forge.tfvars.json"),
                 release: directory.join("release.tfvars.json"),
                 plan: directory.join("plan.bin"),
                 target: directory.join("target.bin"),
@@ -1409,6 +1437,7 @@ impl Session {
             kubeconfig_refreshed: false,
             dns_token: None,
             credentials_read: false,
+            app_ci_failed: BTreeMap::new(),
             reviewed,
             progress,
         };
@@ -1500,7 +1529,101 @@ impl Session {
                 )?,
             }
         }
+        self.read_app_ci()?;
         Ok(json!({}))
+    }
+
+    /// App CI's forge IDs, read once for every root that names a repository and written as its
+    /// `forge.tfvars.json`; no project or app-edge root may commit a variable app CI owns. The reads share one
+    /// retry budget, the instance workflows' git-oidc wait: a transient failure retries the reads still unanswered.
+    /// A failure is recorded in the root's `forge.error` or `inputs.error` and fails that root at its init; the
+    /// others run.
+    fn read_app_ci(&mut self) -> Result<()> {
+        let mut wanted = Vec::new();
+        for root in &self.request.roots {
+            if !app_ci::stack(&root.stack) {
+                continue;
+            }
+            let restated = app_ci::restated(&self.committed[&root.label]);
+            if !restated.is_empty() {
+                fs::write(
+                    self.output
+                        .join(root.label.replace('/', "-"))
+                        .join("inputs.error"),
+                    format!(
+                        "{} sets {}, which app CI owns",
+                        root.inputs,
+                        restated.join(", ")
+                    ),
+                )?;
+                self.app_ci_failed
+                    .insert(root.label.clone(), Failure::Inputs);
+            } else if let Some(repository) = &root.app_ci_repository {
+                wanted.push((root.label.clone(), root.stack.clone(), repository.clone()));
+            }
+        }
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let forge = self.request.releases.clone().context("releases")?.forge;
+        let Effects {
+            forge: transport,
+            token,
+            waiting,
+            ..
+        } = &mut self.effects;
+        let mut answers: BTreeMap<String, Result<Vec<u8>, String>> = BTreeMap::new();
+        let finished = crate::ci_fetch::retrying(waiting.as_mut(), "app CI's forge reads", |_| {
+            let mut unanswered = None;
+            for (label, stack, repository) in &wanted {
+                if answers.contains_key(label) {
+                    continue;
+                }
+                let read = app_ci::read(
+                    &mut crate::instance_source::Forge::new(
+                        transport.as_mut(),
+                        token.as_deref(),
+                        &forge.server,
+                        repository,
+                    ),
+                    repository,
+                    &forge.org,
+                )
+                .and_then(|ids| app_ci::variables(stack, ids));
+                match read {
+                    Err(error) if crate::ci_fetch::transient(&error) => unanswered = Some(error),
+                    read => {
+                        answers.insert(label.clone(), read.map_err(|error| format!("{error:#}")));
+                    }
+                }
+            }
+            unanswered.map_or(Ok(()), Err)
+        });
+        let exhausted = finished.err().map(|error| format!("{error:#}"));
+        // A job's own token reads only its repository; say so when there is none at all.
+        let tokenless = if token.is_none() {
+            "; no forge token was set (AUTODEPLOY_SOURCE_TOKEN, else GITEA_TOKEN)"
+        } else {
+            ""
+        };
+        for (label, _, repository) in &wanted {
+            let answer = answers
+                .remove(label)
+                .unwrap_or_else(|| Err(exhausted.clone().unwrap_or_default()));
+            match answer {
+                Ok(variables) => fs::write(&self.layouts[label].forge, variables)?,
+                Err(reason) => {
+                    fs::write(
+                        self.output
+                            .join(label.replace('/', "-"))
+                            .join("forge.error"),
+                        format!("read {repository} on {}: {reason}{tokenless}", forge.server),
+                    )?;
+                    self.app_ci_failed.insert(label.clone(), Failure::Forge);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The cluster's kubeconfig, from derived names, into the private directory.
@@ -1670,7 +1793,12 @@ impl Session {
         let plan_file = self.layouts[label].plan.clone();
         let missing = (needs_cluster(&root.stack) && self.kubeconfig.is_none())
             || (needs_dns(&root.stack) && self.dns_token.is_none());
-        let outcome = if stage == Stage::Init && missing {
+        let app_ci_failed = self.app_ci_failed.get(label).copied();
+        let outcome = if stage == Stage::Init
+            && let Some(failure) = app_ci_failed
+        {
+            Err(failure)
+        } else if stage == Stage::Init && missing {
             Err(Failure::Credentials)
         } else if stage == Stage::Apply && gate != Ok(true) {
             // Nothing to change completes the root without the engine; a refusal fails it.
@@ -2155,6 +2283,7 @@ fn apply_gate(
 fn status(failure: Failure) -> &'static str {
     match failure {
         Failure::Credentials => "failed_credentials",
+        Failure::Forge => "failed_forge",
         Failure::Inputs => "failed_inputs",
         Failure::Release => "failed_release",
         Failure::Stage(Stage::Target) => "failed_target",
@@ -2427,6 +2556,7 @@ mod tests {
                     prefix: "foundation".into(),
                     inputs: "gcp/config/project.tfvars".into(),
                     variables: r#"{"project_id":"exampleco-tools"}"#.into(),
+                    app_ci_repository: None,
                 },
                 Root {
                     label: "cluster".into(),
@@ -2436,6 +2566,7 @@ mod tests {
                     prefix: "platform/cluster".into(),
                     inputs: "gcp/config/cluster.tfvars".into(),
                     variables: r#"{"cluster_name":"day2"}"#.into(),
+                    app_ci_repository: None,
                 },
                 Root {
                     label: "tenancy".into(),
@@ -2445,6 +2576,7 @@ mod tests {
                     prefix: "platform/tenancy".into(),
                     inputs: "gcp/config/tenancy.tfvars".into(),
                     variables: r#"{"app_namespace_prefix":"app-"}"#.into(),
+                    app_ci_repository: None,
                 },
                 Root {
                     label: "app-edge/home".into(),
@@ -2454,6 +2586,7 @@ mod tests {
                     prefix: "platform/app/home".into(),
                     inputs: "gcp/config/app-edge/home.tfvars".into(),
                     variables: r#"{"app_id":"home"}"#.into(),
+                    app_ci_repository: None,
                 },
             ],
             renderer: RENDERER
@@ -2482,6 +2615,7 @@ mod tests {
             prefix: "platform/app/links".into(),
             inputs: "gcp/config/app-edge/links.tfvars".into(),
             variables: r#"{"app_id":"links"}"#.into(),
+            app_ci_repository: None,
         });
         request.roots.push(Root {
             label: "day2-app/links".into(),
@@ -2491,6 +2625,7 @@ mod tests {
             prefix: "day2-app/links".into(),
             inputs: "gcp/config/apps/links.tfvars".into(),
             variables: r#"{"app_id":"links","namespace":"app-links"}"#.into(),
+            app_ci_repository: None,
         });
         request.releases = Some(release::tests::releases());
         match mode {
@@ -2550,6 +2685,7 @@ mod tests {
             data: "/out/root/data".into(),
             inputs: "/out/root/inputs.tfvars".into(),
             rendered: "/out/root/rendered.tfvars.json".into(),
+            forge: "/out/root/forge.tfvars.json".into(),
             release: "/out/root/release.tfvars.json".into(),
             plan: "/out/root/plan.bin".into(),
             target: "/out/root/target.bin".into(),
@@ -2966,7 +3102,7 @@ mod tests {
         request.checkout = platform.clone();
         request.output = scratch.path().join("plan");
         // A request for another mode than the host started is refused first.
-        let error = Session::prepare(&write(&request), Mode::Apply, Effects::native())
+        let error = Session::prepare(&write(&request), Mode::Apply, Effects::native().unwrap())
             .err()
             .unwrap();
         assert!(
@@ -2976,12 +3112,14 @@ mod tests {
         );
         assert!(!scratch.path().join("plan").exists());
         // Not a git checkout.
-        assert!(Session::prepare(&write(&request), Mode::Plan, Effects::native()).is_err());
+        assert!(
+            Session::prepare(&write(&request), Mode::Plan, Effects::native().unwrap()).is_err()
+        );
         assert!(!scratch.path().join("plan").exists());
         // An output directory inside the instance or the checkout.
         for inside in [instance.join("plan"), platform.join("plan")] {
             request.output = inside.clone();
-            let error = Session::prepare(&write(&request), Mode::Plan, Effects::native())
+            let error = Session::prepare(&write(&request), Mode::Plan, Effects::native().unwrap())
                 .err()
                 .unwrap();
             assert!(
@@ -2994,7 +3132,7 @@ mod tests {
         request.output = scratch.path().join("plan");
         std::os::unix::fs::symlink("missing", instance.join("gcp/config/oauth-workloads.json"))
             .unwrap();
-        let error = Session::prepare(&write(&request), Mode::Plan, Effects::native())
+        let error = Session::prepare(&write(&request), Mode::Plan, Effects::native().unwrap())
             .err()
             .unwrap();
         assert!(
@@ -3852,6 +3990,7 @@ mod tests {
                     data: directory.join("data"),
                     inputs: directory.join("inputs.tfvars"),
                     rendered: directory.join("rendered.tfvars.json"),
+                    forge: directory.join("forge.tfvars.json"),
                     release: directory.join("release.tfvars.json"),
                     plan: directory.join("plan.bin"),
                     target: directory.join("target.bin"),
@@ -3879,8 +4018,11 @@ mod tests {
         let session = Session {
             effects: Effects {
                 store: Box::new(objects),
-                tools: Box::new(bucket),
+                tools: Box::new(bucket.clone()),
                 cache: Some(scratch.path().join("cache")),
+                forge: Box::new(bucket.clone()),
+                token: Some(crate::instance_source::tests::TOKEN.into()),
+                waiting: Box::new(bucket),
             },
             committed,
             instance: scratch.path().join("instance"),
@@ -3899,6 +4041,7 @@ mod tests {
             kubeconfig_refreshed: false,
             dns_token: None,
             credentials_read: true,
+            app_ci_failed: BTreeMap::new(),
             reviewed: Reviewed::default(),
             progress: request
                 .roots
@@ -4196,5 +4339,332 @@ mod tests {
         assert_eq!(receipt["roots"][4]["status"], "unreleased");
         assert_eq!(receipt["roots"][4]["release"], Value::Null);
         assert_eq!(receipt["ok"], true);
+    }
+
+    /// `app_request` as the CLI renders it with forge.oidc: the project root and the edge trust their repositories.
+    fn ci_request(mode: Mode) -> Request {
+        let mut request = app_request(mode);
+        for root in &mut request.roots {
+            let (repository, app_ci) = match root.stack.as_str() {
+                "project" => (
+                    "tools/day2-ci",
+                    json!({"issuer_uri": "https://oidc.example.com", "repository": "tools/day2-ci"}),
+                ),
+                "app-edge" => (
+                    "tools/links",
+                    json!({"bucket": "exampleco-tools-links-ci",
+                           "reader": "serviceAccount:tools-infra@exampleco-tools.iam.gserviceaccount.com"}),
+                ),
+                _ => continue,
+            };
+            let mut variables: Value = serde_json::from_str(&root.variables).unwrap();
+            variables["app_ci"] = app_ci;
+            root.variables = variables.to_string();
+            root.app_ci_repository = Some(repository.into());
+        }
+        request
+    }
+
+    fn repository_record(
+        id: u64,
+        full_name: &str,
+        owner: &str,
+    ) -> Option<crate::instance_source::Response> {
+        crate::instance_source::tests::ok(json!({
+            "id": id, "full_name": full_name, "owner": {"id": 74, "login": owner},
+        }))
+    }
+
+    const DAY2_CI: &str = "https://git.example.com/api/v1/repos/tools/day2-ci";
+    const LINKS: &str = "https://git.example.com/api/v1/repos/tools/links";
+
+    #[test]
+    fn app_ci_is_all_or_nothing_and_trusts_only_derived_repositories() {
+        validate(&app_request(Mode::Plan)).unwrap();
+        validate(&ci_request(Mode::Plan)).unwrap();
+        validate(&ci_request(Mode::Apply)).unwrap();
+        let cases: [fn(&mut Request); 9] = [
+            // The project root and every edge, or none.
+            |r| r.roots[0].app_ci_repository = None,
+            |r| r.roots[3].app_ci_repository = None,
+            // Only the derived repositories, in the instance's org.
+            |r| r.roots[0].app_ci_repository = Some("tools/day2-instance".into()),
+            |r| r.roots[3].app_ci_repository = Some("tools/other".into()),
+            |r| r.roots[3].app_ci_repository = Some("Tools/links".into()),
+            // No other root, and never without the rendered variable or with the forge IDs rendered.
+            |r| r.roots[1].app_ci_repository = Some("tools/day2-ci".into()),
+            |r| r.roots[0].variables = r#"{"project_id":"exampleco-tools"}"#.into(),
+            |r| {
+                r.roots[3].variables =
+                    r#"{"app_id":"links","app_ci":{},"app_ci_forge":{"repository_id":"1"}}"#.into()
+            },
+            |r| r.releases = None,
+        ];
+        for (index, edit) in cases.iter().enumerate() {
+            let mut request = ci_request(Mode::Plan);
+            edit(&mut request);
+            assert!(validate(&request).is_err(), "case {index}");
+        }
+        // Without forge.oidc no root may render app CI.
+        let mut request = app_request(Mode::Plan);
+        request.roots[3].variables = r#"{"app_id":"links","app_ci":{}}"#.into();
+        assert!(validate(&request).is_err());
+    }
+
+    #[test]
+    fn app_ci_roots_plan_with_their_forge_ids_after_the_rendered_variables() {
+        let request = ci_request(Mode::Plan);
+        let credentials = Credentials {
+            kubeconfig: Some(Path::new("/private/kubeconfig")),
+            dns_token: Some("token"),
+        };
+        for root in [&request.roots[0], &request.roots[3]] {
+            let (plan, _) = invocation(
+                Mode::Plan,
+                Stage::Plan,
+                root,
+                &layout(),
+                false,
+                &credentials,
+            );
+            assert_eq!(
+                strings(&plan)[5..8],
+                [
+                    "-var-file=/out/root/inputs.tfvars",
+                    "-var-file=/out/root/rendered.tfvars.json",
+                    "-var-file=/out/root/forge.tfvars.json",
+                ],
+                "{}",
+                root.label
+            );
+            assert_eq!(strings(&plan)[8], "-out=/out/root/plan.bin");
+        }
+        // Every other root, and every root without forge.oidc, plans as before.
+        for root in request.roots[1..3]
+            .iter()
+            .chain(&app_request(Mode::Plan).roots)
+        {
+            let (plan, _) = invocation(
+                Mode::Plan,
+                Stage::Plan,
+                root,
+                &layout(),
+                false,
+                &credentials,
+            );
+            assert!(
+                !strings(&plan).iter().any(|arg| arg.contains("forge")),
+                "{}",
+                root.label
+            );
+        }
+    }
+
+    #[test]
+    fn app_ci_reads_each_repository_s_forge_ids_once() {
+        let (_scratch, mut session) = staged(
+            ci_request(Mode::Plan),
+            release::tests::Objects::default(),
+            b"manifest",
+            &[],
+        );
+        let forge = crate::instance_source::tests::Fake::default();
+        forge.route(
+            DAY2_CI,
+            vec![repository_record(412, "tools/day2-ci", "tools")],
+        );
+        forge.route(LINKS, vec![repository_record(245, "tools/links", "tools")]);
+        session.effects.forge = Box::new(forge.clone());
+        session.read_app_ci().unwrap();
+        assert_eq!(
+            forge.calls(),
+            [(DAY2_CI.to_owned(), true), (LINKS.to_owned(), true)]
+        );
+        let written = |label: &str| -> Value {
+            serde_json::from_slice(&fs::read(&session.layouts[label].forge).unwrap()).unwrap()
+        };
+        assert_eq!(
+            written("project"),
+            json!({"app_ci_forge": {"repository_id": "412", "owner_id": "74"}})
+        );
+        assert_eq!(
+            written("app-edge/links"),
+            json!({"app_ci_forge": {"repository_id": "245"}})
+        );
+        assert!(session.app_ci_failed.is_empty());
+        for label in ["cluster", "tenancy", "day2-app/links"] {
+            assert!(!session.layouts[label].forge.exists(), "{label}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_app_ci_repository_fails_only_its_root() {
+        for (answer, reason) in [
+            (
+                crate::instance_source::tests::status(404),
+                "forge_repository_missing",
+            ),
+            (
+                crate::instance_source::tests::status(301),
+                "forge_repository_http_301",
+            ),
+            (
+                repository_record(412, "Tools/day2-ci", "tools"),
+                "forge_repository_mismatch",
+            ),
+            (
+                repository_record(412, "tools/day2-ci", "other"),
+                "forge_repository_mismatch",
+            ),
+            (
+                repository_record(0, "tools/day2-ci", "tools"),
+                "forge_repository_id_invalid",
+            ),
+        ] {
+            let (_scratch, mut session) = staged(
+                ci_request(Mode::Plan),
+                release::tests::Objects::default(),
+                b"manifest",
+                &[],
+            );
+            let forge = crate::instance_source::tests::Fake::default();
+            forge.route(DAY2_CI, vec![answer]);
+            forge.route(LINKS, vec![repository_record(245, "tools/links", "tools")]);
+            session.effects.forge = Box::new(forge);
+            session.read_app_ci().unwrap();
+            let error = fs::read_to_string(session.output.join("project/forge.error")).unwrap();
+            assert_eq!(
+                error,
+                format!("read tools/day2-ci on https://git.example.com: {reason}")
+            );
+            assert!(!session.layouts["project"].forge.exists());
+            // The root fails at its init, before the engine runs; the edge still has its IDs.
+            assert_eq!(
+                session.operation("project", "init").unwrap(),
+                json!({"ok": false})
+            );
+            assert_eq!(session.progress["project"].failed, Some(Failure::Forge));
+            assert_eq!(status(Failure::Forge), "failed_forge");
+            assert!(session.layouts["app-edge/links"].forge.exists());
+            assert!(!session.app_ci_failed.contains_key("app-edge/links"));
+        }
+    }
+
+    #[test]
+    fn app_ci_reads_retry_only_unanswered_repositories_within_one_budget() {
+        let (_scratch, mut session) = staged(
+            ci_request(Mode::Plan),
+            release::tests::Objects::default(),
+            b"manifest",
+            &[],
+        );
+        // A failed connection, then a 503, then the record: only day2-ci is read again.
+        let forge = crate::instance_source::tests::Fake::default();
+        forge.route(
+            DAY2_CI,
+            vec![
+                None,
+                crate::instance_source::tests::status(503),
+                repository_record(412, "tools/day2-ci", "tools"),
+            ],
+        );
+        forge.route(LINKS, vec![repository_record(245, "tools/links", "tools")]);
+        session.effects.forge = Box::new(forge.clone());
+        session.read_app_ci().unwrap();
+        assert_eq!(
+            forge
+                .calls()
+                .iter()
+                .map(|(url, _)| url.as_str())
+                .collect::<Vec<_>>(),
+            [DAY2_CI, LINKS, DAY2_CI, DAY2_CI]
+        );
+        assert!(session.app_ci_failed.is_empty());
+        assert!(session.layouts["project"].forge.exists());
+        // A forge that stays down fails each unanswered root once the budget is spent; without a token the
+        // message says so.
+        let (_scratch, mut session) = staged(
+            ci_request(Mode::Plan),
+            release::tests::Objects::default(),
+            b"manifest",
+            &[],
+        );
+        let forge = crate::instance_source::tests::Fake::default();
+        forge.route(DAY2_CI, vec![None]);
+        forge.route(LINKS, vec![crate::instance_source::tests::status(404)]);
+        session.effects.forge = Box::new(forge.clone());
+        session.effects.token = None;
+        session.read_app_ci().unwrap();
+        let error = fs::read_to_string(session.output.join("project/forge.error")).unwrap();
+        assert!(
+            error.starts_with("read tools/day2-ci on https://git.example.com: app CI's forge reads did not succeed within 120s")
+                && error.ends_with("; no forge token was set (AUTODEPLOY_SOURCE_TOKEN, else GITEA_TOKEN)"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(session.output.join("app-edge-links/forge.error")).unwrap(),
+            "read tools/links on https://git.example.com: forge_repository_missing; \
+             no forge token was set (AUTODEPLOY_SOURCE_TOKEN, else GITEA_TOKEN)"
+        );
+        // The 404 is permanent: links was read once, day2-ci until the budget ran out.
+        let calls = forge.calls();
+        assert_eq!(calls.iter().filter(|(url, _)| url == LINKS).count(), 1);
+        assert!(calls.iter().filter(|(url, _)| url == DAY2_CI).count() > 1);
+        assert!(calls.iter().all(|(_, authenticated)| !authenticated));
+        assert_eq!(session.app_ci_failed.len(), 2);
+    }
+
+    #[test]
+    fn app_ci_variables_are_never_committed_and_nothing_is_read_without_forge_oidc() {
+        // Without forge.oidc nothing is read (the fake refuses any request) and no IDs are written.
+        let (_scratch, mut session) = staged(
+            app_request(Mode::Plan),
+            release::tests::Objects::default(),
+            b"manifest",
+            &[],
+        );
+        let forge = crate::instance_source::tests::Fake::default();
+        session.effects.forge = Box::new(forge.clone());
+        session.read_app_ci().unwrap();
+        assert!(forge.calls().is_empty());
+        assert!(session.app_ci_failed.is_empty());
+        assert!(
+            session
+                .layouts
+                .values()
+                .all(|layout| !layout.forge.exists())
+        );
+        // A committed app CI variable fails its root, indented or not, with or without forge.oidc.
+        for request in [app_request(Mode::Plan), ci_request(Mode::Plan)] {
+            let (_scratch, mut session) = staged(
+                request,
+                release::tests::Objects::default(),
+                b"manifest",
+                &[
+                    (
+                        "project",
+                        b"\t app_ci_forge = {\n  repository_id = \"1\"\n}\n".as_slice(),
+                    ),
+                    ("app-edge/links", b"\"app_ci\" = null\n"),
+                ],
+            );
+            let forge = crate::instance_source::tests::Fake::default();
+            session.effects.forge = Box::new(forge.clone());
+            session.read_app_ci().unwrap();
+            assert!(forge.calls().is_empty());
+            assert_eq!(
+                fs::read_to_string(session.output.join("project/inputs.error")).unwrap(),
+                "gcp/config/project.tfvars sets app_ci_forge, which app CI owns"
+            );
+            assert_eq!(session.app_ci_failed["app-edge/links"], Failure::Inputs);
+            assert_eq!(
+                session.operation("app-edge/links", "init").unwrap(),
+                json!({"ok": false})
+            );
+            assert_eq!(
+                session.progress["app-edge/links"].failed,
+                Some(Failure::Inputs)
+            );
+        }
     }
 }

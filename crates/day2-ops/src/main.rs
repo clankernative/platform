@@ -741,7 +741,7 @@ impl Operations {
                 let session = instance_roots::Session::prepare(
                     &raw,
                     mode,
-                    instance_roots::Effects::native(),
+                    instance_roots::Effects::native()?,
                 )?;
                 let summary = session.summary();
                 self.instance_session = Some(session);

@@ -2444,6 +2444,18 @@ impl<'a> Forge<'a> {
         }
     }
 
+    /// The repository's own record: 404 is a repository that does not exist
+    /// or that the token cannot read, and a renamed repository's redirect is
+    /// never followed.
+    pub(crate) fn repository(&mut self) -> Result<Value> {
+        let url = self.prefix.clone();
+        match self.get(&url, JSON_LIMIT, true)? {
+            Got::Body(body) => decode(&body),
+            Got::Status(404, _) => bail!("forge_repository_missing"),
+            Got::Status(status, _) => bail!("forge_repository_http_{status}"),
+        }
+    }
+
     /// A JSON read Python left to urllib's HTTPError on any other status.
     pub(crate) fn json(&mut self, url: &str) -> Result<Value> {
         match self.get(url, JSON_LIMIT, true)? {

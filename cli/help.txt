@@ -63,7 +63,9 @@ COMMANDS
                   app's day2-app root with the release its selection names,
                   on stacks exported from the spec's platform commit in the
                   <platform> repository. An app with no release selection is
-                  not planned. Plans, logs and receipt.json go to <new
+                  not planned. With forge.oidc, app CI's federation and
+                  results buckets are planned too, pinned to repository IDs
+                  read from the forge. Plans, logs and receipt.json go to <new
                   directory>. Never locks state, creates state or applies;
                   exits 6 if a root fails.
   instance apply  For operators, on a clean checkout of the instance. Plans
