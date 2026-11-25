@@ -475,6 +475,116 @@ fn credential_discovery_is_required_before_binding_and_refusal_stops_the_build()
 }
 
 #[test]
+fn the_tested_build_runs_the_app_tests_after_its_check_and_before_linking() -> Result<()> {
+    let mut effects = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["build-tested-recipe"],
+        |request| {
+            effects.push(request.action.clone());
+            Ok(json!({}))
+        },
+    )?;
+    let position = |name: &str| effects.iter().position(|effect| effect == name).unwrap();
+    assert!(position("build-check") + 1 == position("build-test"));
+    assert!(position("build-test") + 1 == position("build-link"));
+    let mut untested = Vec::new();
+    automation::run(&automation::runner()?, &["build-recipe"], |request| {
+        untested.push(request.action.clone());
+        Ok(json!({}))
+    })?;
+    assert!(!untested.iter().any(|effect| effect == "build-test"));
+    assert_eq!(untested.len() + 1, effects.len());
+    Ok(())
+}
+
+/// The effects `day2 ci check`'s recipe requests for a route, with each
+/// session step named.
+fn ci_check_effects(route: Value) -> Result<Vec<String>> {
+    let built = build_receipt(
+        "/platform/artifacts/0000",
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "42",
+    );
+    let mut effects = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["ci-check-session", "/work/request.json"],
+        |request| {
+            let input = request.decode::<Value>()?;
+            match request.action.as_str() {
+                "ci-check-prepare" => {
+                    assert_eq!(input, json!({"request": "/work/request.json"}));
+                    effects.push(request.action.clone());
+                    Ok(json!({}))
+                }
+                "ci-check-step" => {
+                    let name = input["name"].as_str().unwrap_or_default().to_owned();
+                    effects.push(name.clone());
+                    Ok(if name == "route" {
+                        route.clone()
+                    } else {
+                        json!({})
+                    })
+                }
+                "chrome-extension-verify" => {
+                    assert_eq!(input, json!({"source": "/work/head/app"}));
+                    effects.push(request.action.clone());
+                    Ok(json!({"declared": false}))
+                }
+                "build-source" => {
+                    assert_eq!(
+                        input,
+                        json!({"source": "/work/head/app", "seed": "42", "cases": 6, "tests": true})
+                    );
+                    effects.push(request.action.clone());
+                    Ok(serde_json::to_value(&built)?)
+                }
+                action => bail!("unexpected CI check capability: {action}"),
+            }
+        },
+    )?;
+    Ok(effects)
+}
+
+#[test]
+fn ci_check_runs_each_selected_lane_once_in_order() -> Result<()> {
+    let route = |native: bool, extension: bool, javascript: bool| {
+        json!({
+            "root": "/work/head/app", "seed": 42, "cases": 6,
+            "native": native, "extension": extension, "javascript": javascript,
+        })
+    };
+    assert_eq!(
+        ci_check_effects(route(true, true, true))?,
+        [
+            "ci-check-prepare",
+            "route",
+            "javascript",
+            "format",
+            "chrome-extension-verify",
+            "build-source",
+            "artifact",
+            "result",
+        ]
+    );
+    assert_eq!(
+        ci_check_effects(route(false, true, false))?,
+        [
+            "ci-check-prepare",
+            "route",
+            "chrome-extension-verify",
+            "result"
+        ]
+    );
+    assert_eq!(
+        ci_check_effects(route(false, false, false))?,
+        ["ci-check-prepare", "route", "result"]
+    );
+    Ok(())
+}
+
+#[test]
 fn rejected_compiler_admission_prevents_linking_and_publication() -> Result<()> {
     let mut effects = Vec::new();
     let result = automation::run(&automation::runner()?, &["build-recipe"], |request| {

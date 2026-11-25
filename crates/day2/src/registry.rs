@@ -41,6 +41,21 @@ pub fn entrypoint(admission: bool) -> String {
     )
 }
 
+/// The entrypoint a tested build hands `roc test`: the ordinary one, also
+/// importing every captured app module, so the expects of a module nothing
+/// else imports run too. Module names are the checked declarations
+/// `app_sources::stage` resolved.
+pub fn test_entrypoint<'a>(modules: impl IntoIterator<Item = &'a str>) -> String {
+    let imports: String = modules
+        .into_iter()
+        .filter(|module| !["App", "Registry"].contains(module))
+        .map(|module| format!("import {module}\n"))
+        .collect();
+    format!(
+        "app [step] {{ pf: platform \"../sdk/main.roc\" }}\nimport Registry\nimport App\n{imports}step : Str -> Str\nstep = |raw| Registry.step(App.definition, raw)\n"
+    )
+}
+
 #[derive(Deserialize, Serialize)]
 struct Table {
     entries: Vec<Entry>,

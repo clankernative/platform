@@ -18,6 +18,8 @@ COMPILE_INPUTS = [
     "//:toolchain.json",
     "//:toolchains/linux-aarch64.json",
     "//:toolchains/linux-x86_64.json",
+    "//:tools/oxlint/darwin-arm64.json",
+    "//:tools/oxlint/linux-x86_64.json",
     "//:tools/roc-compiler/glue-layouts.patch",
     "//crates/day2-control:src/release.rs",
     "//crates/day2:src/structural_proofs.rs",

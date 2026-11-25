@@ -25,6 +25,7 @@ USAGE
   day2 instance candidate native-probe <job directory> [--agent]
   day2 instance deploy <directory> <platform> <app> <candidate>
                        <new directory> [--deadline <unix seconds>] [--agent]
+  day2 ci check <head> [<base>] <cases> <new directory> [--agent]
   day2 platform --help
 
 PLATFORM OPERATIONS
@@ -142,6 +143,29 @@ COMMANDS
                   app changes, or 8 if recovery must roll forward from the
                   migration fence. With --deadline, refuse to start a
                   stopped-app phase that can outlast the job's time limit.
+  ci check        An app repository's CI over the source tree <head>, whose
+                  app is in app/. A push run passes no <base>: every lane
+                  runs. A pull request may pass its <base> tree as a gate
+                  optimisation: then only the lanes the differing files
+                  select run, and identical trees run every lane. Native:
+                  a path the build captures or refuses, any .roc file, a
+                  mode change or link anywhere, or an addition or removal
+                  where the build walks. Extension: app/.chrome-extension/.
+                  JavaScript: any .js, .mjs or .cjs file. JavaScript checks
+                  every regular file's syntax (.cjs as CommonJS) and its
+                  eol-last, no-trailing-spaces and semi formatting, then
+                  lints it with the SDK's pinned oxlint and the platform's
+                  one ESLint-recommended configuration; a minified name
+                  (.min., -min., _min.) is refused. Native formats every
+                  regular .roc file with the SDK's reviewed formatter, then
+                  runs platform check app 42 <cases> (4 to 100), whose
+                  build also runs the top-level expects of every .roc
+                  module it captures. Extension alone runs platform
+                  extension verify. app.tar.gz and receipt.json go to
+                  <new directory> only when every lane ran and the tooling
+                  is a qualified SDK's (its precompiled distribution names
+                  it); the report says why otherwise. Reads no network or
+                  git. Exits 6 when a lane fails.
 
 OPTIONS
   --demo              Use the bundled Links example; no setup or network needed.
@@ -178,9 +202,9 @@ FOR AGENTS
   Help/version JSON lists implemented_commands and explicit capability flags.
   Exit codes: 0 success/help; 2 usage; 3 context/read failure; 4 not found;
               5 invalid or unsupported metadata; 6 an instance root, a
-              release, a source or a candidate command failed, or the
-              platform host could not run; 7 a source read failed
-              transiently (retryable); 1 output failure.
+              release, a source, a candidate or a ci check command
+              failed, or the platform host could not run; 7 a source
+              read failed transiently (retryable); 1 output failure.
 
 PROTOTYPE SCOPE
   Local source distribution. Current artifact discovery uses shared runtime

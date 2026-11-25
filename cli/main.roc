@@ -19,6 +19,7 @@ import InstanceRelease
 import InstanceSource
 import InstanceCandidate
 import InstanceDeploy
+import CiCheck
 import Names
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
@@ -76,6 +77,7 @@ main! = |args| {
 		Cli.Request.Source(source) => sourced!(source)
 		Cli.Request.Candidate(candidate) => candidated!(candidate)
 		Cli.Request.Deploy(deploy) => deployed!(deploy)
+		Cli.Request.CiCheck(check) => ci_checked!(check)
 	}
 	emit!(Output.new(outcome))
 }
@@ -270,6 +272,29 @@ deployed! = |deploy| {
 		}
 		Err(CallbackErr(error)) => failed(InstanceDeploy.problem(error))
 		Err(_) => failed(Problem.DeployFailed("cannot use a private temporary directory"))
+	}
+}
+
+## Run an app repository's CI over local source trees through the platform host, which validates the request again.
+## Any failure, including a lane's findings, exits 6 with the host's message.
+ci_checked! : Cli.CiCheckRequest => Output.Outcome
+ci_checked! = |check| {
+	failed = |problem| Output.Outcome.Failed(problem, check.parts().format, Cli.Command.CiCheck)
+	# The request travels as a private temporary file, as source requests do.
+	ran = Env.with_temp_dir!(
+		|directory| {
+			file = Path.join(directory, "request.json")
+			Path.write_utf8!(file, CiCheck.request(check)).map_err(|_| "cannot write the ci check request")?
+			Host.ci_check!(Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+		},
+	)
+	match ran {
+		Ok(raw) => match CiCheck.report(raw) {
+			Ok(report) => Output.Outcome.CiChecked(check, report)
+			Err(_) => failed(Problem.CiCheckFailed("the platform host returned an unreadable report"))
+		}
+		Err(CallbackErr(error)) => failed(CiCheck.problem(error))
+		Err(_) => failed(Problem.CiCheckFailed("cannot use a private temporary directory"))
 	}
 }
 

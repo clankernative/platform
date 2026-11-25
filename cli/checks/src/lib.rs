@@ -409,6 +409,7 @@ mod tests {
             "fixtures/source-receipt.json",
             "fixtures/candidate-receipt.json",
             "fixtures/deploy-receipt.json",
+            "fixtures/ci-check-report.json",
         ] {
             fs::copy(root().join(fixture), scratch.0.join(fixture)).unwrap();
         }
@@ -1042,7 +1043,8 @@ mod tests {
                     "instance.candidate.check",
                     "instance.candidate.native-build",
                     "instance.candidate.native-probe",
-                    "instance.deploy"
+                    "instance.deploy",
+                    "ci.check"
                 ])
             );
             assert_eq!(value["result"]["supports_authentication"], false);

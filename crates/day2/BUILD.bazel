@@ -51,6 +51,7 @@ COMPILE_INPUTS = [
     "//:ops/Check.roc",
     "//:ops/ChromeExtension.roc",
     "//:ops/Ci.roc",
+    "//:ops/CiCheck.roc",
     "//:ops/Delegation.roc",
     "//:ops/GkeRelease.roc",
     "//:ops/GoogleWorkspaceQualification.roc",

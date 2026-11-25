@@ -26,6 +26,7 @@ mod linux_provisioning_fixture;
 mod linux_qualification;
 mod linux_runtime_qualification;
 mod native_toolchain;
+mod oxlint;
 mod provider_conformance;
 mod provider_recording;
 mod qualification_evidence;
@@ -156,12 +157,16 @@ fn command_status_with_budget(
     Ok(status)
 }
 
+/// Copy the entries of `source` the build captures to `target` and record each
+/// captured file's digest under its key (`prefix/...`), refusing what the build
+/// refuses. `day2::app_capture::classify` owns the rules; CI routing asks it too.
 fn snapshot(
     source: &Path,
     target: &Path,
     hashes: &mut BTreeMap<String, String>,
     prefix: &str,
 ) -> Result<()> {
+    use day2::app_capture::{Capture, Kind, classify};
     ensure!(
         prefix.split('/').count() <= 16,
         "source nesting budget exceeded"
@@ -179,82 +184,20 @@ fn snapshot(
             .file_name()
             .into_string()
             .map_err(|_| anyhow::anyhow!("invalid filename"))?;
-        // Version-control metadata is never app input: an app that lives in its
-        // own repository carries it beside its sources. `.clanker` holds design
-        // tool data (Studio fake-data scenes and canvas layout) committed with
-        // the app; it is never compiled, served or admitted. Only the app root
-        // may carry it. `.chrome-extension` is separate browser-extension source
-        // and release tooling; only its explicitly published public-downloads/
-        // outputs enter the app artifact. Signing keys must live outside the app.
-        // UI build dependencies belong to the Platform distribution.
-        if [".git", ".gitignore", ".gitattributes"].contains(&name.as_str())
-            || (prefix == "app" && [".clanker", ".chrome-extension"].contains(&name.as_str()))
-        {
-            continue;
-        }
-        let kind = entry.file_type()?;
-        ensure!(!kind.is_symlink(), "source symlinks forbidden");
-        if prefix == "app" && ["assets", "ui", "public-downloads"].contains(&name.as_str()) {
-            ensure!(kind.is_dir(), "{name} must be a directory");
-        }
         let key = format!("{prefix}/{name}");
-        if kind.is_dir() {
-            snapshot(&entry.path(), &target.join(&name), hashes, &key)?;
-        } else {
-            ensure!(kind.is_file(), "special source file forbidden");
-            let resource = prefix.starts_with("app/ui/")
-                || prefix.starts_with("app/assets/")
-                || prefix == "app/ui"
-                || prefix == "app/assets"
-                || prefix == "app/public-downloads";
-            if name.ends_with(".md") && !resource {
-                continue;
+        match classify(prefix, &name, Kind::of(entry.file_type()?))? {
+            Capture::Skipped => {}
+            Capture::Directory => snapshot(&entry.path(), &target.join(&name), hashes, &key)?,
+            Capture::File { resource } => {
+                let bytes = fs::read(entry.path())?;
+                ensure!(
+                    bytes.len() <= if resource { 4 * 1024 * 1024 } else { 128_000 }
+                        && hashes.len() < 512,
+                    "source budget exceeded"
+                );
+                hashes.insert(key, digest(&bytes));
+                fs::write(target.join(name), bytes)?;
             }
-            ensure!(
-                name.ends_with(".roc")
-                    || resource
-                    || (prefix == "app" && name == day2::identity::REGISTRY_FILE),
-                "app-owned non-Roc input: {key}"
-            );
-            if !resource
-                && (day2::admission::reserved_module(&name)
-                    || [
-                        "main.roc",
-                        "schema-platform.roc",
-                        "app-platform.roc",
-                        "AppIdentity.roc",
-                        "SchemaSource.roc",
-                        "Selectors.roc",
-                        "Domains.roc",
-                        "Errors.roc",
-                        "Catalog.roc",
-                        "Data.roc",
-                        "Inputs.roc",
-                        "Outputs.roc",
-                        "Assets.roc",
-                        "Templates.roc",
-                        "Commands.roc",
-                        "Reads.roc",
-                        "AppContract.roc",
-                        "ImportedContracts.roc",
-                        "Credentials.roc",
-                        "Connections.roc",
-                        "SecurityActions.roc",
-                        "ProductReturns.roc",
-                        "Registry.roc",
-                    ]
-                    .contains(&name.as_str()))
-            {
-                bail!("app-owned generated platform input forbidden: {name}");
-            }
-            let bytes = fs::read(entry.path())?;
-            ensure!(
-                bytes.len() <= if resource { 4 * 1024 * 1024 } else { 128_000 }
-                    && hashes.len() < 512,
-                "source budget exceeded"
-            );
-            hashes.insert(key, digest(&bytes));
-            fs::write(target.join(name), bytes)?;
         }
     }
     Ok(())
@@ -676,6 +619,42 @@ fn main() -> Result<()> {
             );
             format_sources(&root, action == "fmt-check")?;
         }
+        "ci-roc-format" => {
+            const USAGE: &str = "usage: xtask ci-roc-format APP_REPOSITORY NEW_RESULT";
+            use std::io::Write;
+            let repository = PathBuf::from(args.next().context(USAGE)?);
+            let result = PathBuf::from(args.next().context(USAGE)?);
+            ensure!(args.next().is_none(), USAGE);
+            let files = formatting::check_repository(&root, &repository)?;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(result)?
+                .write_all(&serde_json::to_vec(&serde_json::json!({ "files": files }))?)?;
+        }
+        "ci-javascript-lint" => {
+            const USAGE: &str =
+                "usage: xtask ci-javascript-lint APP_REPOSITORY FILES_JSON NEW_RESULT";
+            use std::io::Write;
+            let repository = PathBuf::from(args.next().context(USAGE)?);
+            let list = PathBuf::from(args.next().context(USAGE)?);
+            let result = PathBuf::from(args.next().context(USAGE)?);
+            ensure!(args.next().is_none(), USAGE);
+            let files: Vec<String> =
+                day2::json::decode(&day2_assets::read_regular(&list, 4 << 20)?)?;
+            let findings = oxlint::lint(&root, &repository, &files)?;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(result)?
+                .write_all(&serde_json::to_vec(
+                    &serde_json::json!({ "files": files.len(), "findings": findings }),
+                )?)?;
+        }
+        "bootstrap-oxlint" => {
+            ensure!(args.next().is_none(), "usage: xtask bootstrap-oxlint");
+            oxlint::bootstrap(&root)?;
+        }
         "fmt-reports" | "fmt-check-reports" => {
             ensure!(
                 args.next().is_none(),
@@ -888,7 +867,8 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&candidate)?);
         }
         "build-receipt" => {
-            const USAGE: &str = "usage: xtask build-receipt SOURCE NEW_RECEIPT [SEED CASES]";
+            const USAGE: &str =
+                "usage: xtask build-receipt SOURCE NEW_RECEIPT [SEED CASES [tested]]";
             let source = PathBuf::from(args.next().context(USAGE)?);
             let receipt = PathBuf::from(args.next().context(USAGE)?);
             // A requested profile replaces the default required verification.
@@ -901,6 +881,12 @@ fn main() -> Result<()> {
                     cases.parse().context("case count must be 1..100")?,
                 )?,
                 _ => bail!(USAGE),
+            };
+            // `day2 ci check` also runs the app's own tests in the build.
+            let verification = match args.next().as_deref() {
+                None => verification,
+                Some("tested") => verification.tested(),
+                Some(_) => bail!(USAGE),
             };
             ensure!(
                 args.next().is_none() && !receipt.exists(),
@@ -1613,117 +1599,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn cli_install_preserves_an_identical_executable_inode_and_replaces_changed_bytes() -> Result<()>
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let root = tempfile::tempdir()?;
-        let source = root.path().join("producer");
-        let installed = root.path().join("installed");
-        fs::write(&source, b"first reviewed executable")?;
-        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
-        install_cli_file(&source, &installed)?;
-        let first_inode = fs::metadata(&installed)?.ino();
-        install_cli_file(&source, &installed)?;
-        assert_eq!(fs::metadata(&installed)?.ino(), first_inode);
-        fs::write(&source, b"other reviewed executable")?;
-        install_cli_file(&source, &installed)?;
-        assert_ne!(fs::metadata(&installed)?.ino(), first_inode);
-        assert_eq!(fs::read(&installed)?, fs::read(&source)?);
-        Ok(())
-    }
-
-    #[test]
-    fn cli_install_running_executable_fixture() -> Result<()> {
-        if std::env::var_os("DAY2_CLI_INSTALL_CHILD").as_deref() != Some(std::ffi::OsStr::new("1"))
-        {
-            return Ok(());
-        }
-        let executable = std::env::current_exe()?;
-        let producer = executable.with_file_name("producer-copy");
-        fs::copy(&executable, &producer)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // Cache materialization and tar transport can disagree about the
-            // owner-write bit even when the executing bytes are identical.
-            let mode = fs::metadata(&producer)?.permissions().mode() ^ 0o200;
-            fs::set_permissions(&producer, fs::Permissions::from_mode(mode))?;
-        }
-        install_cli_file(&producer, &executable)?;
-        // On Linux an atomic replacement of the executing inode makes this
-        // exact lookup return a deleted pathname even though the new file exists.
-        let current = std::env::current_exe()?;
-        assert!(fs::metadata(&current)?.is_file());
-        Ok(())
-    }
-
-    #[test]
-    fn cli_install_real_child_keeps_its_running_executable_addressable() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let executable = directory.path().join("running-verifier");
-        fs::copy(std::env::current_exe()?, &executable)?;
-        run_with_budget(
-            directory.path(),
-            Command::new(&executable)
-                .args([
-                    "--exact",
-                    "tests::cli_install_running_executable_fixture",
-                    "--nocapture",
-                ])
-                .env("DAY2_CLI_INSTALL_CHILD", "1"),
-            std::time::Duration::from_secs(60),
-        )
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cli_install_restores_mode_in_place_and_replaces_aliases_despite_matching_bytes() -> Result<()>
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let root = tempfile::tempdir()?;
-        let source = root.path().join("producer");
-        let installed = root.path().join("installed");
-        fs::write(&source, b"reviewed executable")?;
-        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
-        install_cli_file(&source, &installed)?;
-        let first_inode = fs::metadata(&installed)?.ino();
-        fs::set_permissions(&installed, fs::Permissions::from_mode(0o644))?;
-        install_cli_file(&source, &installed)?;
-        assert_eq!(fs::metadata(&installed)?.ino(), first_inode);
-        assert_eq!(
-            fs::metadata(&installed)?.permissions().mode() & 0o777,
-            0o755
-        );
-        fs::remove_file(&installed)?;
-        std::os::unix::fs::symlink(&source, &installed)?;
-        install_cli_file(&source, &installed)?;
-        assert!(fs::symlink_metadata(&installed)?.file_type().is_file());
-        assert_eq!(fs::read(&installed)?, fs::read(&source)?);
-        Ok(())
-    }
-
-    #[test]
-    fn build_campaign_budget_defaults_and_overrides_are_bounded() -> Result<()> {
-        assert_eq!(
-            BuildCampaignBudget::parse(None)?.duration().as_secs(),
-            DEFAULT_CAMPAIGN_BUDGET_SECONDS
-        );
-        for (value, expected) in [("1", 1), ("2400", 2400), ("3600", 3600)] {
-            assert_eq!(
-                BuildCampaignBudget::parse(Some(value))?
-                    .duration()
-                    .as_secs(),
-                expected
-            );
-        }
-        assert!(BuildCampaignBudget::parse(Some("0")).is_err());
-        assert!(BuildCampaignBudget::parse(Some("3601")).is_err());
-        assert!(BuildCampaignBudget::parse(Some("not-a-number")).is_err());
-        Ok(())
-    }
-
     #[test]
     fn app_snapshot_rejects_project_files_headers_and_symlinks() -> Result<()> {
         let directory = tempfile::tempdir()?;
@@ -1869,6 +1744,117 @@ mod tests {
             fs::read_to_string(target.join("ui/app.css"))?,
             "body { color: green }"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_install_preserves_an_identical_executable_inode_and_replaces_changed_bytes() -> Result<()>
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("producer");
+        let installed = root.path().join("installed");
+        fs::write(&source, b"first reviewed executable")?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
+        install_cli_file(&source, &installed)?;
+        let first_inode = fs::metadata(&installed)?.ino();
+        install_cli_file(&source, &installed)?;
+        assert_eq!(fs::metadata(&installed)?.ino(), first_inode);
+        fs::write(&source, b"other reviewed executable")?;
+        install_cli_file(&source, &installed)?;
+        assert_ne!(fs::metadata(&installed)?.ino(), first_inode);
+        assert_eq!(fs::read(&installed)?, fs::read(&source)?);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_install_running_executable_fixture() -> Result<()> {
+        if std::env::var_os("DAY2_CLI_INSTALL_CHILD").as_deref() != Some(std::ffi::OsStr::new("1"))
+        {
+            return Ok(());
+        }
+        let executable = std::env::current_exe()?;
+        let producer = executable.with_file_name("producer-copy");
+        fs::copy(&executable, &producer)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Cache materialization and tar transport can disagree about the
+            // owner-write bit even when the executing bytes are identical.
+            let mode = fs::metadata(&producer)?.permissions().mode() ^ 0o200;
+            fs::set_permissions(&producer, fs::Permissions::from_mode(mode))?;
+        }
+        install_cli_file(&producer, &executable)?;
+        // On Linux an atomic replacement of the executing inode makes this
+        // exact lookup return a deleted pathname even though the new file exists.
+        let current = std::env::current_exe()?;
+        assert!(fs::metadata(&current)?.is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn cli_install_real_child_keeps_its_running_executable_addressable() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("running-verifier");
+        fs::copy(std::env::current_exe()?, &executable)?;
+        run_with_budget(
+            directory.path(),
+            Command::new(&executable)
+                .args([
+                    "--exact",
+                    "tests::cli_install_running_executable_fixture",
+                    "--nocapture",
+                ])
+                .env("DAY2_CLI_INSTALL_CHILD", "1"),
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_install_restores_mode_in_place_and_replaces_aliases_despite_matching_bytes() -> Result<()>
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("producer");
+        let installed = root.path().join("installed");
+        fs::write(&source, b"reviewed executable")?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
+        install_cli_file(&source, &installed)?;
+        let first_inode = fs::metadata(&installed)?.ino();
+        fs::set_permissions(&installed, fs::Permissions::from_mode(0o644))?;
+        install_cli_file(&source, &installed)?;
+        assert_eq!(fs::metadata(&installed)?.ino(), first_inode);
+        assert_eq!(
+            fs::metadata(&installed)?.permissions().mode() & 0o777,
+            0o755
+        );
+        fs::remove_file(&installed)?;
+        std::os::unix::fs::symlink(&source, &installed)?;
+        install_cli_file(&source, &installed)?;
+        assert!(fs::symlink_metadata(&installed)?.file_type().is_file());
+        assert_eq!(fs::read(&installed)?, fs::read(&source)?);
+        Ok(())
+    }
+
+    #[test]
+    fn build_campaign_budget_defaults_and_overrides_are_bounded() -> Result<()> {
+        assert_eq!(
+            BuildCampaignBudget::parse(None)?.duration().as_secs(),
+            DEFAULT_CAMPAIGN_BUDGET_SECONDS
+        );
+        for (value, expected) in [("1", 1), ("2400", 2400), ("3600", 3600)] {
+            assert_eq!(
+                BuildCampaignBudget::parse(Some(value))?
+                    .duration()
+                    .as_secs(),
+                expected
+            );
+        }
+        assert!(BuildCampaignBudget::parse(Some("0")).is_err());
+        assert!(BuildCampaignBudget::parse(Some("3601")).is_err());
+        assert!(BuildCampaignBudget::parse(Some("not-a-number")).is_err());
         Ok(())
     }
 }

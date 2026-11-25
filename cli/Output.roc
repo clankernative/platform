@@ -9,6 +9,7 @@ import InstanceRelease
 import InstanceSource
 import InstanceCandidate
 import InstanceDeploy
+import CiCheck
 
 ## Status, error, stream, and exit code are projections of one closed outcome.
 Output :: { outcome : Outcome }.{
@@ -23,6 +24,7 @@ Output :: { outcome : Outcome }.{
 		Sourced(Cli.SourceRequest, Try(Names.LocalPath, [Null]), InstanceSource.Report),
 		Candidated(Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report),
 		Deployed(Cli.Deploy, Names.LocalPath, InstanceDeploy.Report),
+		CiChecked(Cli.CiCheckRequest, CiCheck.Report),
 		Failed(Problem, Cli.Format, Cli.Command),
 	]
 
@@ -59,6 +61,7 @@ Output :: { outcome : Outcome }.{
 			Outcome.Sourced(request, path, report) => sourced_text(request, path, report)
 			Outcome.Candidated(request, path, report) => candidated_text(request, path, report)
 			Outcome.Deployed(request, path, report) => deployed_text(request, path, report.receipt)
+			Outcome.CiChecked(request, report) => ci_checked_text(request, report)
 			Outcome.Failed(problem, _, _) => error_text(problem)
 		}
 	}
@@ -95,6 +98,7 @@ format = |outcome| match outcome {
 	Output.Outcome.Sourced(request, _, _) => request.parts().format
 	Output.Outcome.Candidated(request, _, _) => request.parts().format
 	Output.Outcome.Deployed(request, _, _) => request.format
+	Output.Outcome.CiChecked(request, _) => request.parts().format
 }
 
 next_actions : Source -> List(Cli.Action)
@@ -154,6 +158,7 @@ json = |outcome| match outcome {
 	Output.Outcome.Sourced(request, path, report) => sourced_json(request, path, report)
 	Output.Outcome.Candidated(request, path, report) => candidated_json(request, path, report)
 	Output.Outcome.Deployed(_, path, report) => deployed_json(path, report)
+	Output.Outcome.CiChecked(request, report) => ci_checked_json(request, report)
 	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
 	Output.Outcome.Help(_) => info_json(Bool.True)
 	Output.Outcome.Version(_) => info_json(Bool.False)
@@ -717,6 +722,102 @@ candidated_text = |request, path, report| {
 	)
 }
 
+ci_checked_json : Cli.CiCheckRequest, CiCheck.Report -> Str
+# As sourced_json: the envelope is encoded with `"report":null`, which only that key can spell, and the host's text
+# replaces it verbatim.
+ci_checked_json = |request, report| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	parts = request.parts()
+	base : Try(Str, [Null])
+	base = parts.base.map_ok(|path| path.to_str())
+	command : Cli.Command
+	command = Cli.Command.CiCheck
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: command.name(),
+		exit_code: 0.I32,
+		context: { head: parts.head.to_str(), base },
+		result: { report: null },
+		error: null,
+		next_actions: [help_action({}).dto()],
+	})
+		.replace_first("\"report\":null", "\"report\":${report.text}")
+}
+
+ci_checked_text : Cli.CiCheckRequest, CiCheck.Report -> Str
+ci_checked_text = |request, report| {
+	outcome = report.outcome
+	row = |label, value| ["  ${label}${Str.repeat(" ", 11 - label.count_utf8_bytes())}${Output.safe(value)}"]
+	files = |label, value| match value {
+		Ok(count) => row(label, "${count.to_str()} files checked")
+		Err(Null) => []
+	}
+	listed = |names| if names.is_empty() "none" else Str.join_with(names, ", ")
+	base = match request.parts().base {
+		Ok(path) => "${path.to_str()} (${outcome.changed.to_str()} changed paths)"
+		Err(Null) => "none: every lane runs"
+	}
+	reasons =
+		outcome.reasons.map(
+			|reason| {
+				why = if reason.rules.is_empty() "" else " (${Str.join_with(reason.rules, ", ")})"
+				"  ${Output.safe(reason.path)}: ${reason.change}, ${listed(reason.lanes)}${Output.safe(why)}"
+			},
+		)
+	extension = match outcome.extension_declared {
+		Ok(declared) => row(
+			"Extension",
+			if declared "declared release verified" else "none declared; no release downloads",
+		)
+		Err(Null) => []
+	}
+	artifact = match outcome.receipt {
+		Ok(receipt) => {
+			sdk = "${receipt.sdk_distribution.digest} (${receipt.sdk_distribution.bytes.to_str()} bytes)"
+			campaign = "seed ${receipt.verification.seed.to_str()}, ${receipt.verification.cases.to_str()} cases: ${
+				receipt.examples.to_str()
+			} examples, ${receipt.generated.to_str()} generated"
+			output = match outcome.output {
+				Ok(path) => path
+				Err(Null) => ""
+			}
+			["", "ARTIFACT"]
+				.concat(row("Output", output))
+				.concat(row("Artifact", receipt.artifact_id))
+				.concat(row("Archive", "${receipt.archive.digest} (${receipt.archive.bytes.to_str()} bytes)"))
+				.concat(row("Campaign", campaign))
+				.concat(row("SDK", sdk))
+		}
+		Err(Null) => {
+			withheld = if outcome.artifact == "routed" {
+				"none: a routed run skipped a lane; only a run of every lane writes one"
+			} else if outcome.artifact == "no_sdk_identity" {
+				"none: this tooling carries no qualified SDK distribution to record"
+			} else {
+				"none: no native lane ran"
+			}
+			["", "ARTIFACT"].concat(row("Output", withheld))
+		}
+	}
+	title = if outcome.lanes.is_empty() "no lane selected" else "${listed(outcome.lanes)} passed"
+	Str.join_with(
+		["DAY2  /  ci check  /  ${title}", "", "ROUTE"]
+			.concat(row("Head", request.parts().head.to_str()))
+			.concat(row("Base", base))
+			.concat(row("Lanes", listed(outcome.lanes)))
+			.concat(reasons)
+			.concat(["", "CHECKS"])
+			.concat(files("JavaScript", outcome.javascript_files))
+			.concat(files("Roc format", outcome.roc_files))
+			.concat(extension)
+			.concat(row("Inputs", outcome.source_inputs))
+			.concat(artifact),
+		"\n",
+	)
+}
+
 toggled : Cli.Instance -> Cli.Instance
 toggled = |request| request.with_format(
 	match request.parts().format {
@@ -1039,6 +1140,7 @@ info_json = |is_help| {
 				"instance.candidate.native-build",
 				"instance.candidate.native-probe",
 				"instance.deploy",
+				"ci.check",
 			],
 			platform_commands: [
 				"platform.build",

@@ -7,7 +7,7 @@ ADD --checksum=sha256:615cc2509819047e4930fe6643c5f01ebd705ccadf75e8f0b85f9b83cc
 FROM bazel-${TARGETARCH} AS bazel
 # Platform-owned images. Apps supply no Dockerfile or install/build hooks.
 # The source tooling and runtime use the same pinned Debian/glibc family.
-FROM rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959 AS tooling-build
+FROM rust@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959 AS tooling-compile
 COPY --from=bazel /bazel /usr/local/bin/bazel
 WORKDIR /workspace/platform
 # The disposable tooling image keeps executable behavior and assertions while
@@ -19,6 +19,15 @@ RUN ["install", "-D", "-m", "0644", "crates/worker/generated/roc_platform_abi.rs
 RUN ["bazel", "--batch", "--output_base=/workspace/platform/.cache/bazel-executor", "run", "//crates/xtask:xtask", "--", "install-verifier"]
 RUN ["build-out/bin/xtask", "build-tooling-image"]
 RUN ["build-out/bin/xtask", "bootstrap"]
+# `day2 ci check` formats Roc and lints JavaScript with these pinned, verified
+# release binaries. They land beside the compiler in /workspace/.toolchains,
+# which the tooling image copies; app CI never downloads a tool. Only the
+# x86_64 SDK release target pins them; an arm64 qualification image has none.
+FROM tooling-compile AS tooling-ci-amd64
+RUN ["build-out/bin/xtask", "bootstrap-formatter"]
+RUN ["build-out/bin/xtask", "bootstrap-oxlint"]
+FROM tooling-compile AS tooling-ci-arm64
+FROM tooling-ci-${TARGETARCH} AS tooling-build
 RUN ["build-out/bin/xtask", "export-tooling"]
 # App builds verify and link the precompiled native archive. Missing or stale
 # distribution bytes are a release error, never permission to compile Platform.

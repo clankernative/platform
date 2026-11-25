@@ -16,13 +16,14 @@
 //! - An in-app file is written where its relative path says: a second file at
 //!   the same path, a file where an earlier file made a directory, or a file
 //!   below an earlier file is refused.
-//! - The identity is `sha256` of `{"files":[[name,size,hex],...],"version":1}`,
-//!   compact and sorted, over the files below the app directory, in the order
-//!   `sorted(Path)` gives: by path parts, each compared by code point. Names are
-//!   tarfile's (surrogateescape) and written as Python writes JSON strings.
-use crate::instance_source::{
-    ARTIFACT_LIMIT, ENTRY_LIMIT, Kind, MEMBER_LIMIT, STREAM_LIMIT, TarText, ascii,
-    python_json_string, read_tar,
+//! - The identity is `crate::source_inputs` over the files below the app
+//!   directory, the one implementation app CI uses for a source tree. Names
+//!   are tarfile's (surrogateescape).
+use crate::{
+    instance_source::{
+        ARTIFACT_LIMIT, ENTRY_LIMIT, Kind, MEMBER_LIMIT, STREAM_LIMIT, TarText, ascii, read_tar,
+    },
+    source_inputs::SourceFile,
 };
 use anyhow::{Result, anyhow, ensure};
 use std::{
@@ -44,29 +45,16 @@ pub fn source_inputs(archive: &[u8], directory: &str) -> Result<String> {
     let selected = parts(directory);
     let app_roc = [selected.clone(), vec![code_points("App.roc")]].concat();
     ensure!(files.contains_key(&app_roc), "app entrypoint missing");
-    let mut document = b"{\"files\":[".to_vec();
-    let mut first = true;
-    for (path, (size, hex)) in &files {
-        if path.len() <= selected.len() || !path.starts_with(&selected) {
-            continue;
-        }
-        if !first {
-            document.push(b',');
-        }
-        first = false;
-        document.push(b'[');
-        let mut name = Vec::new();
-        for (index, part) in path[selected.len()..].iter().enumerate() {
-            if index > 0 {
-                name.push(u32::from(b'/'));
-            }
-            name.extend_from_slice(part);
-        }
-        python_json_string(&name, &mut document);
-        document.extend_from_slice(format!(",{size},\"{hex}\"]").as_bytes());
-    }
-    document.extend_from_slice(b"],\"version\":1}");
-    Ok(day2::digest(&document))
+    let below = files
+        .iter()
+        .filter(|(path, _)| path.len() > selected.len() && path.starts_with(&selected))
+        .map(|(path, (size, hex))| SourceFile {
+            name: path[selected.len()..].join(&u32::from(b'/')),
+            size: *size,
+            hex: hex.clone(),
+        })
+        .collect();
+    Ok(crate::source_inputs::digest(below))
 }
 
 fn code_points(text: &str) -> Vec<u32> {

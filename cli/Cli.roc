@@ -21,6 +21,7 @@ Cli :: [].{
 		Source(SourceRequest),
 		Candidate(CandidateRequest),
 		Deploy(Deploy),
+		CiCheck(CiCheckRequest),
 	]
 
 	## The command a response reports, including failures before a request exists.
@@ -43,6 +44,7 @@ Cli :: [].{
 		InstanceCandidateNativeBuild,
 		InstanceCandidateNativeProbe,
 		InstanceDeploy,
+		CiCheck,
 	].{
 		name : Command -> Str
 		name = |command| match command {
@@ -64,6 +66,7 @@ Cli :: [].{
 			InstanceCandidateNativeBuild => "instance.candidate.native-build"
 			InstanceCandidateNativeProbe => "instance.candidate.native-probe"
 			InstanceDeploy => "instance.deploy"
+			CiCheck => "ci.check"
 		}
 	}
 
@@ -324,6 +327,52 @@ Cli :: [].{
 		}
 	}
 
+	## day2 ci check HEAD [BASE] CASES NEW_DIRECTORY: an app repository's CI over the source tree HEAD. A BASE tree
+	## routes the change between them to its lanes; without one every lane runs. CASES is the instance's verification
+	## case count; NEW_DIRECTORY receives the checked artifact and its receipt when the native lane runs.
+	CiCheckRequest :: {
+		head : Names.LocalPath,
+		base : Try(Names.LocalPath, [Null]),
+		cases : U64,
+		output : Names.LocalPath,
+		format : Format,
+	}.{
+		parts :
+			CiCheckRequest ->
+				{
+					head : Names.LocalPath,
+					base : Try(Names.LocalPath, [Null]),
+					cases : U64,
+					output : Names.LocalPath,
+					format : Format,
+				}
+		parts =
+			|
+				request,
+			|
+				{
+					head: request.head,
+					base: request.base,
+					cases: request.cases,
+					output: request.output,
+					format: request.format,
+
+				}
+
+		with_format : CiCheckRequest, Format -> CiCheckRequest
+		with_format = |request, format| { ..request, format }
+
+		## The command's arguments after `day2 ci check`.
+		arguments : CiCheckRequest -> List(Str)
+		arguments = |request| {
+			base = match request.base {
+				Ok(path) => [path.to_str()]
+				Err(Null) => []
+			}
+			[request.head.to_str()].concat(base).concat([request.cases.to_str(), request.output.to_str()])
+		}
+	}
+
 	## The scanner's optional fields and positionals never escape parsing.
 	Describe :: { app_name : Names.App, source : Source, filter : Filter, format : Format }.{
 		parts : Describe -> { app_name : Names.App, source : Source, filter : Filter, format : Format }
@@ -402,6 +451,7 @@ Cli :: [].{
 					["instance", "source", ..] => Ok(Request.Help(raw.format))
 					["instance", "candidate", ..] => Ok(Request.Help(raw.format))
 					["instance", "deploy", ..] => Ok(Request.Help(raw.format))
+					["ci", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 						Ok(Request.Help(raw.format))
@@ -584,6 +634,13 @@ Cli :: [].{
 						)?,
 					),
 				)
+				["ci"] | ["ci", "check"] | ["ci", "check", _] | ["ci", "check", _, _] => Err(Problem.MissingArgument)
+				["ci", "check", head, cases, output] => Ok(
+					Request.CiCheck(ci_check(head, Err(Null), cases, output, raw)?),
+				)
+				["ci", "check", head, base, cases, output] => Ok(
+					Request.CiCheck(ci_check(head, Ok(base), cases, output, raw)?),
+				)
 				["instance", "check", value] => Ok(Request.Check(instance("check", value, raw)?))
 				["instance", "render", value] => Ok(Request.Render(instance("render", value, raw)?))
 				["app", "describe", name] => {
@@ -611,6 +668,7 @@ Cli :: [].{
 		| ["--operation", _, .. as rest]
 		| ["--deadline", _, .. as rest] => requested(rest)
 		["instance", .. as rest] => instance_command(rest)
+		["ci", ..] => CiCheck
 		[arg, .. as rest] if arg.starts_with("-") => requested(rest)
 		_ => AppDescribe
 	}
@@ -628,6 +686,7 @@ Cli :: [].{
 		Request.Source(value) => value.parts().format
 		Request.Candidate(value) => value.parts().format
 		Request.Deploy(value) => value.format
+		Request.CiCheck(value) => value.parts().format
 	}
 
 	quote : Str -> Str
@@ -698,6 +757,7 @@ Cli :: [].{
 					Err(Null) => []
 				},
 			)
+			Request.CiCheck(value) => ["day2", "ci", "check"].concat(value.arguments())
 		}
 		base.concat(
 			match request_format(request) {
@@ -728,6 +788,37 @@ instance = |verb, value, raw| {
 		Names.LocalPath.from_str(value)
 			.map_err(|_| Problem.InvalidArguments("instance ${verb} requires a directory of at most 4096 bytes"))?
 	Ok(Cli.Instance.{ directory, format: raw.format })
+}
+
+## day2 ci check: the trees and the output are paths; the case count is the instance's verification, 4 to 100.
+ci_check : Str, Try(Str, [Null]), Str, Str, Raw -> Try(Cli.CiCheckRequest, Problem)
+ci_check = |head, base, cases, output, raw| {
+	if has_options(raw) {
+		return Err(Problem.ConflictingOptions("ci check accepts only --agent or --json."))
+	}
+	path = |value, role|
+		Names.LocalPath.from_str(value)
+			.map_err(|_| Problem.InvalidArguments("ci check requires ${role} of at most 4096 bytes"))
+	count =
+		U64.from_str(cases)
+			.map_err(
+				|_| Problem.InvalidArguments("ci check requires the verification cases as an integer from 4 to 100"),
+			)?
+	if count < 4 or count > 100 {
+		return Err(Problem.InvalidArguments("ci check requires the verification cases as an integer from 4 to 100"))
+	}
+	Ok(
+		Cli.CiCheckRequest.{
+			head: path(head, "a head source tree")?,
+			base: match base {
+				Ok(value) => Ok(path(value, "a base source tree")?)
+				Err(Null) => Err(Null)
+			},
+			cases: count,
+			output: path(output, "a new output directory")?,
+			format: raw.format,
+		},
+	)
 }
 
 roots : InstanceRender.Mode, Str, Str, Str, Raw -> Try(Cli.Roots, Problem)

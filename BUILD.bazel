@@ -12,6 +12,7 @@ exports_files([
     "cli/fixtures/source-receipt.json",
     "cli/fixtures/candidate-receipt.json",
     "cli/fixtures/deploy-receipt.json",
+    "cli/fixtures/ci-check-report.json",
     "cli/InstanceRender.roc",
     "cli/InstanceSpec.roc",
     "cli/JsonValue.roc",
@@ -71,6 +72,7 @@ exports_files([
     "ops/Check.roc",
     "ops/ChromeExtension.roc",
     "ops/Ci.roc",
+    "ops/CiCheck.roc",
     "ops/Delegation.roc",
     "ops/GkeRelease.roc",
     "ops/GoogleWorkspaceQualification.roc",
@@ -109,6 +111,8 @@ exports_files([
     "toolchains/linux-aarch64.json",
     "toolchains/linux-x86_64.json",
     "tools/app-platform.roc",
+    "tools/oxlint/darwin-arm64.json",
+    "tools/oxlint/linux-x86_64.json",
     "tools/roc-compiler/glue-layouts.patch"
 ])
 

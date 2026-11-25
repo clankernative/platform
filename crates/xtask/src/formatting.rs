@@ -208,6 +208,63 @@ fn collect(
     Ok(())
 }
 
+/// `day2 ci check`: the reviewed formatter's `--check` over every regular `.roc`
+/// file of an app repository. A symlink is not an authored source and is not
+/// followed; version-control metadata is never read.
+pub fn check_repository(root: &Path, repository: &Path) -> Result<usize> {
+    ensure!(
+        fs::symlink_metadata(root)?.file_type().is_dir(),
+        "formatter platform root must be a real directory"
+    );
+    let root = root.canonicalize()?;
+    let compiler = checked_compiler(&root)?;
+    ensure!(
+        fs::symlink_metadata(repository)?.file_type().is_dir(),
+        "app repository must be a real directory"
+    );
+    let mut files = Vec::new();
+    repository_sources(&repository.canonicalize()?, 0, &mut 0, &mut files)?;
+    files.sort();
+    ensure!(
+        !files.is_empty(),
+        "no regular Roc sources in the app repository"
+    );
+    for source in &files {
+        super::run(&root, &mut command(&root, &compiler, source, Mode::Check))
+            .with_context(|| format!("Roc formatter Check failed for {}", source.display()))?;
+    }
+    Ok(files.len())
+}
+
+fn repository_sources(
+    directory: &Path,
+    depth: usize,
+    entries: &mut usize,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    ensure!(depth <= 32, "Roc formatter source depth budget");
+    let mut children = Vec::new();
+    for child in fs::read_dir(directory)? {
+        *entries += 1;
+        ensure!(*entries <= 16_384, "Roc formatter source entry budget");
+        children.push(child?);
+    }
+    children.sort_by_key(|entry| entry.file_name());
+    for child in children {
+        let kind = child.file_type()?;
+        if kind.is_dir() && child.file_name() != ".git" {
+            repository_sources(&child.path(), depth + 1, entries, files)?;
+        } else if kind.is_file() && child.path().extension().is_some_and(|value| value == "roc") {
+            ensure!(
+                child.metadata()?.len() <= 2_000_000 && files.len() < 4_096,
+                "Roc formatter source file budget"
+            );
+            files.push(child.path());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

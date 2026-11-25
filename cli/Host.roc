@@ -75,6 +75,16 @@ Host :: [].{
 		)
 	}
 
+	## `day2 ci check`: the action starts the CI session; the host reads the request from this file and validates it
+	## again. The host's progress goes to stderr.
+	ci_check! : Str => Try(Str, Str)
+	ci_check! = |request| {
+		exchange!(
+			Json.to_str({ protocol: 1.U32, action: "ci-check", input: Json.to_str({ request: request }) }),
+			Progress,
+		)
+	}
+
 	call! : Str => Try(Str, Str)
 	call! = |request| exchange!(request, Quiet)
 
