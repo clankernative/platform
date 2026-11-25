@@ -38,6 +38,11 @@ build:ci-linux --local_resources=cpu=2
 build:ci-mac --jobs=3
 build:ci-mac --define=DAY2_PLATFORM_JOBS=3
 build:ci-mac --local_resources=cpu=3
+# --nosystem_rc/--nohome_rc isolate Bazel, not the system Git invoked by
+# repository rules. All current Git source dependencies are public: do not
+# inherit the runner's Git credential helpers, headers, includes or URL rewrites.
+common:ci-mac --repo_env=GIT_CONFIG_GLOBAL=/dev/null
+common:ci-mac --repo_env=GIT_CONFIG_NOSYSTEM=1
 
 # Distribution builds preserve the former release panic/profile policy.
 build:release --compilation_mode=opt
