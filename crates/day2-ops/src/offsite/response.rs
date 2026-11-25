@@ -5,7 +5,7 @@ use serde::{
     Deserialize, Deserializer,
     de::{DeserializeOwned, MapAccess, Visitor, value::MapAccessDeserializer},
 };
-use std::{error::Error, fmt, io::Read};
+use std::{collections::BTreeMap, error::Error, fmt, io::Read};
 use zeroize::Zeroizing;
 
 const MAX_BYTES: usize = 16_384;
@@ -149,6 +149,11 @@ impl<'de> Deserialize<'de> for PrivateText {
 }
 
 impl PrivateText {
+    /// A credential obtained elsewhere, such as app CI's federated access token.
+    pub(super) fn new(text: String) -> Self {
+        Self(Zeroizing::new(text))
+    }
+
     pub(super) fn for_header(&self) -> &str {
         &self.0
     }
@@ -194,6 +199,37 @@ fn decimal(value: &str) -> Option<u64> {
     (parsed.to_string() == value).then_some(parsed)
 }
 
+/// A multipart upload's reply: the projected object and its custom metadata.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Described {
+    name: PrivateText,
+    bucket: PrivateText,
+    size: PrivateText,
+    generation: PrivateText,
+    metadata: BTreeMap<String, PrivateText>,
+}
+
+/// The stored object's generation, when it is exactly the expected object.
+fn stored(
+    object: &Object,
+    expected_name: &str,
+    expected_bucket: &str,
+    expected_bytes: u64,
+) -> Result<u64, Cause> {
+    let size = decimal(&object.size.0).ok_or(Cause::Codec)?;
+    let generation = decimal(&object.generation.0)
+        .filter(|v| *v > 0 && *v <= i64::MAX as u64)
+        .ok_or(Cause::Codec)?;
+    if object.name.0.as_str() != expected_name
+        || object.bucket.0.as_str() != expected_bucket
+        || size != expected_bytes
+    {
+        return Err(Cause::Mismatch);
+    }
+    Ok(generation)
+}
+
 pub(super) fn object(
     reader: &mut impl Read,
     status: u16,
@@ -204,13 +240,43 @@ pub(super) fn object(
     let body = response(reader, Stage::Object, status)?;
     let fail = |cause| Refused::observed(Stage::Object, cause, status, body.len());
     let object: Object = decode_map(&body).map_err(|_| fail(Cause::Codec))?;
-    let size = decimal(&object.size.0).ok_or_else(|| fail(Cause::Codec))?;
-    let generation = decimal(&object.generation.0)
-        .filter(|v| *v > 0 && *v <= i64::MAX as u64)
-        .ok_or_else(|| fail(Cause::Codec))?;
-    if object.name.0.as_str() != expected_name
-        || object.bucket.0.as_str() != expected_bucket
-        || size != expected_bytes
+    stored(&object, expected_name, expected_bucket, expected_bytes).map_err(fail)
+}
+
+/// A multipart upload's reply, which must also echo exactly the custom
+/// metadata that was sent.
+pub(super) fn object_with_metadata(
+    reader: &mut impl Read,
+    status: u16,
+    expected_name: &str,
+    expected_bucket: &str,
+    expected_bytes: u64,
+    expected_metadata: &BTreeMap<String, String>,
+) -> Result<u64, Refused> {
+    let body = response(reader, Stage::Object, status)?;
+    let fail = |cause| Refused::observed(Stage::Object, cause, status, body.len());
+    let described: Described = decode_map(&body).map_err(|_| fail(Cause::Codec))?;
+    let Described {
+        name,
+        bucket,
+        size,
+        generation,
+        metadata,
+    } = described;
+    let object = Object {
+        name,
+        bucket,
+        size,
+        generation,
+    };
+    let generation =
+        stored(&object, expected_name, expected_bucket, expected_bytes).map_err(fail)?;
+    if metadata.len() != expected_metadata.len()
+        || !metadata.iter().all(|(key, value)| {
+            expected_metadata
+                .get(key)
+                .is_some_and(|expected| expected == value.0.as_str())
+        })
     {
         return Err(fail(Cause::Mismatch));
     }
@@ -311,6 +377,47 @@ mod tests {
             private_error(refused(parse(input.as_bytes())));
         }
         assert_eq!(object(&mut &br#"{"name":"n","bucket":"b","size":"18446744073709551615","generation":"9223372036854775807"}"#[..], 200,"n","b",u64::MAX).unwrap(),i64::MAX as u64);
+    }
+
+    #[test]
+    fn described_object_contract_requires_exactly_the_metadata_sent() {
+        let sent: BTreeMap<String, String> = [("run", "41"), ("event", "push")]
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .into();
+        let parse = |bytes: &str| {
+            object_with_metadata(
+                &mut bytes.as_bytes(),
+                200,
+                "ci/o/receipt.json",
+                "example-ci",
+                7,
+                &sent,
+            )
+        };
+        let object =
+            r#""name":"ci/o/receipt.json","bucket":"example-ci","size":"7","generation":"19""#;
+        assert_eq!(
+            parse(&format!(
+                r#"{{{object},"metadata":{{"event":"push","run":"41"}}}}"#
+            ))
+            .unwrap(),
+            19
+        );
+        for metadata in [
+            r#""metadata":{"run":"41"}"#,
+            r#""metadata":{"run":"41","event":"push","not-a-secret":"x"}"#,
+            r#""metadata":{"run":"not-a-secret","event":"push"}"#,
+            r#""metadata":{"run":41,"event":"push"}"#,
+            r#""metadata":[]"#,
+            r#""metadata":{"run":"41","event":"push"},"not-a-secret":{}"#,
+        ] {
+            private_error(refused(parse(&format!("{{{object},{metadata}}}"))));
+        }
+        // The projected object is checked as an upload's is, and the metadata is required.
+        private_error(refused(parse(&format!("{{{object}}}"))));
+        private_error(refused(parse(
+            r#"{"name":"not-a-secret","bucket":"example-ci","size":"7","generation":"19","metadata":{"event":"push","run":"41"}}"#,
+        )));
     }
 
     #[derive(Debug)]

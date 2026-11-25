@@ -668,3 +668,21 @@ fn a_request_names_real_trees_an_app_and_a_new_output() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn a_bounded_generated_mount_gets_the_tooling_images_reviewed_abi() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let platform = directory.path().join("platform");
+    let seed = directory.path().join("roc_platform_abi.rs");
+    let target = platform.join("crates/worker/generated/roc_platform_abi.rs");
+    // No seed: the build could not check its glue, so the check refuses.
+    assert!(seed_abi(&platform, &seed).is_err());
+    fs::write(&seed, b"// reviewed ABI\n")?;
+    seed_abi(&platform, &seed)?;
+    assert_eq!(fs::read(&target)?, b"// reviewed ABI\n");
+    // An ABI already in place is never replaced.
+    fs::write(&seed, b"// another ABI\n")?;
+    seed_abi(&platform, &seed)?;
+    assert_eq!(fs::read(&target)?, b"// reviewed ABI\n");
+    Ok(())
+}

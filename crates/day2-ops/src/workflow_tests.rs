@@ -584,6 +584,130 @@ fn ci_check_runs_each_selected_lane_once_in_order() -> Result<()> {
     Ok(())
 }
 
+/// The steps `day2 ci fetch`'s recipe requests when the event plans `base`.
+fn ci_fetch_effects(base: bool) -> Result<Vec<String>> {
+    let mut effects = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["ci-fetch-session", "/work/request.json"],
+        |request| {
+            let input = request.decode::<Value>()?;
+            match request.action.as_str() {
+                "ci-fetch-prepare" => {
+                    assert_eq!(input, json!({"request": "/work/request.json"}));
+                    effects.push(request.action.clone());
+                    Ok(json!({}))
+                }
+                "ci-fetch-step" => {
+                    let name = input["name"].as_str().unwrap_or_default().to_owned();
+                    effects.push(name.clone());
+                    Ok(if name == "event" {
+                        json!({"base": base})
+                    } else {
+                        json!({})
+                    })
+                }
+                action => bail!("unexpected CI fetch capability: {action}"),
+            }
+        },
+    )?;
+    Ok(effects)
+}
+
+#[test]
+fn ci_fetch_reads_a_base_tree_only_when_the_event_has_one() -> Result<()> {
+    assert_eq!(
+        ci_fetch_effects(true)?,
+        [
+            "ci-fetch-prepare",
+            "repository",
+            "event",
+            "head",
+            "base",
+            "result"
+        ]
+    );
+    assert_eq!(
+        ci_fetch_effects(false)?,
+        ["ci-fetch-prepare", "repository", "event", "head", "result"]
+    );
+    Ok(())
+}
+
+/// The steps `day2 ci store`'s recipe requests when the plan has `artifact`.
+fn ci_store_effects(artifact: bool) -> Result<Vec<String>> {
+    let mut effects = Vec::new();
+    automation::run(
+        &automation::runner()?,
+        &["ci-store-session", "/work/request.json"],
+        |request| {
+            let input = request.decode::<Value>()?;
+            match request.action.as_str() {
+                "ci-store-prepare" => {
+                    assert_eq!(input, json!({"request": "/work/request.json"}));
+                    effects.push(request.action.clone());
+                    Ok(json!({"artifact": artifact}))
+                }
+                "ci-store-step" => {
+                    effects.push(input["name"].as_str().unwrap_or_default().to_owned());
+                    Ok(json!({}))
+                }
+                action => bail!("unexpected CI store capability: {action}"),
+            }
+        },
+    )?;
+    Ok(effects)
+}
+
+#[test]
+fn ci_store_mints_and_uploads_only_an_artifact_and_its_receipt_last() -> Result<()> {
+    assert_eq!(
+        ci_store_effects(true)?,
+        [
+            "ci-store-prepare",
+            "mint",
+            "exchange",
+            "artifact",
+            "receipt",
+            "result"
+        ]
+    );
+    assert_eq!(ci_store_effects(false)?, ["ci-store-prepare", "result"]);
+    Ok(())
+}
+
+#[test]
+fn instance_ci_workflow_reads_the_project_number_then_each_release() -> Result<()> {
+    let mut effects = Vec::new();
+    let result = automation::run(
+        &automation::runner()?,
+        &["instance-ci-workflow-session", "/work/request.json"],
+        |request| {
+            let input = request.decode::<Value>()?;
+            match request.action.as_str() {
+                "instance-ci-workflow-prepare" => {
+                    assert_eq!(input, json!({"request": "/work/request.json"}));
+                    effects.push(request.action.clone());
+                    Ok(json!({}))
+                }
+                "instance-ci-workflow-step" => {
+                    let name = input["name"].as_str().unwrap_or_default().to_owned();
+                    effects.push(name.clone());
+                    Ok(json!({"step": name}))
+                }
+                action => bail!("unexpected CI workflow capability: {action}"),
+            }
+        },
+    )?;
+    assert_eq!(
+        effects,
+        ["instance-ci-workflow-prepare", "project", "releases"]
+    );
+    // The recipe returns the releases step's report: the renderer's inputs.
+    assert_eq!(result, json!({"step": "releases"}));
+    Ok(())
+}
+
 #[test]
 fn rejected_compiler_admission_prevents_linking_and_publication() -> Result<()> {
     let mut effects = Vec::new();

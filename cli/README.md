@@ -84,8 +84,11 @@ It writes `app.tar.gz` and `receipt.json` only when every lane ran and the tooli
 carries a qualified SDK's precompiled distribution, whose identity the receipt
 records; otherwise its report's `artifact` says why. A push run on the SDK's
 tooling image therefore always produces the artifact. The `--agent` report is
-pinned by `cli/fixtures/ci-check-report.json`. It reads no forge or network;
-fetching trees and publishing the artifact belong to the forge integration.
+pinned by `cli/fixtures/ci-check-report.json`. It reads no forge or network:
+in app CI's required workflow, `ci fetch` writes its trees and `ci store` stores
+its artifact (see [app CI](../docs/INSTANCE.md#app-ci)). When a bounded mount
+hides the platform's generated worker ABI, it is initialized from the tooling
+image's reviewed seed, `/usr/local/lib/day2/roc_platform_abi.rs`.
 
 `platform authority inspect` reads active database authority. `authority apply`
 and `authority activate` require a local operator assertion, expected authority

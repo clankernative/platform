@@ -9,7 +9,10 @@ import InstanceRelease
 import InstanceSource
 import InstanceCandidate
 import InstanceDeploy
+import InstanceCiWorkflow
 import CiCheck
+import CiFetch
+import CiStore
 
 ## Status, error, stream, and exit code are projections of one closed outcome.
 Output :: { outcome : Outcome }.{
@@ -25,6 +28,9 @@ Output :: { outcome : Outcome }.{
 		Candidated(Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report),
 		Deployed(Cli.Deploy, Names.LocalPath, InstanceDeploy.Report),
 		CiChecked(Cli.CiCheckRequest, CiCheck.Report),
+		CiFetched(Cli.CiRun, CiFetch.Report),
+		CiStored(Cli.CiRun, CiStore.Report),
+		CiWorkflowRendered(Cli.Instance, Names.LocalPath, InstanceSpec, Str),
 		Failed(Problem, Cli.Format, Cli.Command),
 	]
 
@@ -62,6 +68,10 @@ Output :: { outcome : Outcome }.{
 			Outcome.Candidated(request, path, report) => candidated_text(request, path, report)
 			Outcome.Deployed(request, path, report) => deployed_text(request, path, report.receipt)
 			Outcome.CiChecked(request, report) => ci_checked_text(request, report)
+			Outcome.CiFetched(request, report) => ci_fetched_text(request, report)
+			Outcome.CiStored(request, report) => ci_stored_text(request, report)
+			# The file itself, so the text output can be committed as it is.
+			Outcome.CiWorkflowRendered(_, _, _, workflow) => workflow.drop_suffix("\n")
 			Outcome.Failed(problem, _, _) => error_text(problem)
 		}
 	}
@@ -99,6 +109,9 @@ format = |outcome| match outcome {
 	Output.Outcome.Candidated(request, _, _) => request.parts().format
 	Output.Outcome.Deployed(request, _, _) => request.format
 	Output.Outcome.CiChecked(request, _) => request.parts().format
+	Output.Outcome.CiFetched(request, _) => request.parts().format
+	Output.Outcome.CiStored(request, _) => request.parts().format
+	Output.Outcome.CiWorkflowRendered(request, _, _, _) => request.parts().format
 }
 
 next_actions : Source -> List(Cli.Action)
@@ -159,6 +172,9 @@ json = |outcome| match outcome {
 	Output.Outcome.Candidated(request, path, report) => candidated_json(request, path, report)
 	Output.Outcome.Deployed(_, path, report) => deployed_json(path, report)
 	Output.Outcome.CiChecked(request, report) => ci_checked_json(request, report)
+	Output.Outcome.CiFetched(request, report) => ci_fetched_json(request, report)
+	Output.Outcome.CiStored(request, report) => ci_stored_json(request, report)
+	Output.Outcome.CiWorkflowRendered(_, path, spec, workflow) => ci_workflow_json(path, spec, workflow)
 	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
 	Output.Outcome.Help(_) => info_json(Bool.True)
 	Output.Outcome.Version(_) => info_json(Bool.False)
@@ -818,6 +834,141 @@ ci_checked_text = |request, report| {
 	)
 }
 
+ci_fetched_json : Cli.CiRun, CiFetch.Report -> Str
+# As ci_checked_json: the envelope is encoded with `"report":null`, which only that key can spell, and the host's text
+# replaces it verbatim.
+ci_fetched_json = |request, report| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	command : Cli.Command
+	command = Cli.Command.CiFetch
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: command.name(),
+		exit_code: 0.I32,
+		context: { directory: request.parts().directory.to_str() },
+		result: { report: null },
+		error: null,
+		next_actions: [help_action({}).dto()],
+	})
+		.replace_first("\"report\":null", "\"report\":${report.text}")
+}
+
+ci_fetched_text : Cli.CiRun, CiFetch.Report -> Str
+ci_fetched_text = |request, report| {
+	outcome = report.outcome
+	event = outcome.event
+	row = |label, value| ["  ${label}${Str.repeat(" ", 11 - label.count_utf8_bytes())}${Output.safe(value)}"]
+	tree = fetched_tree
+	title = match event.pull_request {
+		Ok(number) => "pull request #${number.to_str()}"
+		Err(Null) => "push to main"
+	}
+	base = match outcome.base {
+		Ok(value) => row("Base", "merge base ${tree(value)}")
+		Err(Null) => row("Base", "none: every lane runs")
+	}
+	workflow = match event.workflow_commit {
+		Ok(commit) => commit
+		Err(Null) => "not exported by the runner"
+	}
+	Str.join_with(
+		["DAY2  /  ci fetch  /  ${Output.safe(event.repository)} ${title}", "", "RUN"]
+			.concat(row("Repository", "${event.repository} (ID ${event.repository_id.to_str()})"))
+			.concat(row("Event", event.event))
+			.concat(row("Run", "${event.run.to_str()}, attempt ${event.attempt.to_str()}"))
+			.concat(row("Workflow", workflow))
+			.concat(["", "TREES"])
+			.concat(row("Head", tree(outcome.head)))
+			.concat(base)
+			.concat(row("Inputs", outcome.source_inputs))
+			.concat(row("Record", "${request.parts().directory.to_str()}/event.json")),
+		"\n",
+	)
+}
+
+ci_workflow_json : Names.LocalPath, InstanceSpec, Str -> Str
+ci_workflow_json = |path, spec, workflow| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	command : Cli.Command
+	command = Cli.Command.InstanceCiWorkflow
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: command.name(),
+		exit_code: 0.I32,
+		context: { spec_path: path.to_str(), spec_validation: "checked" },
+		result: {
+			repository: spec.derived().ci_repository,
+			path: InstanceCiWorkflow.path,
+			required_check: spec.derived().required_check,
+			workflow,
+		},
+		error: null,
+		next_actions: [help_action({}).dto()],
+	})
+}
+
+ci_stored_json : Cli.CiRun, CiStore.Report -> Str
+# As ci_fetched_json, with the host's text verbatim.
+ci_stored_json = |request, report| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	command : Cli.Command
+	command = Cli.Command.CiStore
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: command.name(),
+		exit_code: 0.I32,
+		context: { directory: request.parts().directory.to_str() },
+		result: { report: null },
+		error: null,
+		next_actions: [help_action({}).dto()],
+	})
+		.replace_first("\"report\":null", "\"report\":${report.text}")
+}
+
+ci_stored_text : Cli.CiRun, CiStore.Report -> Str
+ci_stored_text = |request, report| {
+	outcome = report.outcome
+	row = |label, value| ["  ${label}${Str.repeat(" ", 11 - label.count_utf8_bytes())}${Output.safe(value)}"]
+	run = "${outcome.repository} ${outcome.event} run ${outcome.run.to_str()}, attempt ${outcome.attempt.to_str()}"
+	stored = match (outcome.bucket, outcome.prefix) {
+		(Ok(bucket), Ok(prefix)) => row("Prefix", "gs://${bucket}/${prefix}/").concat(
+			outcome.objects.map(
+				|object| "  ${Output.safe(object.name)}: ${object.bytes.to_str()} bytes, ${object.digest}, generation ${
+					Output.safe(object.generation)
+				}",
+			),
+		)
+		_ => row(
+			"Stored",
+			match outcome.reason {
+				Ok(reason) => "nothing: ${reason}"
+				Err(Null) => "nothing"
+			},
+		)
+	}
+	title = if outcome.stored "artifact stored" else "nothing to store"
+	Str.join_with(
+		["DAY2  /  ci store  /  ${title}", "", "RUN"]
+			.concat(row("Run", run))
+			.concat(row("Directory", request.parts().directory.to_str()))
+			.concat(["", "STORE"])
+			.concat(stored),
+		"\n",
+	)
+}
+
+fetched_tree : CiFetch.Tree -> Str
+fetched_tree = |value| {
+	counts = "${value.files.to_str()} files, ${value.bytes.to_str()} bytes, ${value.links.to_str()} links"
+	"${value.commit} (${counts}) in ${value.path}"
+}
+
 toggled : Cli.Instance -> Cli.Instance
 toggled = |request| request.with_format(
 	match request.parts().format {
@@ -842,13 +993,14 @@ checked_json = |request, path, spec| {
 			installation: names.installation,
 			platform_repository: names.platform_repository,
 			platform_commit: names.platform_commit,
-			forge: { kind: names.forge_kind, server: names.forge_server, org: names.forge_org },
+			forge: { kind: names.forge_kind, server: names.forge_server, org: names.forge_org, oidc: names.forge_oidc },
 			gcp: { project: names.gcp_project, region: names.gcp_region, zone: names.gcp_zone },
 			domains: { people: names.people_domain, apps: names.apps_domain },
 			operators: names.operators,
 			apply_identity: names.apply_identity,
 			repositories: { instance: names.instance_repository, ci: names.ci_repository },
 			required_check: names.required_check,
+			ci_workload_identity: names.ci_workload_identity,
 			artifact_registry: names.artifact_registry,
 			sdk_registry: names.sdk_registry,
 			tofu_state_bucket: names.tofu_state_bucket,
@@ -880,6 +1032,7 @@ checked_json = |request, path, spec| {
 							state_prefix: bound.state_prefix,
 							edge_state_prefix: bound.edge_state_prefix,
 							backup_bucket: bound.backup_bucket,
+							ci_bucket: bound.ci_bucket,
 							runtime_resources: bound.runtime_resources,
 							sqlite_storage_gb: bound.sqlite_storage_gb,
 						},
@@ -925,6 +1078,7 @@ checked_text = |request, path, spec| {
 								row("  state", "${bound.state_bucket} / ${bound.state_prefix}"),
 								row("  edge state", "${names.tofu_state_bucket} / ${bound.edge_state_prefix}"),
 								row("  backups", bound.backup_bucket),
+								row("  CI results", bound.ci_bucket),
 								row(
 									"  resources",
 									"${bound.runtime_resources.memory_mib.to_str()} MiB / ${
@@ -964,6 +1118,13 @@ checked_text = |request, path, spec| {
 			row("File", path.to_str()),
 			row("Platform", "${names.platform_repository} @ ${names.platform_commit}"),
 			row("Forge", "${names.forge_kind} ${names.forge_server} / ${names.forge_org}"),
+			row(
+				"OIDC broker",
+				match names.forge_oidc {
+					Ok(broker) => broker
+					Err(Null) => "none: add forge.oidc to render app CI's workflow"
+				},
+			),
 			row("GCP", "${names.gcp_project} / ${names.gcp_zone}"),
 			row("Domains", "people ${names.people_domain} / apps ${names.apps_domain}"),
 			row("Operators", Str.join_with(names.operators, ", ")),
@@ -973,6 +1134,10 @@ checked_text = |request, path, spec| {
 			row("Instance repository", names.instance_repository),
 			row("CI repository", names.ci_repository),
 			row("Required app check", names.required_check),
+			row(
+				"CI identity",
+				"pool ${names.ci_workload_identity.pool} / provider ${names.ci_workload_identity.provider}",
+			),
 			row("Artifact registry", names.artifact_registry),
 			row("SDK registry", names.sdk_registry),
 			row("OpenTofu state", names.tofu_state_bucket),
@@ -1140,7 +1305,10 @@ info_json = |is_help| {
 				"instance.candidate.native-build",
 				"instance.candidate.native-probe",
 				"instance.deploy",
+				"instance.ci-workflow",
 				"ci.check",
+				"ci.fetch",
+				"ci.store",
 			],
 			platform_commands: [
 				"platform.build",
@@ -1282,7 +1450,8 @@ planned_spec =
 	\\{"kind":"instance","version":1,"installation":"exampleco",
 	\\"platform":"fe4320b189b98ed08fccc183db3e70aee76319ee",
 	\\"gcp":{"project":"exampleco-tools","region":"us-central1","zone":"us-central1-a"},
-	\\"forge":{"kind":"gitea","server":"https://git.example.com","org":"tools"},
+	\\"forge":{"kind":"gitea","server":"https://git.example.com","org":"tools",
+	\\"oidc":"https://git-oidc.example.com"},
 	\\"domains":{"people":"example.com","apps":"apps.example.com"},
 	\\"operators":["ada@example.com"],
 	\\"apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic",

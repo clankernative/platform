@@ -489,7 +489,7 @@ pub(crate) fn int(value: &Value) -> Option<i128> {
 }
 
 /// A positive integer below 2**63, as a proof's run, attempt and job.
-fn proof_id(value: &Value) -> Option<u64> {
+pub(crate) fn proof_id(value: &Value) -> Option<u64> {
     int(value)
         .filter(|id| *id > 0 && *id < i128::from(PROOF_LIMIT))
         .and_then(|id| u64::try_from(id).ok())
@@ -990,13 +990,15 @@ struct Extensions {
     pax: bool,
     path: Option<Vec<u8>>,
     size: Option<u64>,
+    /// A pax `linkpath` record.
+    link_path: Option<Vec<u8>>,
     long_name: Option<Vec<u8>>,
-    long_link: bool,
+    long_link: Option<Vec<u8>>,
 }
 
 impl Extensions {
     fn is_empty(&self) -> bool {
-        !self.pax && self.long_name.is_none() && !self.long_link
+        !self.pax && self.long_name.is_none() && self.long_link.is_none()
     }
 }
 
@@ -1080,6 +1082,9 @@ pub(crate) struct Member {
     pub size: u64,
     /// The header's mode field.
     pub mode: u32,
+    /// A symlink's target as tarfile reads it (a pax `linkpath`, else a GNU
+    /// long link name, else the header's link name); empty for other kinds.
+    pub link: Vec<u8>,
 }
 
 /// Read a gzip tar archive's members in order, as Python's tarfile reads them,
@@ -1153,6 +1158,10 @@ fn members(
                                 ensure!(pending.size.is_none(), text.unsupported);
                                 pending.size = Some(decimal(value).context(text.unsupported)?);
                             }
+                            b"linkpath" => {
+                                ensure!(pending.link_path.is_none(), text.unsupported);
+                                pending.link_path = Some(value.to_vec());
+                            }
                             key => ensure!(!key.starts_with(b"GNU.sparse."), text.unsupported),
                         }
                     }
@@ -1168,8 +1177,8 @@ fn members(
                     pending.long_name = Some(terminated(&data).to_vec());
                 }
                 _ => {
-                    ensure!(!pending.long_link, text.unsupported);
-                    pending.long_link = true;
+                    ensure!(pending.long_link.is_none(), text.unsupported);
+                    pending.long_link = Some(terminated(&data).to_vec());
                 }
             }
             continue;
@@ -1178,10 +1187,12 @@ fn members(
         let header_name = terminated(&header[..100]);
         let ustar = entry.header().as_ustar().is_some();
         let prefix_empty = header[345..500].iter().all(|b| *b == 0);
-        let names_agree = match (&extensions.path, &extensions.long_name) {
-            (Some(path), Some(long_name)) => path == long_name,
+        let agree = |pax: &Option<Vec<u8>>, gnu: &Option<Vec<u8>>| match (pax, gnu) {
+            (Some(pax), Some(gnu)) => pax == gnu,
             _ => true,
         };
+        let names_agree = agree(&extensions.path, &extensions.long_name)
+            && agree(&extensions.link_path, &extensions.long_link);
         // tarfile reads an old-style regular entry named with a final slash
         // as a directory, and skips data only after regular and unknown
         // entries.
@@ -1206,6 +1217,17 @@ fn members(
             .mode()
             .map_err(|_| anyhow!(text.unreadable))?;
         let name = python_name(&path);
+        let symlink = kind == b'2';
+        let link = match extensions.link_path.or(extensions.long_link) {
+            Some(link) => link,
+            None if symlink => entry
+                .header()
+                .link_name_bytes()
+                .map(|link| link.into_owned())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        ensure!(!link.contains(&0), text.unsupported);
         let member = Member {
             parts: posix_parts(&name),
             name,
@@ -1213,13 +1235,14 @@ fn members(
                 Kind::Regular
             } else if directory {
                 Kind::Directory
-            } else if kind == b'2' {
+            } else if symlink {
                 Kind::Symlink
             } else {
                 Kind::Other
             },
             size,
             mode,
+            link: if symlink { link } else { Vec::new() },
         };
         visit(&member, &mut entry)?;
     }
@@ -1742,7 +1765,7 @@ enum Got {
 
 /// urllib.parse.quote(value, safe=""): everything but `A-Za-z0-9_.-~` is
 /// percent-encoded.
-fn quote(value: &str) -> String {
+pub(crate) fn quote(value: &str) -> String {
     value
         .bytes()
         .map(|b| {
@@ -1833,7 +1856,7 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
 }
 
 /// Write a new file: created exclusively, then synced.
-fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     create_new(path, |file| file.write_all(bytes))
 }
 
@@ -2024,11 +2047,12 @@ impl Session {
     fn forge(&mut self) -> Result<(Forge<'_>, &Binding)> {
         let binding = self.binding.as_ref().context("binding")?;
         Ok((
-            Forge {
-                transport: self.effects.transport.as_mut(),
-                token: self.effects.token.as_deref(),
-                prefix: format!("{}/api/v1/repos/{}", binding.server, binding.repository),
-            },
+            Forge::new(
+                self.effects.transport.as_mut(),
+                self.effects.token.as_deref(),
+                &binding.server,
+                &binding.repository,
+            ),
             binding,
         ))
     }
@@ -2081,11 +2105,7 @@ impl Session {
     fn archive(&mut self) -> Result<Value> {
         let commit = self.commit.clone().context("commit")?;
         let (mut forge, _) = self.forge()?;
-        let url = format!("{}/archive/{commit}.tar.gz", forge.prefix);
-        let bytes = match forge.get(&url, ARCHIVE_LIMIT, true)? {
-            Got::Body(body) => body,
-            Got::Status(status, _) => bail!("source_archive_http_{status}"),
-        };
+        let bytes = forge.archive(&commit)?;
         let output = self.output.clone().context("new archive")?;
         write_new(&output, &bytes)?;
         let identity = BlobIdentity::of(&bytes);
@@ -2372,15 +2392,40 @@ impl Session {
     }
 }
 
-/// The binding's repository on the instance's forge.
-struct Forge<'a> {
+/// One repository on the instance's forge: the binding's for a source command,
+/// the job's own for `day2 ci fetch`.
+pub(crate) struct Forge<'a> {
     transport: &'a mut dyn Transport,
     token: Option<&'a str>,
     /// `<server>/api/v1/repos/<repository>`.
-    prefix: String,
+    pub(crate) prefix: String,
 }
 
-impl Forge<'_> {
+impl<'a> Forge<'a> {
+    pub(crate) fn new(
+        transport: &'a mut dyn Transport,
+        token: Option<&'a str>,
+        server: &str,
+        repository: &str,
+    ) -> Self {
+        Self {
+            transport,
+            token,
+            prefix: format!("{server}/api/v1/repos/{repository}"),
+        }
+    }
+
+    /// Source.archive, for Gitea: a commit's archive, at most 64 MiB. Deploy
+    /// and app CI read a commit's tree only through this.
+    pub(crate) fn archive(&mut self, commit: &str) -> Result<Vec<u8>> {
+        ensure!(crate::instance_source::commit(commit), "invalid commit");
+        let url = format!("{}/archive/{commit}.tar.gz", self.prefix);
+        match self.get(&url, ARCHIVE_LIMIT, true)? {
+            Got::Body(body) => Ok(body),
+            Got::Status(status, _) => bail!("source_archive_http_{status}"),
+        }
+    }
+
     /// Source.get: 408, 429 and 5xx are retryable; a 2xx body over `limit`
     /// is refused; any other status is the caller's to report.
     fn get(&mut self, url: &str, limit: u64, authenticated: bool) -> Result<Got> {
@@ -2400,7 +2445,7 @@ impl Forge<'_> {
     }
 
     /// A JSON read Python left to urllib's HTTPError on any other status.
-    fn json(&mut self, url: &str) -> Result<Value> {
+    pub(crate) fn json(&mut self, url: &str) -> Result<Value> {
         match self.get(url, JSON_LIMIT, true)? {
             Got::Body(body) => decode(&body),
             Got::Status(status, _) => bail!("source_http_{status}"),

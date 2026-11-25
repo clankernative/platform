@@ -202,6 +202,11 @@ pub trait Tools {
     fn pull(&mut self, image: &str) -> Result<()>;
     /// `docker image inspect --format {{.Id}} <image>`, trimmed.
     fn image_id(&mut self, image: &str) -> Result<String>;
+    /// `gcloud projects describe <project> --format=value(projectNumber)`, for the
+    /// app CI workflow's provider audience. Only `instance ci-workflow` reads it.
+    fn project_number(&mut self, project: &str) -> Result<String> {
+        bail!("this command reads no project number for {project}")
+    }
 }
 
 pub fn describe_args(uri: &str) -> Vec<OsString> {
@@ -211,6 +216,17 @@ pub fn describe_args(uri: &str) -> Vec<OsString> {
         "describe",
         uri,
         "--format=json(size,generation)",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+pub fn project_number_args(project: &str) -> Vec<OsString> {
+    [
+        "projects",
+        "describe",
+        project,
+        "--format=value(projectNumber)",
     ]
     .map(OsString::from)
     .to_vec()
@@ -293,6 +309,11 @@ impl Tools for Native {
             .with_context(|| format!("inspect {image}"))?
             .trim()
             .to_owned())
+    }
+
+    fn project_number(&mut self, project: &str) -> Result<String> {
+        self.run("gcloud", project_number_args(project), 120)
+            .with_context(|| format!("describe project {project}"))
     }
 }
 

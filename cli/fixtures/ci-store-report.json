@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "repository": "tools/links",
+  "event": "push",
+  "run": 41,
+  "attempt": 2,
+  "stored": true,
+  "reason": null,
+  "bucket": "exampleco-tools-links-ci",
+  "prefix": "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d/abababababababababababababababababababababababababababababababab-6/41/2",
+  "objects": [
+    {
+      "name": "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d/abababababababababababababababababababababababababababababababab-6/41/2/artifact.tar.gz",
+      "bytes": 4096,
+      "digest": "sha256:e2a1f5a3b8c4d7e6f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2",
+      "generation": "1700000000000001"
+    },
+    {
+      "name": "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d/abababababababababababababababababababababababababababababababab-6/41/2/receipt.json",
+      "bytes": 512,
+      "digest": "sha256:f3b2a1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2",
+      "generation": "1700000000000002"
+    }
+  ]
+}

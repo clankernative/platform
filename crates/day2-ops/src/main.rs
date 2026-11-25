@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use day2_ops::{
-    backup, chrome_extension, ci_check, infra, instance_candidate, instance_deploy,
-    instance_release, instance_roots, instance_source, local_dev, maintenance, process, projection,
+    backup, chrome_extension, ci_check, ci_fetch, ci_store, ci_workflow, infra, instance_candidate,
+    instance_deploy, instance_release, instance_roots, instance_source, local_dev, maintenance,
+    process, projection,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -47,6 +48,15 @@ struct Operations {
     /// Whether the host action started `day2 ci check`, and its session.
     ci_mode: bool,
     ci_session: Option<ci_check::Session>,
+    /// Whether the host action started `day2 ci fetch`, and its session.
+    fetch_mode: bool,
+    fetch_session: Option<ci_fetch::Session>,
+    /// Whether the host action started `day2 ci store`, and its session.
+    store_mode: bool,
+    store_session: Option<ci_store::Session>,
+    /// Whether the host action started `day2 instance ci-workflow`, and its session.
+    workflow_mode: bool,
+    workflow_session: Option<ci_workflow::Session>,
     local: Option<local_dev::Session>,
     maintenance: Option<maintenance::Session>,
     maintenance_recovery: Option<maintenance::Recovery>,
@@ -877,6 +887,104 @@ impl Operations {
                     .context("CI session required")?
                     .step(&name)
             }
+            "ci-fetch-prepare" => {
+                ensure!(
+                    self.fetch_session.is_none(),
+                    "one CI fetch session per workflow"
+                );
+                ensure!(
+                    self.fetch_mode,
+                    "only day2 ci fetch starts a CI fetch session"
+                );
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                self.fetch_session = Some(ci_fetch::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    ci_fetch::Effects::native()?,
+                )?);
+                Ok(json!({}))
+            }
+            "ci-fetch-step" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    name: String,
+                }
+                let name = input::<Input>(&request)?.name;
+                self.fetch_session
+                    .as_mut()
+                    .context("CI fetch session required")?
+                    .step(&name)
+            }
+            "ci-store-prepare" => {
+                ensure!(
+                    self.store_session.is_none(),
+                    "one CI store session per workflow"
+                );
+                ensure!(
+                    self.store_mode,
+                    "only day2 ci store starts a CI store session"
+                );
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                let session = ci_store::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    ci_store::Effects::native()?,
+                )?;
+                let plan = session.plan();
+                self.store_session = Some(session);
+                Ok(plan)
+            }
+            "ci-store-step" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    name: String,
+                }
+                let name = input::<Input>(&request)?.name;
+                self.store_session
+                    .as_mut()
+                    .context("CI store session required")?
+                    .step(&name)
+            }
+            "instance-ci-workflow-prepare" => {
+                ensure!(
+                    self.workflow_session.is_none(),
+                    "one CI workflow session per workflow"
+                );
+                ensure!(
+                    self.workflow_mode,
+                    "only day2 instance ci-workflow starts a CI workflow session"
+                );
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                self.workflow_session = Some(ci_workflow::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    ci_workflow::Effects::native(),
+                )?);
+                Ok(json!({}))
+            }
+            "instance-ci-workflow-step" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    name: String,
+                }
+                let name = input::<Input>(&request)?.name;
+                self.workflow_session
+                    .as_mut()
+                    .context("CI workflow session required")?
+                    .step(&name)
+            }
             "instance-candidate-prepare" => {
                 ensure!(
                     self.candidate_session.is_none(),
@@ -1103,6 +1211,12 @@ fn run(request: Request) -> Result<Value> {
         deploy_session: None,
         ci_mode: false,
         ci_session: None,
+        fetch_mode: false,
+        fetch_session: None,
+        store_mode: false,
+        store_session: None,
+        workflow_mode: false,
+        workflow_session: None,
         local: None,
         maintenance: None,
         maintenance_recovery: None,
@@ -1116,6 +1230,9 @@ fn run(request: Request) -> Result<Value> {
         "instance-release-publish",
         "instance-release-fetch",
         "ci-check",
+        "ci-fetch",
+        "ci-store",
+        "instance-ci-workflow",
     ]
     .contains(&request.action.as_str())
         && source_mode(&request.action).is_none()
@@ -1236,6 +1353,57 @@ fn run(request: Request) -> Result<Value> {
                 .request
                 .to_str()
                 .context("CI check request path must be UTF-8")?
+                .to_owned(),
+        ]
+    } else if request.action == "ci-fetch" {
+        // `day2 ci fetch` only, as for ci check.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: PathBuf,
+        }
+        let input: Input = input(&request)?;
+        operations.fetch_mode = true;
+        vec![
+            "ci-fetch-session".to_owned(),
+            input
+                .request
+                .to_str()
+                .context("CI fetch request path must be UTF-8")?
+                .to_owned(),
+        ]
+    } else if request.action == "ci-store" {
+        // `day2 ci store` only, as for ci check.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: PathBuf,
+        }
+        let input: Input = input(&request)?;
+        operations.store_mode = true;
+        vec![
+            "ci-store-session".to_owned(),
+            input
+                .request
+                .to_str()
+                .context("CI store request path must be UTF-8")?
+                .to_owned(),
+        ]
+    } else if request.action == "instance-ci-workflow" {
+        // `day2 instance ci-workflow` only, as for the other instance commands.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: PathBuf,
+        }
+        let input: Input = input(&request)?;
+        operations.workflow_mode = true;
+        vec![
+            "instance-ci-workflow-session".to_owned(),
+            input
+                .request
+                .to_str()
+                .context("CI workflow request path must be UTF-8")?
                 .to_owned(),
         ]
     } else if request.action == "local-session" {

@@ -22,6 +22,9 @@ Cli :: [].{
 		Candidate(CandidateRequest),
 		Deploy(Deploy),
 		CiCheck(CiCheckRequest),
+		CiFetch(CiRun),
+		CiStore(CiRun),
+		CiWorkflow(Instance),
 	]
 
 	## The command a response reports, including failures before a request exists.
@@ -45,6 +48,9 @@ Cli :: [].{
 		InstanceCandidateNativeProbe,
 		InstanceDeploy,
 		CiCheck,
+		CiFetch,
+		CiStore,
+		InstanceCiWorkflow,
 	].{
 		name : Command -> Str
 		name = |command| match command {
@@ -67,6 +73,9 @@ Cli :: [].{
 			InstanceCandidateNativeProbe => "instance.candidate.native-probe"
 			InstanceDeploy => "instance.deploy"
 			CiCheck => "ci.check"
+			CiFetch => "ci.fetch"
+			CiStore => "ci.store"
+			InstanceCiWorkflow => "instance.ci-workflow"
 		}
 	}
 
@@ -373,6 +382,17 @@ Cli :: [].{
 		}
 	}
 
+	## day2 ci fetch DIRECTORY and day2 ci store DIRECTORY: the first and last steps of an app's org-scoped CI run. Fetch
+	## writes the run's trees and record into the new directory DIRECTORY for `ci check`; store stores what `ci check`
+	## wrote there.
+	CiRun :: { directory : Names.LocalPath, format : Format }.{
+		parts : CiRun -> { directory : Names.LocalPath, format : Format }
+		parts = |request| { directory: request.directory, format: request.format }
+
+		with_format : CiRun, Format -> CiRun
+		with_format = |request, format| { ..request, format }
+	}
+
 	## The scanner's optional fields and positionals never escape parsing.
 	Describe :: { app_name : Names.App, source : Source, filter : Filter, format : Format }.{
 		parts : Describe -> { app_name : Names.App, source : Source, filter : Filter, format : Format }
@@ -451,6 +471,7 @@ Cli :: [].{
 					["instance", "source", ..] => Ok(Request.Help(raw.format))
 					["instance", "candidate", ..] => Ok(Request.Help(raw.format))
 					["instance", "deploy", ..] => Ok(Request.Help(raw.format))
+					["instance", "ci-workflow", ..] => Ok(Request.Help(raw.format))
 					["ci", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
 						_ = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
@@ -461,7 +482,12 @@ Cli :: [].{
 			}
 			Run => match raw.positionals {
 				[] => if has_options(raw) Err(Problem.MissingCommand) else Ok(Request.Help(raw.format))
-				["app", "describe"] | ["instance", "check"] | ["instance", "render"] => Err(Problem.MissingArgument)
+				["app", "describe"]
+				| ["instance", "check"]
+				| ["instance", "render"]
+				| ["instance", "ci-workflow"] => Err(
+					Problem.MissingArgument,
+				)
 				["instance", "plan"]
 				| ["instance", "plan", _]
 				| ["instance", "plan", _, _]
@@ -634,7 +660,16 @@ Cli :: [].{
 						)?,
 					),
 				)
-				["ci"] | ["ci", "check"] | ["ci", "check", _] | ["ci", "check", _, _] => Err(Problem.MissingArgument)
+				["ci"]
+				| ["ci", "check"]
+				| ["ci", "check", _]
+				| ["ci", "check", _, _]
+				| ["ci", "fetch"]
+				| ["ci", "store"] => Err(
+					Problem.MissingArgument,
+				)
+				["ci", "fetch", directory] => Ok(Request.CiFetch(ci_run("fetch", directory, raw)?))
+				["ci", "store", directory] => Ok(Request.CiStore(ci_run("store", directory, raw)?))
 				["ci", "check", head, cases, output] => Ok(
 					Request.CiCheck(ci_check(head, Err(Null), cases, output, raw)?),
 				)
@@ -643,6 +678,7 @@ Cli :: [].{
 				)
 				["instance", "check", value] => Ok(Request.Check(instance("check", value, raw)?))
 				["instance", "render", value] => Ok(Request.Render(instance("render", value, raw)?))
+				["instance", "ci-workflow", value] => Ok(Request.CiWorkflow(instance("ci-workflow", value, raw)?))
 				["app", "describe", name] => {
 					app_name = Names.App.from_str(name).map_err(|_| Problem.InvalidAppName(name))?
 					source = match raw.source {
@@ -668,6 +704,8 @@ Cli :: [].{
 		| ["--operation", _, .. as rest]
 		| ["--deadline", _, .. as rest] => requested(rest)
 		["instance", .. as rest] => instance_command(rest)
+		["ci", "fetch", ..] => CiFetch
+		["ci", "store", ..] => CiStore
 		["ci", ..] => CiCheck
 		[arg, .. as rest] if arg.starts_with("-") => requested(rest)
 		_ => AppDescribe
@@ -687,6 +725,9 @@ Cli :: [].{
 		Request.Candidate(value) => value.parts().format
 		Request.Deploy(value) => value.format
 		Request.CiCheck(value) => value.parts().format
+		Request.CiFetch(value) => value.parts().format
+		Request.CiStore(value) => value.parts().format
+		Request.CiWorkflow(value) => value.format
 	}
 
 	quote : Str -> Str
@@ -758,6 +799,9 @@ Cli :: [].{
 				},
 			)
 			Request.CiCheck(value) => ["day2", "ci", "check"].concat(value.arguments())
+			Request.CiFetch(value) => ["day2", "ci", "fetch", value.parts().directory.to_str()]
+			Request.CiStore(value) => ["day2", "ci", "store", value.parts().directory.to_str()]
+			Request.CiWorkflow(value) => ["day2", "instance", "ci-workflow", value.directory.to_str()]
 		}
 		base.concat(
 			match request_format(request) {
@@ -819,6 +863,18 @@ ci_check = |head, base, cases, output, raw| {
 			format: raw.format,
 		},
 	)
+}
+
+## day2 ci fetch|store: the run's directory is a path; everything else comes from the CI run's environment.
+ci_run : Str, Str, Raw -> Try(Cli.CiRun, Problem)
+ci_run = |verb, directory, raw| {
+	if has_options(raw) {
+		return Err(Problem.ConflictingOptions("ci ${verb} accepts only --agent or --json."))
+	}
+	path =
+		Names.LocalPath.from_str(directory)
+			.map_err(|_| Problem.InvalidArguments("ci ${verb} requires a directory of at most 4096 bytes"))?
+	Ok(Cli.CiRun.{ directory: path, format: raw.format })
 }
 
 roots : InstanceRender.Mode, Str, Str, Str, Raw -> Try(Cli.Roots, Problem)
@@ -986,6 +1042,7 @@ instance_command = |args| match args {
 	["plan", ..] => Cli.Command.InstancePlan
 	["apply", ..] => Cli.Command.InstanceApply
 	["deploy", ..] => Cli.Command.InstanceDeploy
+	["ci-workflow", ..] => Cli.Command.InstanceCiWorkflow
 	["release", .. as rest] => release_command(rest)
 	["source", .. as rest] => source_command(rest)
 	["candidate", .. as rest] => candidate_command(rest)
