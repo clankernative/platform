@@ -2583,3 +2583,69 @@ fn build_receipt(artifact: &str, id: &str, seed: &str) -> day2::development::Bui
         },
     }
 }
+
+#[test]
+fn scheduled_backup_recipe_orders_real_protocol_steps_and_stops_on_each_refusal() -> Result<()> {
+    let runner = automation::runner()?;
+    for (mode, expected) in [
+        ("local-only", vec!["backup-snapshot", "backup-verify"]),
+        (
+            "with-upload",
+            vec!["backup-snapshot", "backup-verify", "backup-upload"],
+        ),
+    ] {
+        for refused_at in 0..=expected.len() {
+            let mut calls = Vec::new();
+            let result = automation::run(
+                &runner,
+                &["scheduled-backup", "instance", "app", "chosen", mode],
+                |request| {
+                    let input = request.decode::<Value>()?;
+                    assert_eq!(request.action, expected[calls.len()]);
+                    let expected_input = match request.action.as_str() {
+                        "backup-snapshot" => {
+                            json!({"instance":"instance","app_name":"app","output":"chosen"})
+                        }
+                        "backup-verify" => json!({"directory":"chosen"}),
+                        "backup-upload" => json!({}),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(input, expected_input);
+                    calls.push(request.action);
+                    if calls.len() == refused_at + 1 {
+                        bail!("injected bounded native refusal");
+                    }
+                    // Deliberately untrusted DATA: sequencing cannot depend on a
+                    // child claiming the archive was verified/uploaded.
+                    Ok(json!({"not_authority":true}))
+                },
+            );
+            assert_eq!(calls, expected[..expected.len().min(refused_at + 1)]);
+            if refused_at < expected.len() {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result?, json!({"scheduled_backup":"complete"}));
+            }
+        }
+    }
+    let mut calls = 0;
+    assert!(
+        automation::run(
+            &runner,
+            &[
+                "scheduled-backup",
+                "instance",
+                "app",
+                "chosen",
+                "unknown-mode"
+            ],
+            |_| {
+                calls += 1;
+                Ok(json!({}))
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(calls, 0);
+    Ok(())
+}

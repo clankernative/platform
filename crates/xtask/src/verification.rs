@@ -1888,6 +1888,10 @@ fn configure_tests(
         }
     }
     command.env("DAY2_TEST_TOFU_CONFIG", root.join(".cache/tofu.json"));
+    if suite == "fast-libraries" {
+        // The real artifact remains mandatory for every non-FAST execution.
+        command.args(["--skip", "backup::scheduled::tests::compiled_scheduled_recipe_snapshots_serving_sqlite_with_same_exclusion"]);
+    }
     if !fixtures.contains_key("reports-search") {
         command.args([
             "--skip",
@@ -2301,6 +2305,46 @@ fn required_steps(scope: &str) -> Result<Vec<&'static str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduled_archive_fixture_is_filtered_only_by_fast_and_is_bound_in_full() -> Result<()> {
+        let name = "backup::scheduled::tests::compiled_scheduled_recipe_snapshots_serving_sqlite_with_same_exclusion";
+        for (suite, fixtures, excluded) in [
+            ("fast-libraries", BTreeMap::new(), true),
+            ("workspace", BTreeMap::new(), false),
+            (
+                "workspace",
+                BTreeMap::from([("reports".into(), PathBuf::from("/actual-fixture-data"))]),
+                false,
+            ),
+        ] {
+            let mut command = Command::new("not-executed-test-data");
+            configure_tests(
+                Path::new("/not-read-test-data"),
+                suite,
+                &fixtures,
+                None,
+                &mut command,
+            )?;
+            let arguments = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                arguments.windows(2).any(|pair| pair == ["--skip", name]),
+                excluded
+            );
+            if let Some(fixture) = fixtures.get("reports") {
+                assert!(
+                    command
+                        .get_envs()
+                        .any(|(name, value)| name == "DAY2_TEST_REPORTS_ARTIFACT"
+                            && value == Some(fixture.as_os_str()))
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn fast_libraries_keep_every_harness_and_linux_launcher_without_operator_links() -> Result<()> {

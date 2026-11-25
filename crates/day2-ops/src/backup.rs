@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod scheduled;
+pub use scheduled::run as run_scheduled;
+
 /// Bounds of one online snapshot. The copy reads inside a single read
 /// transaction on the source, so it is one consistent snapshot: commits by
 /// other connections neither appear in it nor restart it, however long it

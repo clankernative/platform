@@ -10,6 +10,19 @@ Backup :: [].{
 		Ok(receipt)
 	}
 
+	# The native broker retains its actual exclusion and selected archive across
+	# these calls. Receipt DATA and successful recipe return confer no ownership.
+	scheduled! : Str, Str, Str, Bool, (Str => Try(Str, Str)) => Try(Str, Str)
+	scheduled! = |instance, app_name, output, upload, host!| {
+		_ = take!(instance, app_name, output, host!)?
+		_ = if upload {
+			Capability.call!("backup-upload", "{}", host!)?
+		} else {
+			"{}"
+		}
+		Ok(Json.to_str({ scheduled_backup: "complete" }))
+	}
+
 	restore! : Str, Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	restore! = |backup, output, host!| {
 		_ = Capability.call!("backup-verify", Json.to_str({ directory: backup }), host!)?

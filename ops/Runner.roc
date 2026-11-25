@@ -7,6 +7,7 @@ import pf.OsStr
 import pf.Stdin
 import pf.Stdout
 import ops.Workflow
+import ops.Backup
 import ops.LocalDev
 import ops.InstanceRoots
 import ops.InstanceRelease
@@ -56,6 +57,20 @@ call! = |request| {
 run! : List(Str) => Try(Str, Str)
 run! = |args| match args {
 	["platform", .. as rest] => Workflow.run!(Workflow.parse(rest)?, call!)
+	["scheduled-backup", instance, app_name, output, "local-only"] => Backup.scheduled!(
+		instance,
+		app_name,
+		output,
+		Bool.False,
+		call!,
+	)
+	["scheduled-backup", instance, app_name, output, "with-upload"] => Backup.scheduled!(
+		instance,
+		app_name,
+		output,
+		Bool.True,
+		call!,
+	)
 	["local-dev-session", raw] => {
 		options : LocalDev.Options
 		options = Json.parse(raw).map_err(|_| "invalid local session settings")?
