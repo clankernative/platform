@@ -42,7 +42,7 @@ draining. Linux changes native capabilities beneath those workflows:
 
 - `xtask::native_toolchain` selects the reviewed compiler pin and linker inputs.
   Linux ARM64 and x86_64 GNU/glibc are the build targets, both on the official
-  October 13 compiler that macOS also uses.
+  November 24 `-safe` compiler that macOS also uses.
 - `day2-compiler-sandbox` confines the pinned compiler to platform-owned staging
   inputs/outputs, without sockets or subprocesses. Compiler threads are allowed.
 - `day2-sandbox` confines app workers before execution. It requires fully enforced

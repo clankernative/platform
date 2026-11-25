@@ -25,7 +25,7 @@ RedirectBinding :: { metadata : Metadata }.{
 	}
 
 	define : Metadata -> RedirectBinding
-	define = |metadata| { metadata: metadata }
+	define = |declared| { metadata: declared }
 
 	metadata : RedirectBinding -> Metadata
 	metadata = |binding| binding.metadata

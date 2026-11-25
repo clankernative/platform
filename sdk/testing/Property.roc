@@ -4,8 +4,8 @@ Property :: { name : Str, check : Str -> Try(Bool, Str) }.{
 	Check : { name : Str, passed : Bool, error : Str }
 
 	invariant : Str, (Str -> Try(a, Str)), (a -> Bool) -> Property
-	invariant = |name, decode, predicate| {
-		name,
+	invariant = |property_name, decode, predicate| {
+		name: property_name,
 		check: |raw| {
 			value = decode(raw)?
 			Ok(predicate(value))

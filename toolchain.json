@@ -1,10 +1,10 @@
 {
-  "roc_version": "nightly-2026-10-13-b17d287",
-  "roc_binary_sha256": "8b26c3b95889ad232c5dc114f8250139f8c62839d7da2adc0777bda2f18bd860",
+  "roc_version": "nightly-2026-11-24-ff5e544-safe",
+  "roc_binary_sha256": "f21477b486329ef5788f9fbfd466fa03ed1e6f2a19c387dc867d9b581f2beca1",
   "libsystem_sha256": "4f96f1402e1950b1764ac6accd0d2b9c1ca197b7783caae5e838fd0a4b474028",
-  "roc_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-10-13-b17d287/roc_nightly-macos_apple_silicon-2026-10-13-b17d287.tar.gz",
-  "roc_archive_sha256": "2a3ccaa478e3ac0557c88bb880fec4381103dbd2ee586f30ac17b22d9c3be6f1",
-  "roc_source_archive_sha256": "b8d4cfe189e68e7c92a8a19e747f5f4239d5856afb9cb7aa9218ecefc279e986",
+  "roc_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-11-24-ff5e544-safe/roc_nightly-macos_apple_silicon-2026-11-24-ff5e544-safe.tar.gz",
+  "roc_archive_sha256": "ac429f001215a1ccf4149015287614abc9e872ce048c7fcc6a450d97eb1339c5",
+  "roc_source_archive_sha256": "9b262a21d9e7cc0c67e27f4c2519f2982aa1a89943aa83dd00105736200fcd15",
   "rust_version": "1.100.0",
   "host_target": "aarch64-apple-darwin"
 }

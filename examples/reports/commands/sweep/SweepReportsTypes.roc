@@ -3,7 +3,7 @@ SweepReportsTypes :: [].{
 	# input from. The input is empty rather than carrying a timestamp: the
 	# occurrence is the platform's to know, and a sweep that read the clock would
 	# not replay identically.
-	Input := {}
+	Input : {}
 
 	Result := { reconciled : U64, remaining : Bool }
 }

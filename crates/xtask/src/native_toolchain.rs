@@ -13,7 +13,7 @@ const SEMANTIC_VERSION: &str = "nightly-2026-09-05-b195f5b";
 /// The official release every native target compiles applications with. One
 /// release for all targets, so an artifact's language semantics do not depend on
 /// the machine that built it.
-const OFFICIAL_VERSION: &str = "nightly-2026-10-13-b17d287";
+const OFFICIAL_VERSION: &str = "nightly-2026-11-24-ff5e544-safe";
 const DERIVED_VERSION: &str = "nightly-2026-09-05-b195f5b-day2-glue11254";
 const UPSTREAM_MAC_SHA256: &str =
     "47dba6e951a246c08aa51926c52566922276db2401b6ffb015150905598da01b";
@@ -23,7 +23,8 @@ const PATCH_PATH: &str = "tools/roc-compiler/glue-layouts.patch";
 const REVIEWED_GLUE_PATCH_SHA256: &str =
     "9d33559435a7d4acae54adda099cc91b644c0255bdfeab1621542196e775de72";
 const PROVENANCE_PATH: &str = "tools/roc-compiler/build-provenance.json";
-const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
+// The November 24 release binaries are 276-296 MB.
+const MAX_BINARY_BYTES: u64 = 384 * 1024 * 1024;
 
 fn hash_field<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
     let hash = value[field].as_str().context("missing compiler digest")?;
@@ -172,30 +173,30 @@ impl Pin {
             if let Some((binary, archive)) = match target {
                 Target::MacArm64 => None,
                 Target::LinuxArm64 => Some((
-                    "cc8c9f51444a7e7a9b60301045d2e092d250c7682f4b74eafd7812399b80d149",
-                    "44208d5598ec53cd23d4194bbbd63ac47e69293d5193acc318f816346b218030",
+                    "4bc923470cf516ab6d32b66779dd3392c9d6ef327b3a24b34844057c46b930a8",
+                    "cdde1e3bfccf26c55216cfc58b5c5aa3aa6deea52568e598784955b913a9da5a",
                 )),
                 Target::LinuxX64 => Some((
-                    "f66853c2b19e2a6371786e32a869c7281aaf94454b5a5df5da97cc17e230e0c3",
-                    "3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b",
+                    "ea552247b4274b5b411ff68c6d32775a839d33f9be25ab30d1bb645d87bd81be",
+                    "1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3",
                 )),
             } {
                 ensure!(
                     value["roc_binary_sha256"] == binary
                         && value["roc_archive_sha256"] == archive
                         && value["roc_source_archive_sha256"]
-                            == "b8d4cfe189e68e7c92a8a19e747f5f4239d5856afb9cb7aa9218ecefc279e986",
+                            == "9b262a21d9e7cc0c67e27f4c2519f2982aa1a89943aa83dd00105736200fcd15",
                     "official compiler must retain reviewed upstream inputs"
                 );
             }
             if target == Target::MacArm64 {
                 ensure!(
                     value["roc_binary_sha256"]
-                        == "8b26c3b95889ad232c5dc114f8250139f8c62839d7da2adc0777bda2f18bd860"
+                        == "f21477b486329ef5788f9fbfd466fa03ed1e6f2a19c387dc867d9b581f2beca1"
                         && value["roc_archive_sha256"]
-                            == "2a3ccaa478e3ac0557c88bb880fec4381103dbd2ee586f30ac17b22d9c3be6f1"
+                            == "ac429f001215a1ccf4149015287614abc9e872ce048c7fcc6a450d97eb1339c5"
                         && value["roc_source_archive_sha256"]
-                            == "b8d4cfe189e68e7c92a8a19e747f5f4239d5856afb9cb7aa9218ecefc279e986"
+                            == "9b262a21d9e7cc0c67e27f4c2519f2982aa1a89943aa83dd00105736200fcd15"
                         && value["libsystem_sha256"]
                             == "4f96f1402e1950b1764ac6accd0d2b9c1ca197b7783caae5e838fd0a4b474028",
                     "official compiler must retain reviewed upstream inputs"

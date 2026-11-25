@@ -39,7 +39,7 @@ offline. The serving runtime does not contain or execute the Clanker builder.
 Existing locks require an explicit [app UI lock upgrade](../docs/WEB.md#upgrading-an-app-ui-lock).
 
 It currently requires this source checkout and Apple
-Silicon macOS. The pinned upstream basic-cli 0.22.0 provides the native Roc CLI
+Silicon macOS. The pinned upstream basic-cli 0.28.1 provides the native Roc CLI
 host; platform operations call only the adjacent Day2 Rust broker, never an
 executable found on a project's PATH. It is a versioned private protocol, not an
 app SDK. `platform/ops/Workflow.roc` routes to the individual Roc recipes.

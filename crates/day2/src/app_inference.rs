@@ -727,7 +727,7 @@ pub fn schema_source(registry: &str, sources: &BTreeMap<String, String>) -> Resu
         "    Tables : {{ {} }}\n",
         list(&|table, roc_type, _| format!("{table} : List({roc_type})"))
     ));
-    source.push_str("    schema : Tables -> Tables\n    schema = |tables| tables\n");
+    source.push_str("    schema : Tables -> Tables\n    schema = |snapshot| snapshot\n");
     source.push_str(&format!(
         "    domains = {{{}}}\n",
         domains
@@ -1054,7 +1054,7 @@ mod tests {
     fn every_model_is_a_table_named_by_the_ledger_with_keys_and_domains_derived() -> Result<()> {
         assert_eq!(
             schema_source(LEDGER, &sources(MODELS))?,
-            "import Models\nimport pf.Table\nimport Title\nSchemaSource :: [].{\n    Tables : { ad_days : List(Models.AdDay), campaigns : List(Models.Campaign) }\n    schema : Tables -> Tables\n    schema = |tables| tables\n    domains = { title: Title.rules }\n    tables : { ad_days : Table(Models.AdDay, _), campaigns : Table(Models.Campaign, {}) }\n    tables = { ad_days: Models.AdDay.table, campaigns: Table.plain({}) }\n    identities = \"model-identities.json\"\n    storage = { schema, tables, domains, identities }\n}\n"
+            "import Models\nimport pf.Table\nimport Title\nSchemaSource :: [].{\n    Tables : { ad_days : List(Models.AdDay), campaigns : List(Models.Campaign) }\n    schema : Tables -> Tables\n    schema = |snapshot| snapshot\n    domains = { title: Title.rules }\n    tables : { ad_days : Table(Models.AdDay, _), campaigns : Table(Models.Campaign, {}) }\n    tables = { ad_days: Models.AdDay.table, campaigns: Table.plain({}) }\n    identities = \"model-identities.json\"\n    storage = { schema, tables, domains, identities }\n}\n"
         );
         Ok(())
     }

@@ -1,5 +1,5 @@
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0-rc2/Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst",
 	ops: "../ops/main.roc",
 }
 
@@ -93,7 +93,7 @@ main! = |args| {
 ran! : Cli.Roots => Output.Outcome
 ran! = |roots| {
 	parts = roots.parts()
-	failed = |problem| Output.Outcome.Failed(problem, parts.format, roots.command())
+	failed = |problem| Output.Outcome.Failed(problem, parts.format, roots.reported_command())
 	broken = |detail| failed(Output.roots_failed(parts.mode, detail))
 	match InstanceSpec.load!(parts.directory) {
 		Ok((path, spec)) => {
@@ -136,7 +136,7 @@ released! : Cli.Release => Output.Outcome
 released! = |release| {
 	parts = release.parts()
 	verb = parts.action.verb()
-	failed = |problem| Output.Outcome.Failed(problem, parts.format, release.command())
+	failed = |problem| Output.Outcome.Failed(problem, parts.format, release.reported_command())
 	match InstanceSpec.load!(parts.directory) {
 		Ok((path, spec)) => {
 			request = InstanceRelease.request(spec, parts.action)
@@ -168,7 +168,7 @@ sourced! : Cli.SourceRequest => Output.Outcome
 sourced! = |source| {
 	parts = source.parts()
 	verb = parts.action.verb()
-	failed = |problem| Output.Outcome.Failed(problem, parts.format, source.command())
+	failed = |problem| Output.Outcome.Failed(problem, parts.format, source.reported_command())
 	none : Try(Names.LocalPath, [Null])
 	none = Err(Null)
 	unread : Try(InstanceSpec, [Null])
@@ -206,7 +206,7 @@ candidated! : Cli.CandidateRequest => Output.Outcome
 candidated! = |candidate| {
 	parts = candidate.parts()
 	verb = parts.action.verb()
-	failed = |problem| Output.Outcome.Failed(problem, parts.format, candidate.command())
+	failed = |problem| Output.Outcome.Failed(problem, parts.format, candidate.reported_command())
 	none : Try(Names.LocalPath, [Null])
 	none = Err(Null)
 	unread : Try(InstanceSpec, [Null])

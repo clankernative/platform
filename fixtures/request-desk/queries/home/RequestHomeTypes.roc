@@ -1,5 +1,5 @@
 RequestHomeTypes :: [].{
-	Input := {}
+	Input : {}
 
 	Output : { title : Str }
 }

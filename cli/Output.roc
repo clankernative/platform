@@ -266,9 +266,9 @@ roots_actions : Cli.Roots -> List(Cli.Action)
 roots_actions = |request| [
 	Cli.Action.new(
 		"Show the rendered backends and variables this ${request.parts().mode.name()} used.",
-		Cli.Request.Render(request.instance()),
+		Cli.Request.Render(request.as_instance()),
 	),
-	Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(request.instance())),
+	Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(request.as_instance())),
 ]
 
 ran_json : Cli.Roots, Names.LocalPath, InstanceSpec, InstanceRender.Receipt -> Str
@@ -280,7 +280,7 @@ ran_json = |request, path, spec, receipt| {
 	Json.to_str({
 		schema_version: 1.U64,
 		ok: receipt.ok,
-		command: request.command().name(),
+		command: request.reported_command().name(),
 		exit_code: Output.new(Output.Outcome.Ran(request, path, spec, receipt)).exit_code(),
 		context: { spec_path: path.to_str(), spec_validation: "checked" },
 		result: {
@@ -423,7 +423,7 @@ ran_text = |request, path, spec, receipt| {
 ## After a publication, fetch what was published as a deploy job would; after a fetch, check the spec.
 release_actions : Cli.Release, InstanceRelease.Report -> List(Cli.Action)
 release_actions = |request, report| {
-	check = Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(request.instance()))
+	check = Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(request.as_instance()))
 	match request.parts().action {
 		Cli.ReleaseAction.Publish(_) => [
 			Cli.Action.new(
@@ -446,7 +446,7 @@ released_json = |request, path, spec, report| {
 	Json.to_str({
 		schema_version: 1.U64,
 		ok: Bool.True,
-		command: request.command().name(),
+		command: request.reported_command().name(),
 		exit_code: 0.I32,
 		context: { spec_path: path.to_str(), spec_validation: "checked" },
 		result: { installation: spec.derived().installation, receipt: null },
@@ -510,7 +510,7 @@ released_text = |request, path, spec, report| {
 
 ## After a source command, validate the spec it read; `controls` read none.
 source_actions : Cli.SourceRequest -> List(Cli.Action)
-source_actions = |request| match request.instance() {
+source_actions = |request| match request.as_instance() {
 	Ok(instance) => [Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(instance))]
 	Err(Null) => [help_action({})]
 }
@@ -526,7 +526,7 @@ sourced_json = |request, path, report| {
 	Json.to_str({
 		schema_version: 1.U64,
 		ok: Bool.True,
-		command: request.command().name(),
+		command: request.reported_command().name(),
 		exit_code: 0.I32,
 		context: {
 			spec_path,
@@ -609,7 +609,7 @@ sourced_text = |request, path, report| {
 
 ## After a candidate command, validate the spec it read; the build host's commands read none.
 candidate_actions : Cli.CandidateRequest -> List(Cli.Action)
-candidate_actions = |request| match request.instance() {
+candidate_actions = |request| match request.as_instance() {
 	Ok(instance) => [Cli.Action.new("Validate the spec and list every derived name.", Cli.Request.Check(instance))]
 	Err(Null) => [help_action({})]
 }
@@ -625,7 +625,7 @@ candidated_json = |request, path, report| {
 	Json.to_str({
 		schema_version: 1.U64,
 		ok: Bool.True,
-		command: request.command().name(),
+		command: request.reported_command().name(),
 		exit_code: 0.I32,
 		context: {
 			spec_path,

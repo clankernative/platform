@@ -1,12 +1,13 @@
 # Historical Roc reflection backport
 
-The selected application compiler is the unmodified official October 13
-release in [the platform pin](../../toolchain.json). Use `xtask bootstrap` to
+The selected application compiler is the unmodified official November 24
+`-safe` release in [the platform pin](../../toolchain.json): upstream's build of
+the same commit with Zig's runtime safety checks enabled. Use `xtask bootstrap` to
 install it. Linux archives have separate target pins; all three targets use the
 matching upstream `vendor/RustGlue.roc` ABI generator.
 
 The separately reviewed formatter remains on September 12. Bootstrap admits the
-explicit October 13 compiler / September 12 formatter pair and still verifies
+explicit November 24 compiler / September 12 formatter pair and still verifies
 both binary identities and the formatter's source/patch provenance.
 
 This directory preserves an earlier reflection backport for interpreting older

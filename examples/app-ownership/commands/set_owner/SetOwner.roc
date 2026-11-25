@@ -32,7 +32,7 @@ SetOwner :: [].{
 						None => Tx.create(Data.ownerships, value)
 						Some(row) => Tx.update(Data.ownerships, row, value)
 					}
-					write.map(|_| value)
+					write.map(|_| { app_id: input.app_id, principal: input.principal, active: input.active })
 				},
 			)
 		}

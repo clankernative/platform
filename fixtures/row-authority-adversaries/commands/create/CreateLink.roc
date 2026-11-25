@@ -76,13 +76,13 @@ CreateLink :: [].{
 	}
 
 	verify_result : Str, LinkView.Saved, Str -> Try(Bool, Str)
-	verify_result = |before, saved, after| {
+	verify_result = |before, output, after| {
 		old = Data.verification_snapshot(before)?.live
 		next = Data.verification_snapshot(after)?.live
 		Ok(
 			next.links.len()
 				== old.links.len() + 1
-				and next.links.any(|row| row.id == saved.id and row.version == saved.version),
+				and next.links.any(|row| row.id == output.id and row.version == output.version),
 		)
 	}
 

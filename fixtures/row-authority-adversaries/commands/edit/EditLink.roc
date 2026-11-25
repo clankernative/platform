@@ -111,22 +111,22 @@ EditLink :: [].{
 	}
 
 	verify_result : Str, LinkView.Saved, Str -> Try(Bool, Str)
-	verify_result = |before, saved, after| {
+	verify_result = |before, output, after| {
 		old =
 			Data.verification_snapshot(before)?
 				.live
 				.links
-				.find_first(|row| row.id == saved.id)
+				.find_first(|row| row.id == output.id)
 				.map_err(|_| "missing old row")?
 		row =
 			Data.verification_snapshot(after)?
 				.live
 				.links
-				.find_first(|item| item.id == saved.id)
+				.find_first(|item| item.id == output.id)
 				.map_err(|_| "missing new row")?
 		Ok(
 			row.version
-				== saved.version
+				== output.version
 				and row.version.to_u64()
 					== old.version.to_u64() + 1
 					and row.value.owner
