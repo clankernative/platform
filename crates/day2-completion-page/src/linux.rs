@@ -703,6 +703,21 @@ mod tests {
             assert_eq!(failure.kind, FailureKind::Frame);
         }
         assert!(validate_received_data(fd, frame, binding()).is_ok());
+        // Corrupt the ACTUAL file header while leaving the frame canonical.
+        // Frame-only mutations cannot detect deletion of the file comparison.
+        for index in [0, 16, 17, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320] {
+            let (valid, frame) = foreign_page(PENDING, SEALS);
+            assert!(validate_received_data(valid, frame, binding()).is_ok());
+            let (changed, frame) = foreign_profile(PENDING, SEALS, PAGE_BYTES, Some(index));
+            file_check(changed.as_fd()).unwrap();
+            assert_eq!(
+                validate_received_data(changed, frame, binding())
+                    .err()
+                    .unwrap()
+                    .kind,
+                FailureKind::Frame
+            );
+        }
         drop(pending);
     }
 
@@ -783,16 +798,32 @@ mod tests {
     }
 
     fn foreign_page(state: u8, seals: SealFlags) -> (OwnedFd, [u8; FRAME_BYTES]) {
+        foreign_profile(state, seals, PAGE_BYTES, None)
+    }
+
+    fn foreign_profile(
+        state: u8,
+        seals: SealFlags,
+        length: usize,
+        corrupt: Option<usize>,
+    ) -> (OwnedFd, [u8; FRAME_BYTES]) {
+        assert!((HEADER_BYTES..=PAGE_BYTES + 1).contains(&length));
         let rw = rustix::fs::memfd_create(
             c"foreign-mechanical-page",
             MemfdFlags::ALLOW_SEALING | MemfdFlags::CLOEXEC,
         )
         .unwrap();
-        rustix::fs::ftruncate(&rw, PAGE_BYTES as u64).unwrap();
-        let mut bytes = [0; PAGE_BYTES];
+        rustix::fs::ftruncate(&rw, length as u64).unwrap();
+        let mut bytes = [0; PAGE_BYTES + 1];
         bytes[..HEADER_BYTES].copy_from_slice(&binding().header());
         bytes[STATE_OFFSET as usize] = state;
-        assert_eq!(pwrite(&rw, &bytes, 0).unwrap(), PAGE_BYTES);
+        if let Some(index) = corrupt {
+            assert!(index < HEADER_BYTES);
+            bytes[index] ^= 1;
+        }
+        // A short-size fixture must not regrow through its initializer.
+        assert_eq!(pwrite(&rw, &bytes[..length], 0).unwrap(), length);
+        assert_eq!(rustix::fs::fstat(&rw).unwrap().st_size, length as i64);
         rustix::fs::fcntl_add_seals(&rw, seals).unwrap();
         let ro = rustix::fs::open(
             format!("/proc/self/fd/{}", rw.as_raw_fd()),
@@ -829,7 +860,52 @@ mod tests {
             assert!(validate_received_data(fd, frame, binding()).is_err());
         }
         let (fd, frame) = foreign_page(255, SEALS);
-        assert!(validate_received_data(fd, frame, binding()).is_err());
+        assert_eq!(
+            validate_received_data(fd, frame, binding())
+                .err()
+                .unwrap()
+                .kind,
+            FailureKind::State
+        );
+        for length in [PAGE_BYTES - 1, PAGE_BYTES + 1] {
+            let (fd, frame) = foreign_profile(PENDING, SEALS, length, None);
+            assert_eq!(rustix::fs::fstat(&fd).unwrap().st_size, length as i64);
+            assert_eq!(
+                validate_received_data(fd, frame, binding())
+                    .err()
+                    .unwrap()
+                    .kind,
+                FailureKind::File
+            );
+        }
+        let (fd, frame) = foreign_page(PENDING, SEALS);
+        let not_cloexec = rustix::io::dup(&fd).unwrap();
+        assert!(
+            !rustix::io::fcntl_getfd(&not_cloexec)
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+        assert_eq!(
+            validate_received_data(not_cloexec, frame, binding())
+                .err()
+                .unwrap()
+                .kind,
+            FailureKind::File
+        );
+        let writable = rustix::fs::open(
+            format!("/proc/self/fd/{}", fd.as_raw_fd()),
+            OFlags::RDWR | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_received_data(writable, frame, binding())
+                .err()
+                .unwrap()
+                .kind,
+            FailureKind::File
+        );
+        assert!(validate_received_data(fd, frame, binding()).is_ok());
     }
 
     #[cfg_attr(not(feature = "kernel-qualification"), test)]

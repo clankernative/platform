@@ -9,6 +9,7 @@ on:
       - rust-toolchain.toml
       - Cargo.toml
       - .github/actions/pinned-release/action.yml
+      - BUILD.bazel
       - Cargo.lock
       - MODULE.bazel*
   workflow_dispatch:
@@ -47,15 +48,22 @@ jobs:
       # One atomic ABI unit harness, no provider/native owner or F recipe. Its
       # receipt requires all14 real cases and the ACTUAL rustix producer cfg.
       - name: Qualify the actual fixed ABI on the selected backend
-        run: bazel --batch --nosystem_rc --nohome_rc test --define=DAY2_COMPLETION_BACKEND=${{ matrix.backend }} --verbose_failures=false --announce_rc=false --test_output=errors //crates/day2-completion-page:kernel_qualification
-      - name: Retain only bounded mechanical outputs and the selected test executable
+        run: bazel --batch --nosystem_rc --nohome_rc test --define=DAY2_COMPLETION_BACKEND=${{ matrix.backend }} --verbose_failures=false --announce_rc=false --test_output=errors --zip_undeclared_test_outputs //crates/day2-completion-page:kernel_qualification
+      - name: Require the complete bounded kernel evidence archive
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: true
           name: completion-page-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            bazel-testlogs/crates/day2-completion-page/kernel_qualification/test.outputs/outputs.zip
-            bazel-bin/crates/day2-completion-page/kernel_qualification
+          path: bazel-testlogs/crates/day2-completion-page/kernel_qualification/test.outputs/outputs.zip
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain the actual selected test executable separately
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: true
+          name: completion-page-executable-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bazel-bin/crates/day2-completion-page/kernel_qualification
           if-no-files-found: error
           retention-days: 14
