@@ -28,7 +28,7 @@ mod tests {
             .expect("current CLI source directory")
     }
 
-    fn compiler() -> Command {
+    fn compiler(args: &[&str]) -> Command {
         let cli = root();
         // Admission rehashes both archives and complete trees against source
         // pins; a missing/poisoned input cannot consult a warm default cache.
@@ -44,6 +44,7 @@ mod tests {
         let pins: Value =
             serde_json::from_str(include_str!("../../../build/bazel/roc-packages.json")).unwrap();
         let mut command = Command::new(cli.join("../../.toolchains/roc"));
+        command.args(args);
         for p in pins["packages"].as_array().unwrap() {
             let name = p["name"].as_str().unwrap();
             let version = p["version"].as_str().unwrap();
@@ -80,8 +81,7 @@ mod tests {
                 vec!["test", "main.roc"],
                 vec!["build", "main.roc", "--output=day2"],
             ] {
-                let output = compiler()
-                    .args(args)
+                let output = compiler(&args)
                     .current_dir(&root)
                     .env("ROC_CACHE_DIR", root.join(".cache"))
                     .output()
@@ -116,8 +116,7 @@ mod tests {
             )
             .unwrap();
         }
-        let output = compiler()
-            .args(["check", "--no-cache", "main.roc"])
+        let output = compiler(&["check", "--no-cache", "main.roc"])
             .current_dir(root())
             .env("ROC_CACHE_DIR", &scratch.0)
             .env("XDG_CACHE_HOME", &scratch.0)
@@ -418,8 +417,7 @@ mod tests {
             fs::copy(root().join(fixture), scratch.0.join(fixture)).unwrap();
         }
         let check = || {
-            compiler()
-                .args(["check", "--no-cache", "main.roc"])
+            compiler(&["check", "--no-cache", "main.roc"])
                 .current_dir(&scratch.0)
                 .env("ROC_CACHE_DIR", root().join(".cache"))
                 .output()
