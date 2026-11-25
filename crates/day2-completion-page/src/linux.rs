@@ -504,7 +504,7 @@ mod tests {
     fn actual_selected_rustix_backend_is_bound_to_its_build_script() {
         // This file is the BuildInfo.flags output of the SAME selected rustix
         // producer used by this test target, not a claimed environment label.
-        let flags = include_str!(concat!("../../../", env!("COMPLETION_RUSTIX_FLAGS")));
+        let flags = include_str!(env!("COMPLETION_RUSTIX_FLAGS"));
         let raw = flags
             .lines()
             .filter(|line| *line == "--cfg=linux_raw")
@@ -970,7 +970,7 @@ mod tests {
     }
 
     fn listener(path: &std::path::Path) -> OwnedFd {
-        let socket = rustix::net::socket(
+        let socket = rustix::net::socket_with(
             AddressFamily::UNIX,
             SocketType::SEQPACKET,
             SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
@@ -1000,7 +1000,7 @@ mod tests {
         loop {
             let mut byte = [0];
             match rustix::net::recv(socket, &mut byte, RecvFlags::DONTWAIT) {
-                Ok(1) => {
+                Ok((1, 1)) => {
                     assert_eq!(byte[0], expected);
                     return;
                 }
@@ -1225,7 +1225,7 @@ mod tests {
             ("component-linux.rs", include_bytes!("linux.rs").as_slice()),
             (
                 "selected-rustix-flags.txt",
-                include_bytes!(concat!("../../../", env!("COMPLETION_RUSTIX_FLAGS"))).as_slice(),
+                include_bytes!(env!("COMPLETION_RUSTIX_FLAGS")).as_slice(),
             ),
         ] {
             let mut file = create(name);
@@ -1336,7 +1336,7 @@ mod tests {
             println!("COMPLETION_CHILD_PASS");
             return;
         }
-        let socket = rustix::net::socket(
+        let socket = rustix::net::socket_with(
             AddressFamily::UNIX,
             SocketType::SEQPACKET,
             SocketFlags::CLOEXEC,
