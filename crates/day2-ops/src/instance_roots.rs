@@ -625,7 +625,7 @@ pub fn validate(request: &Request) -> Result<()> {
         );
         let label = match (root.stack.as_str(), &root.app_id) {
             ("app-edge", Some(app)) => {
-                day2_contracts::names::identifier(app)?;
+                day2_contracts::names::app_id(app)?;
                 format!("app-edge/{app}")
             }
             ("app-edge", None) => bail!("app-edge needs its app"),

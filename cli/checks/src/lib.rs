@@ -1345,11 +1345,11 @@ mod tests {
         );
         assert_eq!(
             result["repositories"],
-            json!({"instance": "tools/instance", "app_ci": "tools/app-ci"})
+            json!({"instance": "tools/day2-instance", "ci": "tools/day2-ci"})
         );
         assert_eq!(
             result["required_check"],
-            "tools/app-ci: day2 / verification (pull_request)"
+            "tools/day2-ci: day2 / verification (pull_request)"
         );
         assert_eq!(
             result["artifact_registry"],
@@ -1504,9 +1504,9 @@ mod tests {
             (r#""go":{"#, r#""go-links":{"#),
             (r#""go":{"#, r#""go_links":{"#),
             (r#""go":{"#, r#""g":{"#),
-            (r#""go":{"#, r#""instance":{"#),
             (r#""go":{"#, r#""day2":{"#),
-            (r#""go":{"#, r#""tofu":{"#),
+            (r#""go":{"#, r#""day2ci":{"#),
+            (r#""home":{"#, r#""tofu":{"#),
             (r#""go":{"#, r#""abcdefghijklmnopqrstu":{"#),
             (r#""go":{"sdk":"sha256:"#, r#""go":{"sdk":"sha512:"#),
             (r#""go":{"sdk":"sha256:98fb"#, r#""go":{"sdk":"sha256:98FB"#),

@@ -25,8 +25,8 @@ InstanceSpec :: {
 	## The platform's own source. An instance selects a commit, never a fork.
 	platform_repository = "github.com/clankernative/platform"
 
-	## The job context of <org>/app-ci's required org-scoped workflow. Gitea posts
-	## it as "<org>/app-ci: day2 / verification (pull_request)". The derived name is
+	## The job context of <org>/day2-ci's required org-scoped workflow. Gitea posts
+	## it as "<org>/day2-ci: day2 / verification (pull_request)". The derived name is
 	## the required pattern of that workflow's org registration, not a branch
 	## protection context: Gitea then counts only a status its Actions user produced
 	## for that source workflow, so neither an app workflow nor an API caller can
@@ -98,7 +98,7 @@ InstanceSpec :: {
 		## creates it; the platform only names it.
 		apply_identity : Str,
 		instance_repository : Str,
-		app_ci_repository : Str,
+		ci_repository : Str,
 		required_check : Str,
 
 		## The project's Artifact Registry, <region>-docker.pkg.dev/<project>. Every derived image is under it, and so are
@@ -151,9 +151,9 @@ InstanceSpec :: {
 			apps_domain: spec.domain,
 			operators: spec.operators,
 			apply_identity,
-			instance_repository: "${spec.org}/instance",
-			app_ci_repository: "${spec.org}/app-ci",
-			required_check: "${spec.org}/app-ci: ${required_context}",
+			instance_repository: "${spec.org}/day2-instance",
+			ci_repository: "${spec.org}/day2-ci",
+			required_check: "${spec.org}/day2-ci: ${required_context}",
 			artifact_registry: registry,
 			sdk_registry: "${registry}/day2",
 			tofu_state_bucket,
@@ -410,7 +410,7 @@ check_apps = |pairs, people, done| match pairs {
 								Json.to_str(
 									key,
 								)
-							} must be 2-20 lowercase letters or digits starting with a letter; instance, day2 and tofu are reserved",
+							} must be 2-20 lowercase letters or digits starting with a letter; tofu and every id starting with day2 are reserved",
 						),
 				)?
 		at = "apps.${key}"
@@ -638,11 +638,11 @@ expect match InstanceSpec.from_json(sample) {
 		names = spec.derived()
 		first = names.apps.first()
 		names.instance_repository
-			== "tools/instance"
-			and names.app_ci_repository
-				== "tools/app-ci"
+			== "tools/day2-instance"
+			and names.ci_repository
+				== "tools/day2-ci"
 				and names.required_check
-					== "tools/app-ci: day2 / verification (pull_request)"
+					== "tools/day2-ci: day2 / verification (pull_request)"
 					and names.sdk_registry
 						== "us-central1-docker.pkg.dev/exampleco-tools/day2"
 						and names.tofu_state_bucket
