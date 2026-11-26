@@ -90,6 +90,16 @@
           "default_features": true,
           "features": [],
           "kind": "normal",
+          "local_path": "crates/day2-completion-page",
+          "name": "day2-completion-page",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": true,
+          "features": [],
+          "kind": "normal",
           "local_path": "crates/day2-contracts",
           "name": "day2-contracts",
           "optional": false,

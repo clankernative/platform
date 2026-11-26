@@ -1837,6 +1837,7 @@ mod activation_histories {
                 include_str!("../storage_peer_wire.rs"),
                 include_str!("../handshake.rs"),
                 include_str!("../protocol.rs"),
+                include_str!("../protocol/backup_handoff.rs"),
                 include_str!("../protocol/create_attestation.rs"),
                 include_str!("../../bootstrap.rs"),
                 include_str!("../../storage_authority/initial.rs"),
