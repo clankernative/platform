@@ -84,3 +84,37 @@ variable "state_reader_members" {
     error_message = "state_reader_members entries must be IAM members such as user:operator@example.com."
   }
 }
+
+variable "app_ci" {
+  description = "App CI's workload identity federation (docs/INSTANCE.md, \"App CI\"), rendered from day2.json when it sets forge.oidc: that git-oidc issuer, and <org>/day2-ci, the repository whose required workflow alone is admitted. Null, without forge.oidc, creates nothing."
+  type = object({
+    issuer_uri = string
+    repository = string
+  })
+  default = null
+
+  validation {
+    condition = var.app_ci == null ? true : (
+      can(regex("^https://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$", var.app_ci.issuer_uri)) &&
+      can(regex("^[a-z][a-z0-9-]{0,22}[a-z0-9]/day2-ci$", var.app_ci.repository))
+    )
+    error_message = "app_ci needs an https issuer with no path, port or trailing slash, and the repository <org>/day2-ci."
+  }
+}
+
+variable "app_ci_forge" {
+  description = "The forge ids of app_ci's repository and of the org that owns it, which instance plan and apply read from the forge on every run. Set exactly when app_ci is."
+  type = object({
+    repository_id = string
+    owner_id      = string
+  })
+  default = null
+
+  validation {
+    condition = (var.app_ci == null) == (var.app_ci_forge == null) && (var.app_ci_forge == null ? true : (
+      can(regex("^[1-9][0-9]{0,18}$", var.app_ci_forge.repository_id)) &&
+      can(regex("^[1-9][0-9]{0,18}$", var.app_ci_forge.owner_id))
+    ))
+    error_message = "app_ci_forge is set exactly when app_ci is, with positive decimal forge ids."
+  }
+}

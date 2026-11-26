@@ -99,7 +99,8 @@ derivation; there is no second schema.
   choice. App CI's store step requests its token there. It is optional, so an
   instance adds it once its platform pin reads it. `instance check` passes
   without it. `instance ci-workflow` refuses to render without it, and so
-  does `ci store` when a push run needs the token request.
+  does `ci store` when a push run needs the token request. Only with it do
+  the rendered roots hold app CI's [infrastructure](#infrastructure).
 - `domains.people` is not a service-account domain: owners become rendered
   admins, and day2-app requires a person among them.
 - Operators are lowercase addresses in `domains.people`. Every address is at
@@ -134,7 +135,8 @@ Nothing below can be configured, restated or overridden.
 | Instance repository | `<org>/day2-instance` |
 | CI repository | `<org>/day2-ci` |
 | Required app check | `<org>/day2-ci: day2 / verification (pull_request)` |
-| App CI workload identity | pool `day2-ci`, provider `gitea`; the store step's audience is `https://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/day2-ci/providers/gitea` |
+| App CI workload identity | pool `day2-ci`, provider `gitea`, in the `project` root when `forge.oidc` is set; the store step's audience is `https://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/day2-ci/providers/gitea` |
+| App CI principal | `principalSet://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/day2-ci/attribute.repository_id/<forge ID of <org>/<id>>` |
 | App CI token request | `<forge.oidc>/token?v=1&repository=<org>/<id>`, rendered into the store step when `forge.oidc` is set |
 | Artifact registry | `<region>-docker.pkg.dev/<project>` |
 | SDK image registry | `<region>-docker.pkg.dev/<project>/day2` |
@@ -150,7 +152,7 @@ Nothing below can be configured, restated or overridden.
 | App state | bucket `<project>-<id>-state`, prefix `day2-app/<id>` |
 | App edge state | bucket `<project>-tofu-state`, prefix `platform/app/<id>` |
 | App backups | `<project>-<id>-backups` |
-| App CI results | `<project>-<id>-ci`, where the required workflow's store step writes |
+| App CI results | `<project>-<id>-ci`, where the required workflow's store step writes; in the app's `app-edge` root when `forge.oidc` is set |
 | App resources | from `size`: `standard` 512 MiB, `large` 2048 MiB; both 1000m CPU, 1024 processes, 4 concurrent requests, 30 s shutdown and a 5 GiB SQLite volume |
 | Extension downloads | `/downloads/<id>.crx` and `/downloads/updates.xml`, when `extension` is set |
 | Extension update URL | `https://<id>.<domains.apps>/downloads/updates.xml`, when `extension` is set |
@@ -216,10 +218,10 @@ size preset or a fixed platform constant:
 
 | Root | Rendered variables |
 | --- | --- |
-| `project` | `project_id`, `region`, `state_bucket_name`, `state_prefixes` |
+| `project` | `project_id`, `region`, `state_bucket_name`, `state_prefixes`; `app_ci` with `forge.oidc` |
 | `cluster` | `project_id`, `region`, `zone`, `cluster_name`, `cluster_labels`, `subnet_cidr`, `pod_cidr`, `service_cidr`, `shared_node_pod_pids_limit` |
 | `tenancy` | `kube_context`, `app_namespace_prefix` |
-| `app-edge` | `project_id`, `region`, `cluster_name`, `cluster_location`, `kube_context`, `app_id`, `namespace_prefix`, `domain`, `iap_members`, `deployer_subjects`, `offsite_backup_readers`, `sqlite_storage_gb`, `storage_class_name`, `kube_dns_service_ip`, `cluster_cidrs` |
+| `app-edge` | `project_id`, `region`, `cluster_name`, `cluster_location`, `kube_context`, `app_id`, `namespace_prefix`, `domain`, `iap_members`, `deployer_subjects`, `offsite_backup_readers`, `sqlite_storage_gb`, `storage_class_name`, `kube_dns_service_ip`, `cluster_cidrs`; `app_ci` with `forge.oidc` |
 | `day2-app` | `kube_context`, `app_id`, `namespace`, `installation`, `environment`, `hosted_domain`, `admins`, `edge_origin`, `runtime_resources`, `pod_pids_limit`, `backup_bucket` |
 
 - **People.** Only the `operators` deploy an app by hand
@@ -337,9 +339,11 @@ app.
   private CLI configuration, so ambient provider overrides never apply.
 - **Inputs.** Each root initializes against its rendered backend and plans with
   a copy of its committed `.tfvars` file, then its rendered variables, so a
-  rendered value wins over a committed copy. A day2-app root first reads its
-  [release inputs](#release-inputs) and plans with them last; an app with no
-  release selection is `unreleased` and not planned.
+  rendered value wins over a committed copy. With `forge.oidc`, the project
+  root and each app edge then plan with [app CI's forge IDs](#infrastructure).
+  A day2-app root first reads its [release inputs](#release-inputs) and plans
+  with them last; an app with no release selection is `unreleased` and not
+  planned.
 - **New roots.** Each root first lists its exact state object, which needs only
   object read access. If the listing is empty, the root plans against an empty
   local state and is reported as a new root, so no state is created. A missing
@@ -371,7 +375,9 @@ app.
   - Credential material is refused there.
 - **Failures.**
   - A root that fails stops only itself; the others still plan. This includes
-    a root whose cluster or DNS credentials could not be read.
+    a root whose cluster or DNS credentials could not be read, and a project or
+    app-edge root whose app CI repository could not be read from the forge
+    (`failed_forge`).
   - The command exits 6 if any root failed, or if the plan could not start.
   - A plan with changes exits 0; its receipt lists every changed resource,
     pending move, import and output change.
@@ -445,8 +451,9 @@ owners never do.
   name the same mode, so `instance plan` can never apply.
 - **Output.** As for a plan. Root statuses are `no_changes`, `applied`,
   `unreleased`, `refused_destroy`, `refused_unreviewed`, `skipped` and the
-  plan's failures (`failed_credentials`, `failed_inputs`, `failed_release`,
-  `failed_init`, `failed_plan`, `failed_show`) plus `failed_apply`. The command
+  plan's failures (`failed_credentials`, `failed_forge`, `failed_inputs`,
+  `failed_release`, `failed_init`, `failed_plan`, `failed_show`) plus
+  `failed_apply`. The command
   exits 6 if any root failed or was refused; an unreleased root is not a
   failure. If the output audit fails after an apply, `receipt.json` is still
   written, with `ok: false` and the audit error.
@@ -877,6 +884,9 @@ else. The YAML holds no logic beyond choosing the check's optional base (see
 3. `day2 ci store DIRECTORY` stores what the check wrote in the app's CI
    bucket.
 
+The bucket and the federation it trusts are rendered roots' resources (see
+[Infrastructure](#infrastructure)).
+
 ### Workflow
 
 `day2 instance ci-workflow DIRECTORY` prints the workflow file,
@@ -1061,6 +1071,69 @@ cases. `<run>` and `<attempt>` are the run's.
   precondition failure (this run and attempt already stored), a changed
   artifact or receipt, anything. The required job fails with it.
 
+### Infrastructure
+
+`instance plan` and `apply` render app CI's federation and results buckets
+only when `day2.json` sets `forge.oidc`. Without it, no root renders an app CI
+variable, nothing is read from the forge, every root plans exactly as before,
+and `instance render`, `plan` and `apply` say why under `APP CI`.
+
+- **Federation, in `project`.** Workload identity pool `day2-ci` and its OIDC
+  provider `gitea`, once per instance: the project layer is the instance's
+  identity, applied first, so the pool exists before any app edge names its
+  principal sets. The pool impersonates no service account and grants nothing.
+  - Issuer `forge.oidc`; the only allowed audience is the provider's canonical
+    URL, which `ci store` requests.
+  - Attribute condition, exactly: `assertion.is_scoped == 'true' &&
+    assertion.workflow_repository_id == '<day2-ci ID>' &&
+    assertion.repository_owner_id == '<org ID>' &&
+    assertion.workflow_ref.startsWith('<org>/day2-ci/.gitea/scoped_workflows/verification.yml@')
+    && assertion.event_name == 'push' && assertion.ref == 'refs/heads/main'`.
+  - Mapping: `google.subject = 'gitea:' + assertion.sub` (git-oidc's
+    `repo:<org>/<app>:ref:refs/heads/main`, at most 76 bytes for an app
+    repository, under Google's 127) and `attribute.repository_id`, the app
+    repository's ID.
+- **Results bucket, in each `app-edge`.** `<project>-<id>-ci`, rendered from
+  the same derivation `ci store` and the workflow use, in the instance region:
+  uniform bucket-level access, public access prevention enforced, no
+  versioning, soft delete off (0 s), lifecycle deletion 30 days after an
+  object is written, no `force_destroy`. It keeps `prevent_destroy`, so its
+  global name is never released while a build may read it; removing
+  `forge.oidc` once buckets exist fails those app edges' plans.
+- **Grants, per bucket, and nothing else.** `roles/storage.objectCreator` and
+  `roles/storage.objectViewer` for the app CI principal, the principal set of
+  the app repository's ID in `day2-ci`; `roles/storage.objectViewer` for the
+  apply identity, which builds candidates.
+- **Forge IDs.** The trust is pinned to native IDs, discovered on every run and
+  never configured. After the credentials, plan and apply read
+  `<org>/day2-ci` (its ID and its owner's) for the project root and
+  `<org>/<id>` (its ID) for each app edge, through `GET
+  /api/v1/repos/<repository>` on `forge.server` with `AUTODEPLOY_SOURCE_TOKEN`,
+  else `GITEA_TOKEN`, as [`instance source`](#source) reads. Each must exist
+  under exactly that name in the org; a redirect is not followed. The IDs reach
+  OpenTofu as the root's `forge.tfvars.json`, after the rendered variables.
+  - The token must read `day2-ci` and every app repository. A job's own token
+    (`GITHUB_TOKEN`, passed as `GITEA_TOKEN`) reads only its own repository,
+    so instance CI must set `AUTODEPLOY_SOURCE_TOKEN`.
+  - The reads share one retry budget, the wait [fetch](#fetch) uses: a failed
+    connection, a timeout, a failed or short body read, 408, 429 or 5xx
+    retries the reads still unanswered. Retries begin only within 120 s, and
+    each read is bounded by its own 90 s windows.
+  - A repository that cannot be read fails its root (`failed_forge`, reason
+    in its `forge.error`, which also says when no token was set); in an apply,
+    a failed project root stops the apply. So every app's repository must be
+    at its derived name before `forge.oidc` is set.
+  - A repository deleted and created again has a new ID. Its bucket grants are
+    then replaced, which apply refuses as destructive: that change needs the
+    reviewed operator path.
+- **Owned variables.** `app_ci` (rendered) and `app_ci_forge` (read) belong to
+  the platform: a committed `project` or `app-edge` input with a line that
+  assigns either, however indented, fails its root (`failed_inputs`, reason in
+  its `inputs.error`). A nested key of the same name fails it too.
+- **Adoption.** A `day2-ci` pool or `<project>-<id>-ci` bucket made by hand
+  before `forge.oidc` is set must be imported, or the first apply fails because
+  it already exists.
+
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
@@ -1084,7 +1157,8 @@ cases. `<run>` and `<attempt>` are the run's.
    call `day2 instance plan` and `day2 instance apply`; any edit to a shim fails
    the check.
 4. **Fixed forge layout (started: [app CI](#app-ci)'s `ci check`, `ci fetch` and
-   `ci store` and its rendered workflow, `instance ci-workflow`).** Apply reconciles the forge org: the fixed
+   `ci store`, its rendered workflow, `instance ci-workflow`, and its federation and results buckets in the
+   rendered roots).** Apply reconciles the forge org: the fixed
    repositories, a protection rule on every app's default branch (which is what
    subjects it to the required org workflow) and webhooks. App CI is the required org-scoped workflow in `<org>/day2-ci`, so an
    app repository can neither edit, skip nor impersonate it. App repositories

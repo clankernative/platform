@@ -1,0 +1,72 @@
+[
+  {
+    "app_id": null,
+    "backend": {
+      "bucket": "exampleco-tools-tofu-state",
+      "prefix": "foundation"
+    },
+    "root": "project",
+    "stack": "deploy/gke/stacks/project",
+    "tfvars_json": "{\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"state_bucket_name\":\"exampleco-tools-tofu-state\",\"state_prefixes\":{\"foundation\":\"foundation/\",\"cluster\":\"platform/cluster/\",\"tenancy\":\"platform/tenancy/\",\"app\":\"platform/app/\",\"day2\":\"day2/\"}}"
+  },
+  {
+    "app_id": null,
+    "backend": {
+      "bucket": "exampleco-tools-tofu-state",
+      "prefix": "platform/cluster"
+    },
+    "root": "cluster",
+    "stack": "deploy/gke/stacks/cluster",
+    "tfvars_json": "{\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"zone\":\"us-central1-a\",\"cluster_name\":\"day2\",\"cluster_labels\":{\"managed_by\":\"opentofu\",\"stack\":\"platform-cluster\",\"environment\":\"day2\"},\"subnet_cidr\":\"10.10.0.0/20\",\"pod_cidr\":\"10.20.0.0/16\",\"service_cidr\":\"10.30.0.0/20\",\"shared_node_pod_pids_limit\":1024}"
+  },
+  {
+    "app_id": null,
+    "backend": {
+      "bucket": "exampleco-tools-tofu-state",
+      "prefix": "platform/tenancy"
+    },
+    "root": "tenancy",
+    "stack": "deploy/gke/stacks/tenancy",
+    "tfvars_json": "{\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_namespace_prefix\":\"app-\"}"
+  },
+  {
+    "app_id": "go",
+    "backend": {
+      "bucket": "exampleco-tools-tofu-state",
+      "prefix": "platform/app/go"
+    },
+    "root": "app-edge",
+    "stack": "deploy/gke/stacks/app-edge",
+    "tfvars_json": "{\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace_prefix\":\"app-\",\"domain\":\"go.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\",\"user:grace@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}"
+  },
+  {
+    "app_id": "home",
+    "backend": {
+      "bucket": "exampleco-tools-tofu-state",
+      "prefix": "platform/app/home"
+    },
+    "root": "app-edge",
+    "stack": "deploy/gke/stacks/app-edge",
+    "tfvars_json": "{\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace_prefix\":\"app-\",\"domain\":\"home.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\",\"user:grace@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}"
+  },
+  {
+    "app_id": "go",
+    "backend": {
+      "bucket": "exampleco-tools-go-state",
+      "prefix": "day2-app/go"
+    },
+    "root": "day2-app",
+    "stack": "deploy/gke/stacks/day2-app",
+    "tfvars_json": "{\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace\":\"app-go\",\"installation\":\"exampleco\",\"environment\":\"production\",\"hosted_domain\":\"example.com\",\"admins\":[\"lin@example.com\",\"tools-infra@exampleco-tools.iam.gserviceaccount.com\"],\"edge_origin\":\"https://go.apps.example.com\",\"runtime_resources\":{\"memory_mib\":512,\"cpu_millis\":1000,\"process_limit\":1024,\"http_concurrency\":4,\"shutdown_seconds\":30},\"pod_pids_limit\":1024,\"backup_bucket\":\"exampleco-tools-go-backups\"}"
+  },
+  {
+    "app_id": "home",
+    "backend": {
+      "bucket": "exampleco-tools-home-state",
+      "prefix": "day2-app/home"
+    },
+    "root": "day2-app",
+    "stack": "deploy/gke/stacks/day2-app",
+    "tfvars_json": "{\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace\":\"app-home\",\"installation\":\"exampleco\",\"environment\":\"production\",\"hosted_domain\":\"example.com\",\"admins\":[\"kay@example.com\",\"lin@example.com\",\"tools-infra@exampleco-tools.iam.gserviceaccount.com\"],\"edge_origin\":\"https://home.apps.example.com\",\"runtime_resources\":{\"memory_mib\":2048,\"cpu_millis\":1000,\"process_limit\":1024,\"http_concurrency\":4,\"shutdown_seconds\":30},\"pod_pids_limit\":1024,\"backup_bucket\":\"exampleco-tools-home-backups\"}"
+  }
+]

@@ -14,7 +14,13 @@ import "JsonValue.roc" as json_value_source : Str
 ## (security-shell-edge and security-shell), opt-in integrations under
 ## deploy/integrations/ such as gitea-instance-ci, optional stacks such as
 ## qualification-runner, and roots an instance owns itself.
+##
+## App CI's federation (project) and results buckets (app-edge) render only when day2.json sets forge.oidc; without it
+## every root renders exactly what it did before app CI existed.
 InstanceRender :: [].{
+
+	## `app_ci_repository` is the forge repository whose IDs the root's app CI variables need, which plan and apply
+	## read from the forge: none without forge.oidc.
 	RootRequest : {
 		label : Str,
 		stack : Str,
@@ -23,6 +29,7 @@ InstanceRender :: [].{
 		prefix : Str,
 		inputs : Str,
 		variables : Str,
+		app_ci_repository : Try(Str, [Null]),
 	}
 
 	## One OpenTofu invocation. A per-app root carries the app it renders, so a
@@ -69,9 +76,40 @@ InstanceRender :: [].{
 		## Everything else is still the instance's to commit: identity lists that may name its CI service
 		## accounts (state readers and writers, platform automation), node counts and other cluster
 		## choices, discovered IDs, images and digests, extension routes, and per-app identities, secrets,
-		## catalogs and labels.
+		## catalogs and labels. App CI's variable comes last, and only with forge.oidc.
 		variables : Root, InstanceSpec.Derived -> List((Str, Value))
-		variables = |root, names| {
+		variables = |root, names| root.core_variables(names).concat(root.app_ci(names))
+
+		## App CI's rendered variable when day2.json sets forge.oidc: the project root's federation (the issuer and the CI
+		## repository) and each app edge's results bucket (its derived name, and the apply identity, which reads results
+		## when it builds candidates). Without forge.oidc nothing renders, so neither stack creates anything for app CI.
+		app_ci : Root, InstanceSpec.Derived -> List((Str, Value))
+		app_ci = |root, names| match (root, names.forge_oidc) {
+			(Project, Ok(issuer)) => [
+				("app_ci", Fields([("issuer_uri", Text(issuer)), ("repository", Text(names.ci_repository))])),
+			]
+			(AppEdge(bound), Ok(_)) => [
+				(
+					"app_ci",
+					Fields(
+						[("bucket", Text(bound.ci_bucket)), ("reader", Text("serviceAccount:${names.apply_identity}"))],
+					),
+				),
+			]
+			_ => []
+		}
+
+		## The forge repository whose IDs the root's app CI variable needs: the CI repository for the project root, the
+		## app's repository for its edge, and none without forge.oidc. Plan and apply read the IDs on every run.
+		app_ci_repository : Root, InstanceSpec.Derived -> Try(Str, [Null])
+		app_ci_repository = |root, names| match (root, names.forge_oidc) {
+			(Project, Ok(_)) => Ok(names.ci_repository)
+			(AppEdge(bound), Ok(_)) => Ok(bound.repository)
+			_ => Err(Null)
+		}
+
+		core_variables : Root, InstanceSpec.Derived -> List((Str, Value))
+		core_variables = |root, names| {
 			prefixes = names.platform_state_prefixes
 			operators = names.operators.map(|email| "user:${email}")
 			match root {
@@ -172,7 +210,8 @@ InstanceRender :: [].{
 
 		## Where the instance commits this root's inputs the spec cannot describe yet, relative to the instance
 		## directory. `instance plan` and `apply` pass the file before the rendered variables, so a rendered value
-		## wins; a day2-app root's release variables, read from the app's selection, come last.
+		## wins; app CI's forge IDs come next, and a day2-app root's release variables, read from the app's selection,
+		## come last.
 		committed_inputs : Root -> Str
 		committed_inputs = |root| match root {
 			Project | Cluster | Tenancy => "gcp/config/${root.name()}.tfvars"
@@ -192,6 +231,7 @@ InstanceRender :: [].{
 				prefix: root_backend.prefix,
 				inputs: root.committed_inputs(),
 				variables: root.tfvars_json(names),
+				app_ci_repository: root.app_ci_repository(names),
 			}
 		}
 	}
@@ -317,6 +357,7 @@ InstanceRender :: [].{
 		decoded = parsed.map_err(|_| InvalidReceipt)?
 		failures = [
 			"failed_credentials",
+			"failed_forge",
 			"failed_inputs",
 			"failed_release",
 			"failed_init",
@@ -480,6 +521,10 @@ expect
 			"day2-app/home deploy/gke/stacks/day2-app exampleco-tools-home-state/day2-app/home",
 		]
 
+## The sample without forge.oidc: an instance that has not turned app CI on.
+sample_without_oidc : Str
+sample_without_oidc = sample.replace_first(",\n\"oidc\":\"https://git-oidc.example.com\"", "")
+
 tfvars : Str -> List(Str)
 tfvars = |raw| match InstanceSpec.from_json(raw) {
 	Ok(spec) => {
@@ -489,8 +534,9 @@ tfvars = |raw| match InstanceSpec.from_json(raw) {
 	Err(_) => []
 }
 
+# Golden: without forge.oidc every root renders exactly what it rendered before app CI existed.
 expect
-	tfvars(sample)
+	tfvars(sample_without_oidc)
 		== [
 			"project {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"state_bucket_name\":\"exampleco-tools-tofu-state\",\"state_prefixes\":{\"foundation\":\"foundation/\",\"cluster\":\"platform/cluster/\",\"tenancy\":\"platform/tenancy/\",\"app\":\"platform/app/\",\"day2\":\"day2/\"}}",
 			"cluster {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"zone\":\"us-central1-a\",\"cluster_name\":\"day2\",\"cluster_labels\":{\"managed_by\":\"opentofu\",\"stack\":\"platform-cluster\",\"environment\":\"day2\"},\"subnet_cidr\":\"10.10.0.0/20\",\"pod_cidr\":\"10.20.0.0/16\",\"service_cidr\":\"10.30.0.0/20\",\"shared_node_pod_pids_limit\":1024}",
@@ -500,6 +546,44 @@ expect
 			"day2-app/go {\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace\":\"app-go\",\"installation\":\"exampleco\",\"environment\":\"production\",\"hosted_domain\":\"example.com\",\"admins\":[\"ada@example.com\",\"tools-infra@exampleco-tools.iam.gserviceaccount.com\"],\"edge_origin\":\"https://go.apps.example.com\",\"runtime_resources\":{\"memory_mib\":512,\"cpu_millis\":1000,\"process_limit\":1024,\"http_concurrency\":4,\"shutdown_seconds\":30},\"pod_pids_limit\":1024,\"backup_bucket\":\"exampleco-tools-go-backups\"}",
 			"day2-app/home {\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace\":\"app-home\",\"installation\":\"exampleco\",\"environment\":\"production\",\"hosted_domain\":\"example.com\",\"admins\":[\"ada@example.com\",\"tools-infra@exampleco-tools.iam.gserviceaccount.com\"],\"edge_origin\":\"https://home.apps.example.com\",\"runtime_resources\":{\"memory_mib\":2048,\"cpu_millis\":1000,\"process_limit\":1024,\"http_concurrency\":4,\"shutdown_seconds\":30},\"pod_pids_limit\":1024,\"backup_bucket\":\"exampleco-tools-home-backups\"}",
 		]
+
+# With forge.oidc, only the project root and each app edge gain app CI's variable, last; every other byte stays.
+expect {
+	without = tfvars(sample_without_oidc)
+	with_oidc = tfvars(sample)
+	project_ci = ",\"app_ci\":{\"issuer_uri\":\"https://git-oidc.example.com\",\"repository\":\"tools/day2-ci\"}}"
+	edge_ci =
+		|
+			id,
+		|
+			",\"app_ci\":{\"bucket\":\"exampleco-tools-${id}-ci\",\"reader\":\"serviceAccount:tools-infra@exampleco-tools.iam.gserviceaccount.com\"}}"
+	extended = |line, extra| "${line.drop_suffix("}")}${extra}"
+	expected = without.map_with_index(
+		|line, index| match index {
+			0 => extended(line, project_ci)
+			3 => extended(line, edge_ci("go"))
+			4 => extended(line, edge_ci("home"))
+			_ => line
+		},
+	)
+	with_oidc == expected and with_oidc.len() == 7
+}
+
+# The host reads app CI's forge IDs only with forge.oidc: the CI repository for the project root, each app's own
+# repository for its edge, and nothing for any other root.
+expect {
+	repositories = |raw| match InstanceSpec.from_json(raw) {
+		Ok(spec) => {
+			names = spec.derived()
+			InstanceRender.roots(spec).map(|root| root.app_ci_repository(names))
+		}
+		Err(_) => []
+	}
+	none : Try(Str, [Null])
+	none = Err(Null)
+	repositories(sample) == [Ok("tools/day2-ci"), none, none, Ok("tools/go"), Ok("tools/home"), none, none]
+		and repositories(sample_without_oidc) == [none, none, none, none, none, none, none]
+}
 
 # day2-app's precondition: the node pool's pod PID limit is the only process bound, so it must be at most each
 # app's process_limit. The sample has one app of each size.
@@ -560,6 +644,9 @@ expect InstanceRender.receipt(receipt_sample("unreleased", Bool.True), InstanceR
 expect InstanceRender.receipt(apply_sample("unreleased", Bool.True), InstanceRender.Mode.Apply("/r")).is_ok()
 expect InstanceRender.receipt(receipt_sample("failed_release", Bool.False), InstanceRender.Mode.Plan).is_ok()
 expect InstanceRender.receipt(receipt_sample("failed_inputs", Bool.True), InstanceRender.Mode.Plan).is_err()
+# So is an app CI repository the forge could not read.
+expect InstanceRender.receipt(receipt_sample("failed_forge", Bool.False), InstanceRender.Mode.Plan).is_ok()
+expect InstanceRender.receipt(apply_sample("failed_forge", Bool.True), InstanceRender.Mode.Apply("/r")).is_err()
 # A deploy applies or not, never plans, skips or is unreleased; only it fails at its target.
 expect InstanceRender.receipt(deploy_sample("applied", Bool.True), InstanceRender.Mode.Deploy).is_ok()
 expect InstanceRender.receipt(deploy_sample("not_applied", Bool.True), InstanceRender.Mode.Deploy).is_ok()

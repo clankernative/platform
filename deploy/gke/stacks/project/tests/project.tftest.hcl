@@ -172,6 +172,156 @@ run "shared_secrets_are_containers" {
   }
 }
 
+# Without forge.oidc the renderer sets neither app CI variable: no pool, no
+# provider, and the rest of the root exactly as before.
+run "app_ci_is_off_without_forge_oidc" {
+  command = plan
+
+  assert {
+    condition = (
+      length(google_iam_workload_identity_pool.app_ci) == 0 &&
+      length(google_iam_workload_identity_pool_provider.app_ci) == 0 &&
+      length(google_project_service.api) == 11 &&
+      length(google_storage_bucket_iam_binding.state_object_writers) == 5
+    )
+    error_message = "without app_ci the root creates no federation and nothing else changes"
+  }
+}
+
+run "app_ci_admits_only_main_pushes_of_the_required_workflow" {
+  command = plan
+
+  variables {
+    app_ci = {
+      issuer_uri = "https://oidc.example.com"
+      repository = "tools/day2-ci"
+    }
+    app_ci_forge = {
+      repository_id = "412"
+      owner_id      = "74"
+    }
+  }
+
+  override_resource {
+    target = google_iam_workload_identity_pool.app_ci
+    values = {
+      name = "projects/123456789012/locations/global/workloadIdentityPools/day2-ci"
+    }
+  }
+
+  assert {
+    condition = (
+      length(google_iam_workload_identity_pool.app_ci) == 1 &&
+      google_iam_workload_identity_pool.app_ci[0].project == "example-project" &&
+      google_iam_workload_identity_pool.app_ci[0].workload_identity_pool_id == "day2-ci" &&
+      google_iam_workload_identity_pool_provider.app_ci[0].project == "example-project" &&
+      google_iam_workload_identity_pool_provider.app_ci[0].workload_identity_pool_id == "day2-ci" &&
+      google_iam_workload_identity_pool_provider.app_ci[0].workload_identity_pool_provider_id == "gitea"
+    )
+    error_message = "one pool, day2-ci, with one provider, gitea"
+  }
+
+  assert {
+    condition     = google_iam_workload_identity_pool_provider.app_ci[0].attribute_condition == "assertion.is_scoped == 'true' && assertion.workflow_repository_id == '412' && assertion.repository_owner_id == '74' && assertion.workflow_ref.startsWith('tools/day2-ci/.gitea/scoped_workflows/verification.yml@') && assertion.event_name == 'push' && assertion.ref == 'refs/heads/main'"
+    error_message = "only the scoped verification workflow of the pinned day2-ci, in the pinned org, on a push to main"
+  }
+
+  assert {
+    condition = google_iam_workload_identity_pool_provider.app_ci[0].attribute_mapping == tomap({
+      "google.subject"          = "'gitea:' + assertion.sub"
+      "attribute.repository_id" = "assertion.repository_id"
+    })
+    error_message = "the subject and the consuming repository's id, nothing else"
+  }
+
+  assert {
+    condition = (
+      google_iam_workload_identity_pool_provider.app_ci[0].oidc[0].issuer_uri == "https://oidc.example.com" &&
+      google_iam_workload_identity_pool_provider.app_ci[0].oidc[0].allowed_audiences == tolist([
+        "https://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/day2-ci/providers/gitea",
+      ])
+    )
+    error_message = "the forge.oidc issuer, and only the canonical provider URL ci store requests as its audience"
+  }
+}
+
+run "refuses_app_ci_without_its_forge_ids" {
+  command = plan
+
+  variables {
+    app_ci = {
+      issuer_uri = "https://oidc.example.com"
+      repository = "tools/day2-ci"
+    }
+  }
+
+  expect_failures = [var.app_ci_forge]
+}
+
+run "refuses_forge_ids_without_app_ci" {
+  command = plan
+
+  variables {
+    app_ci_forge = {
+      repository_id = "412"
+      owner_id      = "74"
+    }
+  }
+
+  expect_failures = [var.app_ci_forge]
+}
+
+run "refuses_another_ci_repository" {
+  command = plan
+
+  variables {
+    app_ci = {
+      issuer_uri = "https://oidc.example.com"
+      repository = "tools/links"
+    }
+    app_ci_forge = {
+      repository_id = "412"
+      owner_id      = "74"
+    }
+  }
+
+  expect_failures = [var.app_ci]
+}
+
+run "refuses_an_issuer_with_a_path" {
+  command = plan
+
+  variables {
+    app_ci = {
+      issuer_uri = "https://oidc.example.com/token"
+      repository = "tools/day2-ci"
+    }
+    app_ci_forge = {
+      repository_id = "412"
+      owner_id      = "74"
+    }
+  }
+
+  expect_failures = [var.app_ci]
+}
+
+run "refuses_a_malformed_forge_id" {
+  command = plan
+
+  variables {
+    app_ci = {
+      issuer_uri = "https://oidc.example.com"
+      repository = "tools/day2-ci"
+    }
+    app_ci_forge = {
+      repository_id = "0"
+      owner_id      = "74"
+    }
+  }
+
+  expect_failures = [var.app_ci_forge]
+}
+
 run "declares_only_project_layer_types" {
   command = plan
 
@@ -181,15 +331,19 @@ run "declares_only_project_layer_types" {
 
   assert {
     condition = output.resource_types == toset([
+      "google_iam_workload_identity_pool",
+      "google_iam_workload_identity_pool_provider",
       "google_project_iam_audit_config",
       "google_project_service",
       "google_secret_manager_secret",
       "google_storage_bucket",
       "google_storage_bucket_iam_binding",
     ])
-    error_message = "the root declares only the project layer's resource types"
+    error_message = "the root declares only the project layer's resource types, app CI's federation included"
   }
 
+  # App CI's pool federates and nothing more: no service account to impersonate
+  # and no grant, here or anywhere else in this root.
   assert {
     condition = length(setintersection(output.resource_types, toset([
       "terraform_data",
@@ -198,13 +352,12 @@ run "declares_only_project_layer_types" {
       "google_service_account",
       "google_service_account_iam_member",
       "google_service_account_iam_binding",
-      "google_iam_workload_identity_pool_provider",
       "google_iam_deny_policy",
       "google_logging_project_sink",
       "google_apikeys_key",
       "google_storage_bucket_iam_member",
     ]))) == 0
-    error_message = "no resource type from outside the project layer (CI federation, mirrors, FCM role, deny guardrail, log sink, Maps key, catalog bookkeeping)"
+    error_message = "no resource type from outside the project layer (CI service accounts and their impersonation, mirrors, FCM role, deny guardrail, log sink, Maps key, catalog bookkeeping)"
   }
 
   assert {

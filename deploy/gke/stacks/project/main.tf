@@ -1,6 +1,7 @@
 # Project layer for a day2 GKE instance: the APIs the other stacks call, the
 # bucket that holds every stack's state and who may read or write it, audit
-# logging on that bucket, and the shared Secret Manager containers.
+# logging on that bucket, the shared Secret Manager containers and, when
+# day2.json sets forge.oidc, app CI's workload identity federation (app-ci.tf).
 #
 # Apply it first. The state bucket has to exist before any backend can
 # initialise, including this root's, so an operator creates the bucket and the
@@ -24,7 +25,8 @@ locals {
     # Service accounts and IAM policy, in every stack.
     "iam.googleapis.com",
     # Runtime service-account signing and instance-selected provisioning
-    # identities, including workload identity federation when selected.
+    # identities, including workload identity federation when selected, and
+    # app CI's federation (app-ci.tf).
     "iamcredentials.googleapis.com",
     "sts.googleapis.com",
     # app-edge: IAP in front of each app; runner VMs: IAP TCP forwarding.

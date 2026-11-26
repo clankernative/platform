@@ -9,10 +9,10 @@ instance repository; start with the
 
 | Root | Ownership |
 | --- | --- |
-| [project](stacks/project/main.tf) | APIs, the OpenTofu state bucket and its per-prefix IAM, storage audit logs, the DNS provider token's secret |
+| [project](stacks/project/main.tf) | APIs, the OpenTofu state bucket and its per-prefix IAM, storage audit logs, the DNS provider token's secret, and app CI's workload identity pool when `forge.oidc` is set |
 | [cluster](stacks/cluster/main.tf) | Dedicated VPC, zonal Standard cluster with Workload Identity and Calico network policy, one Ubuntu node pool with a pod PID limit, node identity |
 | [tenancy](stacks/tenancy/main.tf) | Retained SQLite storage and snapshot classes, admission policies for app namespaces (including the backup Job service account exception) |
-| [app-edge](stacks/app-edge/main.tf) | Per app: namespace, runtime service account, retained disk, quotas, Service, IAP BackendConfig, HTTPS redirect, managed certificate, static IP, Cloudflare DNS, Ingress, network policy, image repository, workload state bucket, GKE backup plan, off-cluster backup bucket with its object-create-only Workload Identity uploader, and the platform contract |
+| [app-edge](stacks/app-edge/main.tf) | Per app: namespace, runtime service account, retained disk, quotas, Service, IAP BackendConfig, HTTPS redirect, managed certificate, static IP, Cloudflare DNS, Ingress, network policy, image repository, workload state bucket, GKE backup plan, off-cluster backup bucket with its object-create-only Workload Identity uploader, and the platform contract, and app CI's results bucket when `forge.oidc` is set |
 | [security-shell-edge](stacks/security-shell-edge/main.tf) | Per installation: dedicated security namespace, shell service account, named secret access, IAP Service/backend, certificate, DNS, routing, network policy and a shell contract consumed by app deployments |
 | [security-shell](stacks/security-shell/main.tf) | Separate stateless shell Deployment and read-only instance ConfigMap, consuming the resolved installation edge and exact selected secret-container contract |
 | [day2-app](stacks/day2-app/main.tf) | Instance ConfigMap, one-replica StatefulSet and the hourly off-cluster backup CronJob |

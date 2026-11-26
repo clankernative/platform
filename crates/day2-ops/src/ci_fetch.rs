@@ -299,7 +299,7 @@ impl fmt::Display for Transient {
 
 impl std::error::Error for Transient {}
 
-fn transient(error: &anyhow::Error) -> bool {
+pub(crate) fn transient(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause.downcast_ref::<Transient>().is_some()
             || cause.downcast_ref::<instance_source::Retryable>().is_some()
