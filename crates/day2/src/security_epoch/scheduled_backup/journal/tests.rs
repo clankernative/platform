@@ -401,6 +401,9 @@ struct Bundle {
 fn source() -> Result<Digest> {
     let inputs: &[(&str, &[u8])] = &[
         ("journal.rs", include_bytes!("../journal.rs")),
+        ("journal/birth.rs", include_bytes!("birth.rs")),
+        ("journal/birth/tests.rs", include_bytes!("birth/tests.rs")),
+        ("reservation.rs", include_bytes!("../reservation.rs")),
         ("tests.rs", include_bytes!("tests.rs")),
         (
             "scheduled_backup.rs",
