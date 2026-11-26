@@ -298,6 +298,9 @@ mod tests {
         let Ok(file) = syn::parse_file(source) else {
             return false;
         };
+        if !pending_envelope_copy_shape(&file) {
+            return false;
+        }
         let mut functions = Vec::new();
         for item in file.items {
             match item {
@@ -376,6 +379,7 @@ mod tests {
         functions
             == [
                 "FreshPage::create",
+                "FreshPage::pending_envelope_data",
                 "FreshPage::send_pending",
                 "LocalRefusalData::dispose",
                 "PendingPublication::prepare",
@@ -384,6 +388,154 @@ mod tests {
                 "ReceivedData::state_data",
                 "validate_received_data",
             ]
+    }
+
+    fn pending_envelope_copy_shape(file: &syn::File) -> bool {
+        let selected = file.items.iter().filter_map(|item| match item {
+            syn::Item::Impl(item) if item.trait_.is_none()
+                && matches!(&*item.self_ty, syn::Type::Path(p) if p.path.is_ident("FreshPage")) => Some(item),
+            _ => None,
+        }).flat_map(|item| &item.items).filter_map(|item| match item {
+            syn::ImplItem::Fn(f) if f.sig.ident == "pending_envelope_data" => Some(f),
+            _ => None,
+        }).collect::<Vec<_>>();
+        let [method] = selected.as_slice() else {
+            return false;
+        };
+        if !matches!(method.vis, syn::Visibility::Public(_))
+            || method
+                .attrs
+                .iter()
+                .any(|attribute| !attribute.path().is_ident("doc"))
+            || method.sig.unsafety.is_some()
+            || method.sig.asyncness.is_some()
+            || method.sig.constness.is_some()
+            || method.sig.abi.is_some()
+            || method.sig.variadic.is_some()
+            || !method.sig.generics.params.is_empty()
+            || method.sig.generics.where_clause.is_some()
+            || method.sig.inputs.len() != 1
+        {
+            return false;
+        }
+        let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+            return false;
+        };
+        if receiver
+            .reference
+            .as_ref()
+            .is_none_or(|(_, lifetime)| lifetime.is_some())
+            || receiver.mutability.is_some()
+            || receiver.colon_token.is_some()
+        {
+            return false;
+        }
+        let syn::ReturnType::Type(_, output) = &method.sig.output else {
+            return false;
+        };
+        let syn::Type::Array(array) = output.as_ref() else {
+            return false;
+        };
+        if !matches!(&*array.elem,syn::Type::Path(p) if p.path.is_ident("u8"))
+            || !matches!(&array.len,syn::Expr::Path(p) if p.path.is_ident("FRAME_BYTES"))
+        {
+            return false;
+        }
+        let [syn::Stmt::Expr(syn::Expr::Field(frame), None)] = method.block.stmts.as_slice() else {
+            return false;
+        };
+        if !matches!(&frame.member,syn::Member::Named(n) if n=="frame") {
+            return false;
+        }
+        let syn::Expr::MethodCall(expect) = frame.base.as_ref() else {
+            return false;
+        };
+        if expect.method != "expect"
+            || expect.turbofish.is_some()
+            || expect.args.len() != 1
+            || !matches!(expect.args.first(),Some(syn::Expr::Lit(l)) if matches!(&l.lit,syn::Lit::Str(s) if s.value()=="private fresh page"))
+        {
+            return false;
+        }
+        let syn::Expr::MethodCall(as_ref) = expect.receiver.as_ref() else {
+            return false;
+        };
+        if as_ref.method != "as_ref" || as_ref.turbofish.is_some() || !as_ref.args.is_empty() {
+            return false;
+        }
+        let syn::Expr::Field(inner) = as_ref.receiver.as_ref() else {
+            return false;
+        };
+        matches!(&inner.member,syn::Member::Named(n) if n=="inner")
+            && matches!(inner.base.as_ref(),syn::Expr::Path(p) if p.path.is_ident("self"))
+    }
+
+    fn pending_envelope_method(file: &mut syn::File) -> &mut syn::ImplItemFn {
+        for item in &mut file.items {
+            if let syn::Item::Impl(item) = item
+                && matches!(&*item.self_ty,syn::Type::Path(p) if p.path.is_ident("FreshPage"))
+            {
+                for member in &mut item.items {
+                    if let syn::ImplItem::Fn(f) = member
+                        && f.sig.ident == "pending_envelope_data"
+                    {
+                        return f;
+                    }
+                }
+            }
+        }
+        panic!("actual fixed DATA copy method absent")
+    }
+
+    #[test]
+    fn actual_pending_envelope_copy_cannot_return_a_borrow_handle_state_or_callback() {
+        let actual = syn::parse_file(include_str!("linux.rs")).unwrap();
+        assert!(pending_envelope_copy_shape(&actual));
+        for output in [
+            syn::parse_quote!(&[u8]),
+            syn::parse_quote!(OwnedFd),
+            syn::parse_quote!(StateData),
+            syn::parse_quote!([u8; PAGE_BYTES]),
+        ] {
+            let mut changed = actual.clone();
+            pending_envelope_method(&mut changed).sig.output =
+                syn::ReturnType::Type(Default::default(), Box::new(output));
+            assert!(!pending_envelope_copy_shape(&changed));
+        }
+        for block in [
+            syn::parse_quote!({ &self.inner.as_ref().expect("private fresh page").frame }),
+            syn::parse_quote!({ self.inner.as_ref().expect("private fresh page").descriptor }),
+            syn::parse_quote!({ self.inner.as_ref().expect("private fresh page").state() }),
+            syn::parse_quote!({
+                self.inner.as_ref().expect("private fresh page").check();
+                self.inner.as_ref().expect("private fresh page").frame
+            }),
+            syn::parse_quote!({
+                callback();
+                self.inner.as_ref().expect("private fresh page").frame
+            }),
+        ] {
+            let mut changed = actual.clone();
+            pending_envelope_method(&mut changed).block = block;
+            assert!(!pending_envelope_copy_shape(&changed));
+        }
+        let mut changed = actual.clone();
+        pending_envelope_method(&mut changed)
+            .sig
+            .inputs
+            .push(syn::parse_quote!(callback: fn()));
+        assert!(!pending_envelope_copy_shape(&changed));
+        let mut changed = actual.clone();
+        pending_envelope_method(&mut changed).sig.inputs[0] = syn::parse_quote!(&mut self);
+        assert!(!pending_envelope_copy_shape(&changed));
+        let mut changed = actual.clone();
+        pending_envelope_method(&mut changed).sig.inputs[0] = syn::parse_quote!(&'static self);
+        assert!(!pending_envelope_copy_shape(&changed));
+        let mut changed = actual.clone();
+        pending_envelope_method(&mut changed)
+            .attrs
+            .push(syn::parse_quote!(#[allow(unsafe_code)]));
+        assert!(!pending_envelope_copy_shape(&changed));
     }
 
     #[test]
