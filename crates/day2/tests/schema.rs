@@ -418,7 +418,14 @@ fn checked_storage_index_declarations_reject_forged_model_fields_and_markers() -
             .unwrap()["type_id"]
             .as_u64()
             .unwrap() as usize;
-        let root = table["types"][entry]["ret"].as_u64().unwrap() as usize;
+        let result = table["types"][entry]["ret"].as_u64().unwrap() as usize;
+        let returned = &table["types"][result];
+        // The checked table can box a storage record that contains functions.
+        let root = if returned["kind"] == "box" {
+            returned["item"].as_u64().unwrap() as usize
+        } else {
+            result
+        };
         let tables = table["types"][root]["fields"]
             .as_array()
             .unwrap()
