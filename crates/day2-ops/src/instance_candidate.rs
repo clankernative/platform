@@ -136,6 +136,9 @@ pub struct Instance {
     /// The derived build host.
     pub build_host: String,
     pub apps: Vec<App>,
+    /// App CI's names, only with forge.oidc: then a checked artifact comes
+    /// only from app CI's results bucket.
+    pub app_ci: Option<instance_source::app_ci::AppCi>,
 }
 
 impl Instance {
@@ -146,6 +149,7 @@ impl Instance {
             registry: self.registry.clone(),
             bucket: self.bucket.clone(),
             apps: self.apps.clone(),
+            app_ci: self.app_ci.clone(),
         }
     }
 
@@ -520,6 +524,9 @@ pub struct Job {
     outcome: Option<&'static str>,
     candidate_generation: String,
     inputs_generation: String,
+    /// With forge.oidc, a checked-inputs record of the earlier provenance exists: it is kept as it is, never reused
+    /// and never written over.
+    keep_inputs: bool,
     cached: Option<Value>,
     proof: Option<Value>,
     sub: Option<instance_source::Session>,
@@ -614,6 +621,7 @@ impl Job {
             outcome: None,
             candidate_generation: "0".to_owned(),
             inputs_generation: "0".to_owned(),
+            keep_inputs: false,
             cached: None,
             proof: None,
             sub: None,
@@ -809,6 +817,18 @@ impl Job {
         let inputs = self.inputs.clone().context("source inputs")?;
         let uri = record::inputs_uri(&self.instance.bucket, &self.app, self.digest()?, &inputs);
         match self.store.read(&uri)? {
+            // With forge.oidc a build creates only version 2 records. A checked result recorded from the app
+            // repository's own workflow before the switch stays as it is, but is not reused: the artifact is read from
+            // app CI and built again, and only this commit's candidate record is created.
+            Some((bytes, _))
+                if self.instance.app_ci.is_some()
+                    && instance_source::int(&record::decode(&bytes)?["ci_artifact"]["version"])
+                        != Some(instance_source::app_ci::VERSION) =>
+            {
+                self.keep_inputs = true;
+                self.plan.extend(BUILT);
+                Ok(json!({"found": false}))
+            }
             Some((bytes, generation)) => {
                 self.cached = Some(record::decode(&bytes)?);
                 self.inputs_generation = generation;
@@ -888,6 +908,16 @@ impl Job {
             );
             let proof = value["proof"].clone();
             instance_source::proof(&proof, &self.binding()?.value, self.commit()?, &inputs)?;
+            // With forge.oidc a build trusts only app CI's results; without it, only the earlier provenance.
+            let expected = if self.instance.app_ci.is_some() {
+                instance_source::app_ci::VERSION
+            } else {
+                1
+            };
+            ensure!(
+                instance_source::int(&proof["version"]) == Some(expected),
+                "day2 returned a checked artifact of another provenance"
+            );
             self.proof = Some(proof);
         }
         Ok(value)
@@ -1114,9 +1144,11 @@ impl Job {
         result["build_log"] = json!(log);
         record::check(&result, &self.app, &self.instance.scope())?;
         self.store.put(&work.join("build.log"), &log)?;
-        let uri = record::inputs_uri(&self.instance.bucket, &self.app, self.digest()?, &inputs);
-        let generation = self.inputs_generation.clone();
-        self.write_record(&uri, &result, &generation)?;
+        if !self.keep_inputs {
+            let uri = record::inputs_uri(&self.instance.bucket, &self.app, self.digest()?, &inputs);
+            let generation = self.inputs_generation.clone();
+            self.write_record(&uri, &result, &generation)?;
+        }
         self.candidate = Some(result);
         self.outcome = Some("built");
         Ok(json!({"build_log": log}))

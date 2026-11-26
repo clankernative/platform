@@ -1,0 +1,66 @@
+{
+  "format": 1,
+  "mode": "checked-artifact",
+  "app_id": "links",
+  "repository": "tools/links",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "archive": {
+    "path": "/work/ci-artifact.tar.gz",
+    "digest": "sha256:a789e3fa1ffe742748bda51e387abc56427e3e1a35c1d220cf52be0d9a7f6195",
+    "bytes": 2900
+  },
+  "controls": null,
+  "platform_commit": null,
+  "source_inputs": "sha256:abababababababababababababababababababababababababababababababab",
+  "proof": {
+    "attempt": 2,
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "completed_at": "2026-11-25T18:20:00Z",
+    "objects": {
+      "artifact": {
+        "generation": "1700000000000001",
+        "time_created": "2026-11-25T18:15:00.250Z",
+        "uri": "gs://exampleco-tools-links-ci/1cf71b18b153b05c89206328b10f81c9a672aa7317a122c25ba41fead2669f01/abababababababababababababababababababababababababababababababab-4/41/2/artifact.tar.gz"
+      },
+      "receipt": {
+        "generation": "1700000000000002",
+        "time_created": "2026-11-25T18:15:00.250Z",
+        "uri": "gs://exampleco-tools-links-ci/1cf71b18b153b05c89206328b10f81c9a672aa7317a122c25ba41fead2669f01/abababababababababababababababababababababababababababababababab-4/41/2/receipt.json"
+      }
+    },
+    "receipt": {
+      "archive": {
+        "bytes": 2900,
+        "digest": "sha256:a789e3fa1ffe742748bda51e387abc56427e3e1a35c1d220cf52be0d9a7f6195"
+      },
+      "artifact_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "examples": 12,
+      "generated": 40,
+      "lanes": [
+        "native",
+        "extension",
+        "javascript"
+      ],
+      "sdk_distribution": {
+        "bytes": 12,
+        "digest": "sha256:93354845030274cd4bf1686abd60ab28ec52e1a792fa6f7ccb9cbd0ddff53d12"
+      },
+      "source_inputs": "sha256:abababababababababababababababababababababababababababababababab",
+      "verification": {
+        "cases": 4,
+        "seed": 42,
+        "version": 1
+      },
+      "version": 1
+    },
+    "repository": "tools/links",
+    "run": 41,
+    "started_at": "2026-11-25T18:00:00Z",
+    "version": 2,
+    "workflow": {
+      "commit": "9999999999999999999999999999999999999999",
+      "repository": "tools/day2-ci",
+      "repository_id": 412
+    }
+  }
+}

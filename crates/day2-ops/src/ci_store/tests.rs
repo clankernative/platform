@@ -237,7 +237,7 @@ fn receipt(archive: &[u8], source_inputs: &str) -> Receipt {
         archive: BlobIdentity::of(archive),
         examples: 3,
         generated: 6,
-        lanes: LANES.map(str::to_owned).to_vec(),
+        lanes: crate::ci_check::LANES.map(str::to_owned).to_vec(),
     }
 }
 

@@ -606,7 +606,13 @@ writes is valid to the other.
   receipt's size and digest. Only once the run is still the same successful
   attempt is the archive written to `NEW_ARCHIVE`; the receipt carries the proof
   `{version, run, attempt, job, receipt}` with the log's receipt exactly as
-  decoded.
+  decoded. This is the path without `forge.oidc`, unchanged.
+  - With `forge.oidc`, the same steps read [app CI's stored
+    artifact](#deploy-reads) instead, for every app, and the app repository's
+    own workflow, its jobs, logs and Gitea artifacts are never read. The receipt
+    carries app CI's proof, version 2;
+    [cli/fixtures/source-receipt-app-ci.json](../cli/fixtures/source-receipt-app-ci.json)
+    pins its shape.
 - **Forge reads.** Only the instance's forge, with `AUTODEPLOY_SOURCE_TOKEN`,
   else `GITEA_TOKEN`, sent as `Authorization: token`, never printed. Each read
   has one 90 s window up to its response headers, then 90 s for each read of its
@@ -699,12 +705,27 @@ identity's credentials and the forge token of [`instance source`](#source).
     record with this commit and this commit's build log, which receives the
     reuse proof (`kind: checked-input-reuse`, the binding digest, both commits,
     the inputs, the checked log, the image and the artifact).
-  - Otherwise: the checked artifact, as `checked-artifact` fetches it; the
+  - Otherwise: the checked artifact, as `checked-artifact` fetches it (with
+    `forge.oidc`, from [app CI](#deploy-reads), and only a version 2 proof is
+    accepted; without it, only version 1); the
     binding's release manifest, distribution and evidence through the [release
     cache](#release), bound as a fetch binds them (the operator is not
     installed); then a native build on the build host (below). Its result must
     be this binding's, commit's, inputs' and checked artifact's; its log is
     archived and the checked-inputs record is created.
+  - A record's `ci_artifact` is the proof it was built from, and `check`,
+    deploys and release reads check either version exactly.
+  - With `forge.oidc`, a build writes only version 2 records. A cached
+    checked-inputs record of version 1 is kept as it is but never reused or
+    written over: the artifact is read from app CI and built again, and only the
+    commit's candidate record is created.
+  - Version 1 records written before `forge.oidc` was set stay valid. They are
+    grandfathered under the trust model they were built with, not a downgrade
+    path: no new version 1 record can be created once `forge.oidc` is set. A
+    record is created once, at a path keyed by the binding digest and the commit
+    or the source inputs, so a version 1 record is never replaced; refusing it
+    would fail every app's current selection in plan and apply until the app is
+    rebuilt and selected again.
   - Last, the candidate record is created if it is new, and its exact bytes are
     written to `NEW_CANDIDATE`. The receipt names the outcome (`stored`,
     `reused` or `built`), the record, the build log, the image and the artifact,
@@ -1133,6 +1154,73 @@ and `instance render`, `plan` and `apply` say why under `APP CI`.
 - **Adoption.** A `day2-ci` pool or `<project>-<id>-ci` bucket made by hand
   before `forge.oidc` is set must be imported, or the first apply fails because
   it already exists.
+
+### Deploy reads
+
+With `forge.oidc`, `instance source checked-artifact`, and so `instance
+candidate build`, reads every app's checked main artifact from its results
+bucket, with the same steps and the same interface. There is no per-app switch,
+and the app repository's own workflow artifacts are never read. Without
+`forge.oidc`, the earlier path runs unchanged and its outputs are byte for byte
+the same.
+
+- **Repository.** The binding's repository must be the derived `<org>/<id>`:
+  `ci store` keys results by the run's repository name.
+- **Custody** is the forge's run record, never a commit status, which any writer
+  on the app repository can post. `run` reads `<org>/day2-ci` (exactly that
+  name, owned by the org) for its ID, then lists
+  `GET /repos/<org>/<id>/actions/workflows/verification.yml/runs` with
+  `scoped_workflow_source_repo_id=<that ID>`, `event=push`, `branch=main` and
+  `head_sha=<COMMIT>`. Runs of other commits are ignored. Every run listed for
+  `COMMIT` must be app CI's: `is_scoped` true, `workflow_repository_id` and
+  `workflow_repository` the CI repository's ID and name, `path`
+  `verification.yml@refs/heads/main`, `event` `push`, `head_branch` `main`, the
+  app repository's ID, an attempt and an exact `workflow_commit_sha`; anything
+  else fails closed. The newest such run (the highest run ID) is the one: its
+  current attempt replaces any earlier one. Until that attempt is terminal the
+  step waits as the earlier path does; a terminal attempt that did not succeed
+  is a refusal. Its run ID, attempt, `started_at` and `completed_at` are taken
+  from that record.
+- **Objects.** `gs://<project>-<id>-ci/<sdk>/<source inputs>-<cases>/<run>/<attempt>/`
+  with `<sdk>` the binding's release, `<source inputs>` those of `COMMIT`'s
+  archive (`INPUTS`) and `<cases>` the binding's. `job` reads `receipt.json`,
+  `artifact` describes `artifact.tar.gz` and `download` reads it, each at the
+  generation described. Each object's custom metadata must be exactly `run`,
+  `attempt`, `head` (`COMMIT`) and `event` (`push`), plus `workflow_commit`, the
+  run's, when the runner exported it, and its server-set `timeCreated` must fall
+  inside the attempt's start and stop. The forge keeps whole seconds, so the
+  comparison is in whole seconds.
+- **Receipt.** A complete run's, checked as `ci store` checks it, bound to
+  `INPUTS`, the binding's verification profile and the tooling distribution of
+  the binding's release (read through the [release cache](#release)). The
+  artifact must be the receipt's size and digest.
+- **Reads** are the apply identity's, which holds object read access only: its
+  token from `gcloud auth print-access-token`, held in memory. Each is one GCS
+  JSON API request under its own total deadline (60 s for metadata, 900 s for a
+  download), and each reply is closed data: the selected fields, at most 16 KiB,
+  decoded exactly, or exactly the bytes asked for. A missing object is waited
+  for within the same 2100 s as the run, printing the same waiting line once;
+  past the deadline it is retryable (exit 7), as are a failed connection, a
+  timeout, 408, 429 and 5xx. Any mismatch is a refusal.
+- **attempt.** The run is read again and must still be the same successful
+  attempt with the same window; only then is the archive written.
+- **Proof** (version 2, exact): `version`, `repository`, `commit`, `run`,
+  `attempt`, `started_at` and `completed_at` as the forge reported them (kept
+  in UTC, whole seconds),
+  `workflow` (`repository`, `repository_id`, `commit`), `objects` (`receipt`
+  and `artifact`, each `uri`, `generation` and `time_created`) and `receipt`,
+  the receipt as stored. Every check that needs no forge or bucket is checked
+  again wherever a record is: the build host, `instance candidate check`,
+  deploys and release reads.
+- **Clocks.** The window compares the forge's clock with Google's. The receipt
+  is the job's last write, so the margin before the recorded stop is small; a
+  skew larger than it is a permanent refusal, and the deploy is retried after a
+  new push.
+- **Rollout.** After `forge.oidc` is set, an app gets a new candidate only once
+  app CI has run for a push to its main. The instance's own deploy controller,
+  outside this repository, still validates candidate records as the earlier
+  Python controller wrote them; it must accept version 2 proofs before
+  `forge.oidc` is set, or move into the platform first.
 
 ## Roadmap
 

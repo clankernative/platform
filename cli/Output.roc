@@ -564,8 +564,8 @@ sourced_text = |request, path, report| {
 		Ok(file) => row("Archive", "${file.path} (${file.digest}, ${file.bytes.to_str()} bytes)")
 		Err(Null) => []
 	}
-	proof = match receipt.proof {
-		Ok(value) => row(
+	proof = match report.provenance {
+		Ok(Gitea(value)) => row(
 			"Proof",
 			"run ${
 				value
@@ -576,6 +576,10 @@ sourced_text = |request, path, report| {
 					.attempt
 					.to_str()
 			}, job ${value.job.to_str()}, upload ${value.receipt.upload_id.to_str()}",
+		)
+		Ok(AppCi(value)) => row(
+			"Proof",
+			"app CI run ${value.run.to_str()}, attempt ${value.attempt.to_str()}, ${value.objects.artifact.uri}",
 		)
 		Err(Null) => []
 	}

@@ -315,7 +315,7 @@ pub fn summary(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::instance_candidate::tests::selected_candidate;
+    use crate::instance_candidate::tests::{selected_app_ci_candidate, selected_candidate};
     use crate::instance_source::tests::{BUCKET, Fake, REGISTRY, SERVER};
     use std::{collections::BTreeMap, path::Path};
 
@@ -517,6 +517,20 @@ pub(crate) mod tests {
             check(&candidate, "links", &releases(), &cache, &mut fake)?,
             release
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_candidate_built_from_app_ci_is_read_and_rendered_as_any_other() -> Result<()> {
+        let (candidate, manifest) = selected_app_ci_candidate();
+        assert_eq!(candidate["ci_artifact"]["version"], 2);
+        let (_directory, cache, mut fake) = with_manifest(&manifest);
+        let release = check(&candidate, "links", &releases(), &cache, &mut fake)?;
+        assert_eq!(release.artifact_id, candidate["artifact_id"]);
+        // Its provenance is checked again: another commit's proof is refused.
+        let mut tampered = candidate.clone();
+        tampered["ci_artifact"]["commit"] = json!("f".repeat(40));
+        assert!(check(&tampered, "links", &releases(), &cache, &mut fake).is_err());
         Ok(())
     }
 

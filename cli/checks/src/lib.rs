@@ -407,6 +407,7 @@ mod tests {
             "fixtures/links-artifact.json",
             "fixtures/release-receipt.json",
             "fixtures/source-receipt.json",
+            "fixtures/source-receipt-app-ci.json",
             "fixtures/candidate-receipt.json",
             "fixtures/deploy-receipt.json",
             "fixtures/ci-check-report.json",
@@ -2825,7 +2826,13 @@ mod tests {
             "the binding's verification cases are not day2.json's apps.go.verification"
         );
         fs::write(&binding, valid.to_string()).unwrap();
-        // A forge that cannot be reached is a retryable failure, exit 7.
+        // A forge that cannot be reached is a retryable failure, exit 7. Without forge.oidc the checked artifact is
+        // the app repository's own workflow's.
+        fs::write(
+            instance.join("day2.json"),
+            SPEC.replacen(",\n\"oidc\":\"https://git-oidc.example.com\"", "", 1),
+        )
+        .unwrap();
         for args in [head.as_slice(), checked.as_slice()] {
             let (_, code, message, retryable) = failure(&source(args, 7));
             assert_eq!(
@@ -2834,6 +2841,15 @@ mod tests {
                 "{args:?}"
             );
         }
+        // With forge.oidc it is only ever app CI's, stored for the app's derived repository: this binding's
+        // tools/shortlinks is refused before anything is read.
+        fs::write(instance.join("day2.json"), SPEC).unwrap();
+        let (_, code, message, retryable) = failure(&source(&checked, 6));
+        assert_eq!((code.as_str(), retryable), ("source_failed", false));
+        assert!(
+            message.contains("app CI stores results only for the app's repository tools/go"),
+            "{message}"
+        );
         assert!(!output.exists());
         // A new file is never overwritten.
         fs::write(&output, b"reviewed").unwrap();

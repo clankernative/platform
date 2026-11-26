@@ -115,7 +115,11 @@ COMMANDS
                   verify its one native job, the one receipt the job's log
                   carries, the upload, the downloaded archive and that the
                   attempt has not changed. Write the archive to
-                  <new archive> and print its provenance proof.
+                  <new archive> and print its provenance proof. With
+                  forge.oidc, read app CI's stored artifact instead: the
+                  newest scoped run of <org>/day2-ci for <commit>, its
+                  receipt and artifact from the app's results bucket as the
+                  apply identity, created during that attempt.
                   Source commands read the forge with
                   AUTODEPLOY_SOURCE_TOKEN, else GITEA_TOKEN, allowing 90 s
                   until a response's headers and 90 s for each body read.

@@ -567,7 +567,37 @@ pub struct Verification {
     pub cases: u64,
 }
 
+/// Every lane, in the order a complete run records them.
+pub const LANES: [&str; 3] = ["native", "extension", "javascript"];
+
+/// The most a receipt may hold.
+pub const RECEIPT_LIMIT: u64 = 65_536;
+
 impl Receipt {
+    /// A complete run's receipt: version 1, every lane, seed 42, 4 to 100
+    /// cases, digests in their exact form and an archive within the artifact
+    /// budget. `ci store` checks this before it uploads, and a deploy again
+    /// after it reads the stored receipt.
+    pub fn check(&self) -> Result<()> {
+        let verification = &self.verification;
+        ensure!(
+            self.version == 1
+                && self.lanes == LANES
+                && crate::instance_source::hash(&self.source_inputs)
+                && crate::instance_source::lower_hex(&self.artifact_id, 64)
+                && crate::instance_source::hash(&self.sdk_distribution.digest)
+                && self.sdk_distribution.bytes > 0
+                && crate::instance_source::hash(&self.archive.digest)
+                && (1..=crate::instance_source::ARTIFACT_LIMIT).contains(&self.archive.bytes)
+                && verification.version == 1
+                && verification.seed == SEED
+                && (4..=100).contains(&verification.cases)
+                && self.generated > 0,
+            "invalid ci check receipt"
+        );
+        Ok(())
+    }
+
     /// Key-sorted, as `json.dumps(receipt, sort_keys=True)` wrote it, and a newline.
     fn write(&self, output: &Path) -> Result<()> {
         use std::{io::Write, os::unix::fs::OpenOptionsExt};

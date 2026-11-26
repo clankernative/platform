@@ -2,6 +2,7 @@ import Cli
 import Problem
 import InstanceSpec
 import "fixtures/source-receipt.json" as golden_receipt : Str
+import "fixtures/source-receipt-app-ci.json" as golden_app_ci_receipt : Str
 
 ## `day2 instance source`: the request the CLI hands the platform host, rendered from day2.json, and the receipt the
 ## host returns. The host checks the binding against these derived names: its source server is the forge, its
@@ -28,33 +29,68 @@ InstanceSource :: [].{
 		controls : Try(Str, [Null]),
 		platform_commit : Try(Str, [Null]),
 		source_inputs : Try(Str, [Null]),
-		proof : Try(
-			{
-				version : U64,
-				run : U64,
-				attempt : U64,
-				job : U64,
-				receipt : {
-					version : U64,
-					repository : Str,
-					source_commit : Str,
-					source_inputs : Str,
-					artifact_id : Str,
-					sdk_release : { digest : Str, bytes : U64 },
-					verification : { version : U64, seed : U64, cases : U64 },
-					archive : { digest : Str, bytes : U64 },
-					artifact_name : Str,
-					examples : U64,
-					generated : U64,
-					upload_id : U64,
-				},
-			},
-			[Null],
-		),
+		proof : Try(Proof, [Null]),
 	}
 
-	## A decoded receipt and the host's exact text, which `--agent` output carries verbatim.
-	Report : { receipt : Receipt, text : Str }
+	## What every version of the provenance proof holds.
+	Proof : { version : U64, run : U64, attempt : U64 }
+
+	## Version 1: the app repository's own `roc.yml` run, its one job and the Gitea artifact upload its log named.
+	GiteaProof : {
+		version : U64,
+		run : U64,
+		attempt : U64,
+		job : U64,
+		receipt : {
+			version : U64,
+			repository : Str,
+			source_commit : Str,
+			source_inputs : Str,
+			artifact_id : Str,
+			sdk_release : { digest : Str, bytes : U64 },
+			verification : { version : U64, seed : U64, cases : U64 },
+			archive : { digest : Str, bytes : U64 },
+			artifact_name : Str,
+			examples : U64,
+			generated : U64,
+			upload_id : U64,
+		},
+	}
+
+	## Version 2, with forge.oidc: app CI's scoped run and attempt for the commit, as the forge reported them, the
+	## CI repository and its workflow commit, both stored objects and the receipt `ci check` wrote.
+	AppCiProof : {
+		version : U64,
+		repository : Str,
+		commit : Str,
+		run : U64,
+		attempt : U64,
+		started_at : Str,
+		completed_at : Str,
+		workflow : { repository : Str, repository_id : U64, commit : Str },
+		objects : {
+			receipt : { uri : Str, generation : Str, time_created : Str },
+			artifact : { uri : Str, generation : Str, time_created : Str },
+		},
+		receipt : {
+			version : U64,
+			source_inputs : Str,
+			artifact_id : Str,
+			sdk_distribution : { digest : Str, bytes : U64 },
+			verification : { version : U64, seed : U64, cases : U64 },
+			archive : { digest : Str, bytes : U64 },
+			examples : U64,
+			generated : U64,
+			lanes : List(Str),
+		},
+	}
+
+	## Where a checked artifact came from: the app repository's own workflow, or app CI.
+	Provenance : [Gitea(GiteaProof), AppCi(AppCiProof)]
+
+	## A decoded receipt, its proof decoded as its version's exact shape, and the host's exact text, which `--agent`
+	## output carries verbatim.
+	Report : { receipt : Receipt, provenance : Try(Provenance, [Null]), text : Str }
 
 	## The request a source command hands its recipe. The host validates every field again, refuses a request whose
 	## mode differs from the command that started it, and reads the binding file itself.
@@ -69,6 +105,7 @@ InstanceSource :: [].{
 				registry : Str,
 				bucket : Str,
 				apps : List({ id : Str, sdk : Str, verification : U64 }),
+				app_ci : Try(AppCiNames, [Null]),
 			},
 			[Null],
 		)
@@ -81,6 +118,7 @@ InstanceSource :: [].{
 					registry: names.artifact_registry,
 					bucket: names.tofu_state_bucket,
 					apps: names.apps.map(|entry| { id: entry.id, sdk: entry.sdk, verification: entry.verification }),
+					app_ci: InstanceSource.app_ci_names(names),
 				})
 			}
 			Err(Null) => Err(Null)
@@ -133,13 +171,28 @@ InstanceSource :: [].{
 		})
 	}
 
+	## App CI's names, only when day2.json sets forge.oidc: then every checked artifact comes from app CI's results
+	## bucket, never from the app repository's own workflow.
+	app_ci_names : InstanceSpec.Derived -> Try(AppCiNames, [Null])
+	app_ci_names = |names| match names.forge_oidc {
+		Ok(_) => Ok({
+			repository: names.ci_repository,
+			buckets: names.apps.map(|entry| { id: entry.id, bucket: entry.ci_bucket }),
+		})
+		Err(Null) => Err(Null)
+	}
+
+	## `<org>/day2-ci`, and each app's results bucket `<project>-<id>-ci`, in the order of day2.json's apps.
+	AppCiNames : { repository : Str, buckets : List({ id : Str, bucket : Str }) }
+
 	## A receipt is accepted only in format 1, for the command that was run, reporting exactly that mode's fields and
-	## the commit and source inputs it was asked for.
+	## the commit and source inputs it was asked for. A proof decodes as its version's exact shape.
 	receipt : Str, Cli.SourceAction -> Try(Report, [InvalidReceipt])
 	receipt = |text, action| {
 		parsed : Try(Receipt, _)
 		parsed = Json.parse(text)
 		decoded = parsed.map_err(|_| InvalidReceipt)?
+		provenance = provenance_of(decoded, text)?
 		# Which of app, repository, commit, archive, controls, platform_commit, source_inputs and proof are reported.
 		reported = Str.join_with(
 			[
@@ -167,7 +220,7 @@ InstanceSource :: [].{
 			}
 		}
 		if decoded.format == 1 and decoded.mode == action.verb() and matches {
-			Ok({ receipt: decoded, text })
+			Ok({ receipt: decoded, provenance, text })
 		} else {
 			Err(InvalidReceipt)
 		}
@@ -187,6 +240,23 @@ InstanceSource :: [].{
 
 retryable : Str
 retryable = "retryable: "
+
+## The proof as its version's exact shape: 1 from the app repository's own workflow, 2 from app CI.
+provenance_of : InstanceSource.Receipt, Str -> Try(Try(InstanceSource.Provenance, [Null]), [InvalidReceipt])
+provenance_of = |decoded, text| match decoded.proof {
+	Err(Null) => Ok(Err(Null))
+	Ok(proof) if proof.version == 1 => {
+		gitea : Try({ proof : InstanceSource.GiteaProof }, _)
+		gitea = Json.parse(text)
+		gitea.map_ok(|found| Ok(Gitea(found.proof))).map_err(|_| InvalidReceipt)
+	}
+	Ok(proof) if proof.version == 2 => {
+		app_ci : Try({ proof : InstanceSource.AppCiProof }, _)
+		app_ci = Json.parse(text)
+		app_ci.map_ok(|found| Ok(AppCi(found.proof))).map_err(|_| InvalidReceipt)
+	}
+	Ok(_) => Err(InvalidReceipt)
+}
 
 sample : Str
 sample =
@@ -248,8 +318,8 @@ expect match Cli.parse(["instance", "source", "controls", "source.tar.gz"]) {
 # The host's golden checked-artifact receipt decodes, keeps its exact text and carries the proof's integers exactly.
 expect match checked(written) {
 	Ok(action) => match InstanceSource.receipt(golden_receipt, action) {
-		Ok(report) => match report.receipt.proof {
-			Ok(proof) => report.text
+		Ok(report) => match report.provenance {
+			Ok(Gitea(proof)) => report.text
 				== golden_receipt
 				and proof.run
 					== 7
@@ -261,11 +331,67 @@ expect match checked(written) {
 								digest: "sha256:a789e3fa1ffe742748bda51e387abc56427e3e1a35c1d220cf52be0d9a7f6195",
 								bytes: 2900,
 							})
-			Err(_) => Bool.False
+			_ => Bool.False
 		}
 		Err(_) => Bool.False
 	}
 	Err(_) => Bool.False
+}
+
+# With forge.oidc the host's golden receipt carries app CI's proof, version 2, decoded as its exact shape.
+expect match checked(written) {
+	Ok(action) => match InstanceSource.receipt(golden_app_ci_receipt, action) {
+		Ok(report) => match report.provenance {
+			Ok(AppCi(proof)) => report.text
+				== golden_app_ci_receipt
+				and proof.run
+					== 41
+					and proof.attempt
+						== 2
+						and proof.workflow.repository
+							== "tools/day2-ci"
+							and proof.receipt.lanes
+								== ["native", "extension", "javascript"]
+			_ => Bool.False
+		}
+		Err(_) => Bool.False
+	}
+	Err(_) => Bool.False
+}
+
+# A proof of another version, or one missing its version's fields, is refused.
+expect match checked(written) {
+	Ok(action) => InstanceSource.receipt(
+		golden_app_ci_receipt.replace_first("\"version\": 2", "\"version\": 3"),
+		action,
+	)
+		.is_err()
+		and InstanceSource.receipt(golden_app_ci_receipt.replace_first("\"version\": 2", "\"version\": 1"), action)
+			.is_err()
+			and InstanceSource.receipt(
+				golden_receipt.replace_first("\"version\": 1\n  }", "\"version\": 2\n  }"),
+				action,
+			)
+				.is_err()
+	Err(_) => Bool.False
+}
+
+# The request names app CI's derived names only with forge.oidc.
+expect match (InstanceSpec.from_json(sample), checked(written)) {
+	(Ok(spec), Ok(action)) => {
+		rendered = InstanceSource.request(Ok(spec), action)
+		without = InstanceSource.request(
+			InstanceSpec.from_json(sample.replace_first(",\n\"oidc\":\"https://git-oidc.example.com\"", ""))
+				.map_err(|_| Null),
+			action,
+		)
+		rendered.contains("\"repository\":\"tools/day2-ci\"")
+			and rendered.contains("\"bucket\":\"exampleco-tools-links-ci\"")
+				and !rendered.contains("\"app_ci\":null")
+					and without.contains("\"app_ci\":null")
+						and !without.contains("day2-ci")
+	}
+	_ => Bool.False
 }
 
 # A receipt must be the command's own: its mode, its fields, the commit and inputs it was asked for.
