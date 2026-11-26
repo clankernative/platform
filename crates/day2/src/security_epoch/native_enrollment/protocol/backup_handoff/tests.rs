@@ -56,8 +56,7 @@ fn fixture() -> Result<Fixture> {
     ] {
         role.namespace.uid = "00000000-0000-0000-0000-000000000002".into();
     }
-    let (mut selected, _, _) =
-        crate::security_epoch::scheduled_backup::requester::comparison_fixture_data()?;
+    let mut selected = crate::security_epoch::scheduled_backup::requester::policy_fixture_data()?;
     selected.scope = policy.bootstrap.scope.clone();
     selected.cluster = Digest::of(&policy.bootstrap.cluster)?;
     selected.node_name = policy.runtime.node_name.clone();
