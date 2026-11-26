@@ -79,7 +79,10 @@ impl SignedPendingData {
         expected_envelope: &EnvelopeData,
     ) -> Result<()> {
         held_certificate.verify(policy)?;
-        ensure!(policy.scheduled_backup.is_some(), "backup_requester_disabled");
+        ensure!(
+            policy.scheduled_backup.is_some(),
+            "backup_requester_disabled"
+        );
         decode_key(expected_key)?;
         ensure!(
             self.data.issuer == held_certificate.digest()?
@@ -206,13 +209,15 @@ impl PacketData {
 
 /// Bounded DATA decoding only; signature/expected-resource comparisons remain
 /// mandatory and separate. Foreign decoder messages are never retained.
-pub(in crate::security_epoch::native_enrollment) fn decode_data(bytes: &[u8]) -> Result<PacketData> {
+pub(in crate::security_epoch::native_enrollment) fn decode_data(
+    bytes: &[u8],
+) -> Result<PacketData> {
     ensure!(
         !bytes.is_empty() && bytes.len() <= MAX_DATA_BYTES,
         "backup_handoff_data_bound"
     );
-    let value: serde_json::Value = crate::json::decode(bytes)
-        .map_err(|_| anyhow::anyhow!("backup_handoff_data_wire"))?;
+    let value: serde_json::Value =
+        crate::json::decode(bytes).map_err(|_| anyhow::anyhow!("backup_handoff_data_wire"))?;
     ensure!(value.is_object(), "backup_handoff_data_map");
     let records: &[&str] = match value.get("kind").and_then(serde_json::Value::as_str) {
         Some("pending") => &["/pending", "/pending/data"],
@@ -221,7 +226,9 @@ pub(in crate::security_epoch::native_enrollment) fn decode_data(bytes: &[u8]) ->
         _ => anyhow::bail!("backup_handoff_data_kind"),
     };
     ensure!(
-        records.iter().all(|path| value.pointer(path).is_some_and(serde_json::Value::is_object)),
+        records.iter().all(|path| value
+            .pointer(path)
+            .is_some_and(serde_json::Value::is_object)),
         "backup_handoff_data_map"
     );
     serde_json::from_value(value).map_err(|_| anyhow::anyhow!("backup_handoff_data_wire"))
