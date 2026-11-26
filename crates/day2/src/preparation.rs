@@ -181,6 +181,16 @@ pub(crate) fn prepare(runtime: &Runtime, id: &str) -> Result<Vec<Observation>> {
         Phase::Prepare.advance(step)?;
         let instruction = response.instruction.clone();
         crate::credential_authority::check_step(runtime.artifact().contract(), &operation, step)?;
+        check_revision_step(
+            runtime
+                .artifact()
+                .contract()
+                .prototype
+                .as_ref()
+                .and_then(|page| page.revision_query.as_deref()),
+            &registered_operation,
+            step,
+        )?;
         if step == Step::Boundary(Boundary::Decide) {
             // Every page the application read is in the journal (or, for a
             // query, in this request); the staged delivery is not needed again.
@@ -504,4 +514,42 @@ pub(crate) fn validate_local(
         }
     }
     Ok(())
+}
+
+// Resolving viewer-scoped revision HTML can depend only on local rows, even if
+// the instance has given the query a broader provider grant.
+fn check_revision_step(revision: Option<&str>, operation: &str, step: Step<'_>) -> Result<()> {
+    ensure!(
+        revision != Some(operation) || !matches!(step, Step::Observe { .. }),
+        crate::error::Failure::CapabilityForbidden
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod revision_queries {
+    use super::*;
+
+    #[test]
+    fn revision_reads_local_rows_and_refuses_any_provider_observation() {
+        let revision = "app.revision";
+        let read = Step::Observe {
+            capability: "slack.read.v1",
+            input: "{}",
+        };
+        assert!(check_revision_step(Some(revision), revision, read).is_err());
+        assert!(
+            check_revision_step(
+                Some(revision),
+                revision,
+                Step::Database(Database::Count {
+                    model: "revisions",
+                    data: "{}"
+                })
+            )
+            .is_ok()
+        );
+        assert!(check_revision_step(Some(revision), "app.history", read).is_ok());
+        assert!(check_revision_step(None, revision, read).is_ok());
+    }
 }

@@ -2231,16 +2231,41 @@ fn resource_fixture_for_artifact_with_imports(
         catalog.budgets.extend(people.budgets);
         attachments.extend(people_attachments);
     }
-    // This slot is an explicit Notifications development fixture. It never
-    // synthesizes a production grant or selects a real workspace/channel.
-    if artifact
-        .contract()
-        .operations
-        .iter()
-        .any(|operation| operation.name == "notifications.publish")
-    {
+    // Explicit disposable Slack fixtures. Each operation receives one synthetic
+    // channel and a single action. Runtime policy never calls this constructor.
+    for (required_operation, slot, channel_id, action, operations) in [
+        (
+            "notifications.publish",
+            "notification_channel",
+            "C0SYNTHETIC",
+            Action::SlackPost,
+            &["notifications.set_enabled", "notifications.publish"][..],
+        ),
+        (
+            "slackdashboard.history",
+            "dashboard_channel",
+            "C0DASHBOARD",
+            Action::SlackRead,
+            &["slackdashboard.history"][..],
+        ),
+        (
+            "channelhistory.history",
+            "dashboard_channel",
+            "C0DASHBOARD",
+            Action::SlackRead,
+            &["channelhistory.history"][..],
+        ),
+    ] {
+        if !artifact
+            .contract()
+            .operations
+            .iter()
+            .any(|operation| operation.name == required_operation)
+        {
+            continue;
+        }
         let resource = VersionRef {
-            id: "notification_channel".into(),
+            id: slot.into(),
             revision: 1,
         };
         catalog.connections.insert(
@@ -2265,16 +2290,31 @@ fn resource_fixture_for_artifact_with_imports(
                 connection: resource.clone(),
                 target: ResourceTarget::SlackChannel {
                     channel: day2_capabilities::integrations::SlackChannel {
-                        channel_id: "C0SYNTHETIC".into(),
+                        channel_id: channel_id.into(),
                     },
                 },
             },
         );
-        for operation_name in ["notifications.set_enabled", "notifications.publish"] {
+        for &operation_name in operations {
             let Some(operation) = policy.operations.get(operation_name) else {
                 continue;
             };
             if operation.actors.is_empty() {
+                continue;
+            }
+            if action == Action::SlackRead
+                && !artifact
+                    .contract()
+                    .app_contract
+                    .as_ref()
+                    .and_then(|contract| contract.operations.get(operation_name))
+                    .is_some_and(|declared| {
+                        declared
+                            .observations
+                            .iter()
+                            .any(|name| name == action.capability())
+                    })
+            {
                 continue;
             }
             let reusable = ReusablePolicy {
@@ -2285,11 +2325,11 @@ fn resource_fixture_for_artifact_with_imports(
                 allowed_apps: BTreeSet::from([app.into()]),
                 max_duration_seconds: None,
                 slots: BTreeMap::from([(
-                    "notification_channel".into(),
+                    slot.into(),
                     PolicySlot {
                         kind: ResourceKind::SlackChannel,
                         allowed_resources: BTreeSet::from([resource.clone()]),
-                        actions: BTreeSet::from([Action::SlackPost]),
+                        actions: BTreeSet::from([action]),
                         limits: Limits {
                             max_request_bytes: 16_384,
                             max_response_bytes: 16_384,
@@ -2310,7 +2350,7 @@ fn resource_fixture_for_artifact_with_imports(
                     revision: 1,
                 },
                 operation: operation_name.into(),
-                bindings: BTreeMap::from([("notification_channel".into(), resource.clone())]),
+                bindings: BTreeMap::from([(slot.into(), resource.clone())]),
                 actors: None,
                 expires_at_ms: None,
             });
@@ -3832,7 +3872,25 @@ fn disposable_provider_worlds(actor: &str) -> crate::integrations::simulated::Si
         object_store: ObjectStoreWorld::default(),
         slack: SlackWorld {
             workspace_id: "T0SYNTHETIC".into(),
-            channels: BTreeMap::from([("C0SYNTHETIC".into(), SlackChannelWorld::default())]),
+            channels: BTreeMap::from([
+                ("C0SYNTHETIC".into(), SlackChannelWorld::default()),
+                (
+                    "C0DASHBOARD".into(),
+                    SlackChannelWorld {
+                        messages: vec![
+                            SlackMessage {
+                                text: "The draft is ready to review.".into(),
+                                timestamp: "1767225600.000001".into(),
+                            },
+                            SlackMessage {
+                                text: "The preview link is working.".into(),
+                                timestamp: "1767225660.000001".into(),
+                            },
+                        ],
+                        archived: false,
+                    },
+                ),
+            ]),
             sequence: 0,
         },
         snowflake: SnowflakeWorld {

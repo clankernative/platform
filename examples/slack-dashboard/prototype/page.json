@@ -1,0 +1,5 @@
+{
+  "query": "slackdashboard.history",
+  "revision_query": "slackdashboard.revision",
+  "save_command": "slackdashboard.save_revision"
+}

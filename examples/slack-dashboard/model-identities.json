@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": { "key": "cfb04db2dd6d418dbf2bc53a62368a15", "prefix": "rev" },
+      "table": "revisions",
+      "roc_type": "Models.Revision",
+      "retired": false
+    }
+  ]
+}

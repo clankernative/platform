@@ -114,6 +114,7 @@ struct Prepared {
     assets: day2_assets::Catalog,
     web_resources: day2::web_resources::Catalog,
     public_downloads: day2::public_downloads::Catalog,
+    prototype: Option<day2::prototype::Page>,
     templates: day2::web_templates::Catalog,
     namespace: String,
     projection: day2::registry::Projection,
@@ -163,6 +164,7 @@ fn prepare(
     if let Some(overrides) = overrides {
         snapshot(overrides, &captured, &mut hashes, "app")?;
     }
+    let prototype = day2::prototype::capture(&captured, &hashes)?;
     ui_assembly::expand(root, &captured, &mut hashes)?;
     let modules = day2::app_sources::stage(&captured, &stage.join("app"))?;
     fs::write(
@@ -254,6 +256,7 @@ fn prepare(
         assets,
         web_resources,
         public_downloads,
+        prototype,
         templates,
         namespace,
         projection,
@@ -490,6 +493,9 @@ fn publish(root: &Path, prepared: &mut Prepared, bound: &Bound) -> Result<PathBu
         "app_contract": app_contract,
         "sources": &*hashes, "admission": "local-spike-only",
     });
+    if let Some(prototype) = &prepared.prototype {
+        artifact["prototype"] = serde_json::to_value(prototype)?;
+    }
     let checked: day2::artifact::Artifact = serde_json::from_value(artifact.clone())?;
     let final_credentials =
         day2::credential_declaration::decode(&worker.exchange(b"credential-contract")?, &checked)?;
@@ -662,6 +668,7 @@ fn publish_contract(
         .as_ref()
         .context("complete application contract required")?
         .validate(&contract)?;
+    day2::prototype::validate(&contract)?;
     let routes = day2::routing::Catalog::from_artifact(&contract)?;
     for page in &contract.pages {
         let context = contract.page_context_schema(page)?;

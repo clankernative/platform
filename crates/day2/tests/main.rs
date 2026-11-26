@@ -50,6 +50,7 @@ mod presentation_record_projection;
 mod presentation_templates;
 mod presentation_worker;
 mod property_worker;
+mod prototype_http;
 mod redirect_routes;
 mod reports_http;
 mod request_identity;

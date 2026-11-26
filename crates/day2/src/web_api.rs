@@ -282,6 +282,38 @@ impl RequestContext<'_> {
         headers: &HeaderMap,
         body: &[u8],
     ) -> Result<Response> {
+        self.dispatch_with_query_id(method, uri, headers, body, None)
+    }
+
+    /// The preview supplies a fresh server-minted invocation ID that identifies
+    /// its pinned HTML. Use ordinary business dispatch under the current viewer.
+    pub(super) fn prototype_query(&self, operation: &str, invocation: String) -> Result<Response> {
+        let endpoint = self
+            .catalog
+            .endpoints
+            .get(operation)
+            .context(crate::error::Failure::NotFound)?;
+        ensure!(
+            endpoint.method() == "GET",
+            crate::error::Failure::InvalidInput
+        );
+        self.dispatch_with_query_id(
+            &Method::GET,
+            &endpoint.path().parse()?,
+            &HeaderMap::new(),
+            &[],
+            Some(invocation),
+        )
+    }
+
+    fn dispatch_with_query_id(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+        body: &[u8],
+        query_id: Option<String>,
+    ) -> Result<Response> {
         let actor = self.actor(headers)?;
         if uri.path() == "/api/security-actions" {
             ensure!(
@@ -393,10 +425,11 @@ impl RequestContext<'_> {
             ensure!(body.is_empty(), crate::error::Failure::InvalidInput);
             let input = openapi::query_input(record, uri.query().unwrap_or(""))
                 .context(crate::error::Failure::InvalidInput)?;
-            (
-                input,
-                format!("api-query-{}", security::random(self.entropy)?),
-            )
+            let invocation = match query_id {
+                Some(id) => id,
+                None => format!("api-query-{}", security::random(self.entropy)?),
+            };
+            (input, invocation)
         } else {
             ensure!(uri.query().is_none(), crate::error::Failure::InvalidInput);
             ensure!(

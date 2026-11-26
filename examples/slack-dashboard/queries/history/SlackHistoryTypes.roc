@@ -1,0 +1,3 @@
+SlackHistoryTypes :: [].{
+	Input : {}
+}

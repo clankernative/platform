@@ -8,6 +8,16 @@ The current Links proof of concept uses ordinary app-owned HTML/Jinja templates,
 CSS and native browser modules. Roc supplies typed query data and business
 commands, not a page-building DSL. See [UI-POC.md](UI-POC.md) for the file map.
 
+## Sandboxed prototype pages
+
+A small app can expose an HTML document that calls one registered input-free query. The [Slack dashboard](../examples/slack-dashboard/README.md) is a runnable example. Its owner can save an edit from the browser and share the returned revision URL without rebuilding the app. Each viewer signs in and invokes the query with their current operation and resource grants.
+
+The app provides `prototype/index.html` and `prototype/page.json`. The latter names the fully qualified query. Inside the sandbox, `day2.call("history")` invokes the query named `history` in the example. The trusted shell owns session credentials, loads the selected revision, and returns the checked query result on a message port. The frame accepts inline presentation code. Its browser policy denies external scripts, network fetches and nested frames. A prototype author entrusted with provider data remains responsible for what their page displays.
+
+An editable app also declares an owner-only save command with input `{html: Str}` and output `{id: U64}`, a local revision query with input `{id: U64}` and output `{html: Str}`, and a separate publication entry point in `prototype/App.roc`. Revisions must be immutable. The pilot stores each save as a fresh row and exposes no update or deletion operation. The maximum HTML size is 16 KiB. The publishable app source has a 512 KiB budget.
+
+The owner's source download substitutes the selected HTML and publication entry point into the captured source and binds the query to the published namespace. The result is an ordinary app source tree for review, CI, an independent resource grant and deployment. After admission its root serves the packaged page when the app has no other pages. The preview and published app use the same frame renderer.
+
 ## Experimental request-time presentations
 
 An opt-in `ui_scene` call transforms current authorized query data through an

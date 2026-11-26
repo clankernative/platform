@@ -20,6 +20,7 @@ const RESERVED: &[&str] = &[
     "pages",
     "health",
     "_live",
+    "_prototype",
     "downloads",
 ];
 

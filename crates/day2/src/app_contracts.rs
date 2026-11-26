@@ -1187,6 +1187,7 @@ mod tests {
             assets: Default::default(),
             web_resources: Default::default(),
             public_downloads: Default::default(),
+            prototype: None,
             outputs: BTreeMap::from([(
                 "Output".into(),
                 crate::output_schema::Contract {

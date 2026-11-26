@@ -90,8 +90,15 @@ pub fn classify(prefix: &str, name: &str, kind: Kind) -> Result<Capture> {
         return Ok(Capture::Skipped);
     }
     ensure!(kind != Kind::Symlink, "source symlinks forbidden");
-    if prefix == ROOT && ["assets", "ui", "public-downloads"].contains(&name) {
+    if prefix == ROOT && ["assets", "ui", "public-downloads", "prototype"].contains(&name) {
         ensure!(kind == Kind::Directory, "{name} must be a directory");
+    }
+    if prefix == "app/prototype" {
+        ensure!(
+            kind == Kind::File && ["App.roc", "index.html", "page.json"].contains(&name),
+            "unexpected prototype package entry"
+        );
+        return Ok(Capture::File { resource: true });
     }
     if kind == Kind::Directory {
         return Ok(Capture::Directory);

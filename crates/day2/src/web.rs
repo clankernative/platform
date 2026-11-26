@@ -33,6 +33,8 @@ use tokio::{net::TcpListener, sync::Semaphore};
 mod freetool_credentials;
 #[path = "web_live.rs"]
 pub(crate) mod live;
+#[path = "web_prototype.rs"]
+mod prototype;
 #[path = "web_restored_listener.rs"]
 mod restored_listener;
 pub(crate) use restored_listener::{
@@ -1182,6 +1184,7 @@ async fn handle_timed(
         return handle_app_call(host, request).await;
     }
     let json = crate::web_api::is_json(request.uri().path())
+        || prototype::is_query(request.uri().path())
         || request.uri().path() == crate::cli_login::PATH;
     let live_request = request.method() == Method::GET
         && request.uri().path() == "/_live"
@@ -1317,6 +1320,7 @@ async fn handle_timed(
             path if path.starts_with(crate::ingress::ROUTE_PREFIX) => "ingress",
             path if path.starts_with("/assets/") => "asset",
             path if path.starts_with(crate::public_downloads::PREFIX) => "download",
+            path if prototype::matches(path) => "prototype",
             crate::mcp::PATH => "mcp",
             path if crate::web_api::is_json(path) => "api",
             "/docs" => "api_docs",
@@ -1658,6 +1662,17 @@ impl Host {
             );
         }
         // Platform routes are dispatched before app pages and the Datastar form transport.
+        if prototype::matches(uri.path()) {
+            return prototype::serve(
+                self,
+                method,
+                uri,
+                headers,
+                body,
+                session.context(crate::error::Failure::SignInRequired)?,
+                at,
+            );
+        }
         if crate::web_api::is_json(uri.path()) || uri.path() == crate::openapi::DOCS_PATH {
             let session = session.context(crate::error::Failure::SignInRequired)?;
             ensure!(
@@ -1865,7 +1880,12 @@ impl Host {
         }
         match (method.as_str(), uri.path()) {
             ("GET", "/") if self.runtime.artifact().contract().pages.is_empty() => {
-                redirect(crate::openapi::DOCS_PATH)
+                if let Some(page) = &self.runtime.artifact().contract().prototype {
+                    self.runtime.authorize(&page.query, &session.actor)?;
+                    redirect("/_prototype/published")
+                } else {
+                    redirect(crate::openapi::DOCS_PATH)
+                }
             }
             ("GET", "/") if self.routes.is_none() => {
                 let page = self

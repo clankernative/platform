@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slack channel activity</title>
+<style>
+:root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #172c28; background: #f2f5f0; }
+* { box-sizing: border-box; }
+body { max-width: 54rem; margin: auto; padding: clamp(1.2rem, 5vw, 4rem); }
+header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+h1 { font-size: clamp(1.7rem, 4vw, 2.75rem); line-height: 1.12; letter-spacing: -.04em; margin: 0; }
+button { font: inherit; cursor: pointer; background: #205c48; color: white; border: 0; border-radius: .5rem; padding: .55rem 1rem; }
+button:disabled { opacity: .6; cursor: wait; }
+#status { color: #465d53; margin: .8rem 0 2rem; }
+ol { padding: 0; list-style: none; }
+li { background: white; border: 1px solid #dce3d9; border-radius: .6rem; margin-block: .6rem; padding: 1rem 1.2rem; }
+time { color: #53665c; font-size: .88rem; }
+li p { white-space: pre-wrap; overflow-wrap: anywhere; margin: .35rem 0 0; }
+</style>
+</head>
+<body>
+<main>
+<header><h1>Slack channel activity</h1><button type="button" id="refresh">Refresh</button></header>
+<p id="status" role="status">Loading messages…</p>
+<ol aria-label="Recent messages" id="messages"></ol>
+</main>
+<script>
+// Keep this prototype self-contained. The sandbox blocks network resources and
+// CDNs. The named Day2 operation selects the authorized channel on the server.
+const refresh = document.getElementById("refresh");
+const status = document.getElementById("status");
+const messages = document.getElementById("messages");
+const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+async function loadMessages() {
+    refresh.disabled = true;
+    messages.replaceChildren();
+    status.textContent = "Loading messages…";
+    try {
+        const history = await day2.call("history");
+        const items = document.createDocumentFragment();
+        for (const message of history.messages.items) {
+            const item = document.createElement("li");
+            const date = new Date(Number(message.timestamp) * 1000);
+            if (!Number.isNaN(date.getTime())) {
+                const time = document.createElement("time");
+                time.dateTime = date.toISOString();
+                time.textContent = dateFormat.format(date);
+                item.append(time);
+            }
+            const text = document.createElement("p");
+            // Provider text stays inert, including HTML-shaped Slack messages.
+            text.textContent = message.text;
+            item.append(text);
+            items.append(item);
+        }
+        messages.replaceChildren(items);
+        status.textContent = history.messages.items.length
+            ? history.channel + " · " + history.messages.items.length + (history.messages.items.length === 1 ? " message" : " messages") +
+              (history.has_more ? " · Older messages available" : "")
+            : "No messages in " + history.channel + ".";
+    } catch (error) {
+        status.textContent = error.message === "Access denied." ? "You don’t have access to this view." : "Messages could not be loaded.";
+    } finally {
+        refresh.disabled = false;
+    }
+}
+
+refresh.addEventListener("click", loadMessages);
+void loadMessages();
+</script>
+</body>
+</html>
