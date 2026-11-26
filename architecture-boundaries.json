@@ -119,7 +119,7 @@
         {
           "default_features": true,
           "features": [],
-          "kind": "dev",
+          "kind": "normal",
           "local_path": null,
           "name": "flate2",
           "optional": false,
@@ -467,6 +467,16 @@
           "kind": "dev",
           "local_path": null,
           "name": "syn",
+          "optional": false,
+          "rename": null,
+          "target": null
+        },
+        {
+          "default_features": false,
+          "features": [],
+          "kind": "normal",
+          "local_path": null,
+          "name": "tar",
           "optional": false,
           "rename": null,
           "target": null

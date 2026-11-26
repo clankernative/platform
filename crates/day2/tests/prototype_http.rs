@@ -77,8 +77,10 @@ fn pinned_revisions_recheck_viewer_grants_and_export_the_exact_saved_source() ->
         development::resource_fixture_for_artifact("app", runtime.artifact(), policy)?;
     bindings
         .iter_mut()
-        .find(|binding| binding.operation == history)
-        .context("history resource")?
+        .find(|binding| {
+            binding.operation == history && binding.bindings.contains_key("dashboard_channel")
+        })
+        .context("Slack channel resource binding")?
         .actors = Some(BTreeSet::from([
         "alice".into(),
         "viewer".into(),
