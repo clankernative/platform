@@ -1108,6 +1108,12 @@ locals {
 }
 
 resource "kubernetes_cron_job_v1" "backup" {
+  lifecycle {
+    precondition {
+      condition     = !local.native_enabled || var.backup_operation_lock
+      error_message = "Native scheduled backup cannot opt out of shared backup/release exclusion, even while suspended."
+    }
+  }
   metadata {
     name      = local.backup_name
     namespace = var.namespace
@@ -1131,7 +1137,7 @@ resource "kubernetes_cron_job_v1" "backup" {
       }
 
       spec {
-        backoff_limit           = 1
+        backoff_limit           = local.native_enabled ? 0 : 1
         active_deadline_seconds = var.backup_active_deadline_seconds
 
         template {
@@ -1147,8 +1153,11 @@ resource "kubernetes_cron_job_v1" "backup" {
             automount_service_account_token = false
             enable_service_links            = false
             restart_policy                  = "Never"
+            host_pid                        = false
+            host_network                    = false
+            host_ipc                        = false
 
-            node_selector = var.node_selector
+            node_selector = local.native_enabled ? merge(var.node_selector, local.native_node_selector) : var.node_selector
 
             security_context {
               run_as_non_root = true
@@ -1212,10 +1221,10 @@ resource "kubernetes_cron_job_v1" "backup" {
                 }
               }
 
-              # Mirrors the StatefulSet: instance.json as a regular read-only
-              # file (subPath), the artifact baked into the image under
-              # /srv/day2/artifacts, and the state volume read-write (SQLite
-              # opens the WAL's -shm even for a read-only connection).
+              # Ordinary backup reads its RWO store. A native Job gets no state
+              # volume or native role: only the dedicated read-only socket
+              # child. It stays suspended until its genuine requester/source/
+              # transfer/uploader route and later execution are approved.
               volume_mount {
                 name       = "instance"
                 mount_path = local.instance_path
@@ -1223,9 +1232,21 @@ resource "kubernetes_cron_job_v1" "backup" {
                 read_only  = true
               }
 
-              volume_mount {
-                name       = "state"
-                mount_path = local.state_dir
+              dynamic "volume_mount" {
+                for_each = local.native_enabled ? [] : [true]
+                content {
+                  name       = "state"
+                  mount_path = local.state_dir
+                }
+              }
+
+              dynamic "volume_mount" {
+                for_each = local.native_enabled ? [true] : []
+                content {
+                  name       = "scheduled-backup-peer"
+                  mount_path = "/run/day2-native-enrollment/scheduled-backup"
+                  read_only  = true
+                }
               }
 
               volume_mount {
@@ -1253,11 +1274,24 @@ resource "kubernetes_cron_job_v1" "backup" {
               }
             }
 
-            volume {
-              name = "state"
+            dynamic "volume" {
+              for_each = local.native_enabled ? [] : [true]
+              content {
+                name = "state"
+                persistent_volume_claim {
+                  claim_name = local.pvc_name
+                }
+              }
+            }
 
-              persistent_volume_claim {
-                claim_name = local.pvc_name
+            dynamic "volume" {
+              for_each = local.native_enabled ? [true] : []
+              content {
+                name = "scheduled-backup-peer"
+                host_path {
+                  path = "/run/day2-native-enrollment/scheduled-backup"
+                  type = "Directory"
+                }
               }
             }
 

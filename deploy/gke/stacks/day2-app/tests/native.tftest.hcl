@@ -118,6 +118,47 @@ run "native_app_refuses_missing_enrollment" {
   expect_failures = [terraform_data.native_admission]
 }
 
+run "native_backup_is_suspended_without_source_storage_or_role_mounts" {
+  command = plan
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].suspend &&
+      kubernetes_cron_job_v1.backup.spec[0].concurrency_policy == "Forbid" &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].backoff_limit == 0 &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].restart_policy == "Never" &&
+      !kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].automount_service_account_token &&
+      !kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].host_pid &&
+      !kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].host_network &&
+      !kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].host_ipc
+    )
+    error_message = "Native backup must stay suspended, use one non-retrying Job and gain no native process namespace or mounted credential."
+  }
+  assert {
+    condition = (
+      toset([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume.name]) == toset(["instance", "scheduled-backup-peer", "tmp", "backup"]) &&
+      one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume if volume.name == "scheduled-backup-peer"]).host_path[0].path == "/run/day2-native-enrollment/scheduled-backup" &&
+      one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume if volume.name == "scheduled-backup-peer"]).host_path[0].type == "Directory" &&
+      toset([for mount in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].volume_mount : mount.mount_path]) == toset(["/srv/day2/instance.json", "/run/day2-native-enrollment/scheduled-backup", "/tmp", "/backup"]) &&
+      one([for mount in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].volume_mount : mount if mount.name == "scheduled-backup-peer"]).read_only
+    )
+    error_message = "The native Job gets exactly public instance config, scratch and the existing read-only dedicated child; never a database PVC, storage child, enrollment parent, device or auto-created directory."
+  }
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].node_selector == kubernetes_stateful_set_v1.day2[0].spec[0].template[0].spec[0].node_selector &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].service_account_name == "backup" &&
+      contains(kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].container[0].args, "--operation-lock")
+    )
+    error_message = "Use the actual selected native node and existing uploader KSA, with shared operation exclusion mandatory; neither is requester authority."
+  }
+}
+
+run "native_backup_refuses_operation_lock_opt_out" {
+  command = plan
+  variables { backup_operation_lock = false }
+  expect_failures = [kubernetes_cron_job_v1.backup]
+}
+
 run "native_app_refuses_missing_native_placement" {
   command = plan
   variables { native_enrollment_placement = null }

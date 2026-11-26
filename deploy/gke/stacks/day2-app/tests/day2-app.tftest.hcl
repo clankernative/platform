@@ -1299,6 +1299,24 @@ run "backup_operation_lock_is_per_app" {
   }
 }
 
+run "ordinary_backup_keeps_its_selection_with_optional_native_placement" {
+  command = plan
+  variables {
+    native_enrollment_placement = { pool_name = "native-pool", profile = "native-fixture" }
+    node_selector               = { "example.com/backup-node" = "selected" }
+  }
+  assert {
+    condition = (
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].node_selector == tomap({ "example.com/backup-node" = "selected" }) &&
+      !kubernetes_cron_job_v1.backup.spec[0].suspend &&
+      kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].backoff_limit == 1 &&
+      length([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume if volume.name == "scheduled-backup-peer"]) == 0 &&
+      length(one([for volume in kubernetes_cron_job_v1.backup.spec[0].job_template[0].spec[0].template[0].spec[0].volume : volume if volume.name == "state"]).persistent_volume_claim) == 1
+    )
+    error_message = "Without a native bootstrap, optional enrollment placement must not change the ordinary backup's selector, scheduling, retry or RWO storage behavior."
+  }
+}
+
 run "backs_up_hourly_beside_the_app_pod_to_the_backup_bucket" {
   command = plan
 
