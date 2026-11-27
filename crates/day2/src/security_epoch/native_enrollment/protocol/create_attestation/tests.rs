@@ -440,9 +440,18 @@ fn each_policy_tie_refuses_even_self_consistent_resigned_expected_data() -> Resu
         ("namespace_uid", serde_json::to_value(uid(99))?),
         ("cron_job_uid", serde_json::to_value(uid(99))?),
         ("service_account_uid", serde_json::to_value(uid(99))?),
-        ("cron_spec", serde_json::to_value(digest("wrong-selected-cron-spec"))?),
-        ("admission", serde_json::to_value(digest("wrong-selected-admission"))?),
-        ("policy", serde_json::to_value(digest("wrong-selected-policy"))?),
+        (
+            "cron_spec",
+            serde_json::to_value(digest("wrong-selected-cron-spec"))?,
+        ),
+        (
+            "admission",
+            serde_json::to_value(digest("wrong-selected-admission"))?,
+        ),
+        (
+            "policy",
+            serde_json::to_value(digest("wrong-selected-policy"))?,
+        ),
     ] {
         let mut value = original.clone();
         value["binding"][key] = replacement.clone();
@@ -452,24 +461,33 @@ fn each_policy_tie_refuses_even_self_consistent_resigned_expected_data() -> Resu
             value["job"]["owner_uid"] = replacement;
         }
         let signed = f.signed(value)?;
-        assert!(signed.verify_data(
-            &f.policy,
-            &f.certificate,
-            &signed.data.tap,
-            &signed.data.binding,
-            &signed.data.challenge,
-        ).is_err(), "{key}");
+        assert!(
+            signed
+                .verify_data(
+                    &f.policy,
+                    &f.certificate,
+                    &signed.data.tap,
+                    &signed.data.binding,
+                    &signed.data.challenge,
+                )
+                .is_err(),
+            "{key}"
+        );
     }
     let mut value = original;
     value["tap"]["cluster_incarnation"] = serde_json::to_value(digest("wrong-selected-cluster"))?;
     let signed = f.signed(value)?;
-    assert!(signed.verify_data(
-        &f.policy,
-        &f.certificate,
-        &signed.data.tap,
-        &signed.data.binding,
-        &signed.data.challenge,
-    ).is_err());
+    assert!(
+        signed
+            .verify_data(
+                &f.policy,
+                &f.certificate,
+                &signed.data.tap,
+                &signed.data.binding,
+                &signed.data.challenge,
+            )
+            .is_err()
+    );
     // Dynamic Job/Pod identities and registry fields are intentionally not
     // tested against a fictitious global-current registry: their independent
     // expected values must come from the actual retained caller context.
