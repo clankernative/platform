@@ -70,8 +70,8 @@ pub const CONTROLS: [&str; 5] = [
 ];
 /// App-owned control data: inventoried, never part of the digest.
 const APP_CONTROL: &str = ".ci/roc.json";
-const TEMPORARY: &str = "source_temporarily_unavailable";
-const NOT_READY: &str = "checked_main_artifact_not_ready";
+pub(crate) const TEMPORARY: &str = "source_temporarily_unavailable";
+pub(crate) const NOT_READY: &str = "checked_main_artifact_not_ready";
 const MARKER: &str = "DAY2_CHECKED_APP_V1 ";
 const WORKFLOW: &str = "roc.yml";
 const JOB: &str = "roc";
@@ -303,6 +303,8 @@ pub struct Effects {
     /// The release cache, else `instance_release::cache_root()`.
     pub cache: Option<PathBuf>,
     pub token: Option<String>,
+    /// App CI's results buckets, read as the apply identity.
+    pub storage: Box<dyn crate::ci_results::Storage>,
 }
 
 impl Effects {
@@ -313,6 +315,7 @@ impl Effects {
             tools: Box::new(instance_release::Native),
             cache: None,
             token: token()?,
+            storage: Box::new(crate::ci_results::Gcs::native()?),
         })
     }
 }
@@ -339,6 +342,10 @@ pub struct Instance {
     /// The derived state bucket, `<project>-tofu-state`.
     pub bucket: String,
     pub apps: Vec<App>,
+    /// App CI's names, only when day2.json sets forge.oidc: then every checked
+    /// artifact comes from app CI's results bucket (`app_ci`), and never from
+    /// the app repository's own workflow.
+    pub app_ci: Option<app_ci::AppCi>,
 }
 
 /// The CLI's rendered request.
@@ -434,6 +441,9 @@ pub(crate) fn validate_instance(instance: &Instance) -> Result<()> {
             }),
         "the instance apps must be sorted, each with an sdk digest and 4 to 100 verification cases"
     );
+    if let Some(names) = &instance.app_ci {
+        app_ci::validate(names, instance)?;
+    }
     Ok(())
 }
 
@@ -1472,12 +1482,17 @@ pub fn receipt(value: &Value, binding: &Value, source_commit: &str, inputs: &str
     Ok(())
 }
 
-/// ci_artifact.proof, for `binding`'s JSON.
+/// ci_artifact.proof, for `binding`'s JSON: version 1 for an artifact the app
+/// repository's own workflow uploaded, version 2 for one read from app CI's
+/// results bucket (`app_ci::proof`).
 pub fn proof(value: &Value, binding: &Value, source_commit: &str, inputs: &str) -> Result<()> {
     ensure!(
         binding["source"]["forge"] == "gitea" && binding["source"]["branch"] == "main",
         "checked-artifact provenance requires Gitea main"
     );
+    if int(&value["version"]) == Some(app_ci::VERSION) {
+        return app_ci::proof(value, binding, source_commit, inputs);
+    }
     ensure!(
         object_with(value, &["version", "run", "attempt", "job", "receipt"])
             && int(&value["version"]) == Some(1)
@@ -1811,6 +1826,7 @@ pub struct File {
 
 /// What a source command reports. The host owns this shape; the CLI decodes
 /// only it and passes it through verbatim, and cli/fixtures/source-receipt.json
+/// (with app CI, source-receipt-app-ci.json)
 /// pins it for both sides. Every field is present; those a mode does not
 /// report are null.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1910,6 +1926,12 @@ pub struct Session {
     job: Option<u64>,
     checked: Option<Value>,
     data: Option<Vec<u8>>,
+    /// App CI: the source repository's ID and the run, what its receipt read
+    /// found, the one deadline every wait shares, and whether it was announced.
+    ci: Option<(u64, app_ci::Run)>,
+    found: Option<app_ci::Found>,
+    deadline: Option<Duration>,
+    announced: bool,
 }
 
 impl Session {
@@ -1978,6 +2000,10 @@ impl Session {
             job: None,
             checked: None,
             data: None,
+            ci: None,
+            found: None,
+            deadline: None,
+            announced: false,
         })
     }
 
@@ -2006,6 +2032,10 @@ impl Session {
             job: None,
             checked: None,
             data: None,
+            ci: None,
+            found: None,
+            deadline: None,
+            announced: false,
         }
     }
 
@@ -2024,12 +2054,23 @@ impl Session {
                 expected.unwrap_or("nothing more")
             );
         };
+        // With forge.oidc the same steps read app CI's run and results bucket, and the app repository's own
+        // workflow artifacts are never read.
+        let app_ci = self
+            .instance
+            .as_ref()
+            .is_some_and(|instance| instance.app_ci.is_some());
         let value = match (self.mode, next) {
             (Mode::Head, _) => self.head()?,
             (Mode::Archive, _) => self.archive()?,
             (Mode::Controls, _) => self.controls()?,
             (Mode::VerifyControls, "controls") => self.approve_controls()?,
             (Mode::VerifyControls, _) => self.verify_controls()?,
+            (_, "run") if app_ci => self.ci_run()?,
+            (_, "job") if app_ci => self.ci_receipt()?,
+            (_, "artifact") if app_ci => self.ci_artifact()?,
+            (_, "download") if app_ci => self.ci_download()?,
+            _ if app_ci => self.ci_attempt()?,
             (_, "run") => self.main_run()?,
             (_, "job") => self.job()?,
             (_, "artifact") => self.artifact()?,
@@ -2504,6 +2545,8 @@ impl<'a> Forge<'a> {
         }
     }
 }
+
+pub mod app_ci;
 
 #[cfg(test)]
 pub(crate) mod tests;

@@ -24,6 +24,10 @@ pub(crate) struct World {
     /// Each request's URL and whether it carried the token.
     pub(crate) calls: Vec<(String, bool)>,
     pub(crate) objects: BTreeMap<String, Vec<u8>>,
+    /// App CI's results: each object's projected metadata and bytes, by bucket and name.
+    pub(crate) stored: BTreeMap<(String, String), (crate::ci_results::Stored, Vec<u8>)>,
+    /// Each results read: bucket, name, and the generation of a download.
+    pub(crate) reads: Vec<(String, String, Option<String>)>,
     pub(crate) now: Duration,
     pub(crate) sleeps: Vec<Duration>,
     pub(crate) announced: Vec<String>,
@@ -115,6 +119,35 @@ impl instance_release::Tools for Fake {
 
     fn image_id(&mut self, _image: &str) -> Result<String> {
         bail!("a source session never inspects images")
+    }
+}
+
+impl crate::ci_results::Storage for Fake {
+    fn object(&mut self, bucket: &str, name: &str) -> Result<Option<crate::ci_results::Stored>> {
+        let mut world = self.0.borrow_mut();
+        world.reads.push((bucket.to_owned(), name.to_owned(), None));
+        Ok(world
+            .stored
+            .get(&(bucket.to_owned(), name.to_owned()))
+            .map(|(stored, _)| stored.clone()))
+    }
+
+    fn media(&mut self, bucket: &str, name: &str, generation: &str, size: u64) -> Result<Vec<u8>> {
+        let mut world = self.0.borrow_mut();
+        world.reads.push((
+            bucket.to_owned(),
+            name.to_owned(),
+            Some(generation.to_owned()),
+        ));
+        let (stored, bytes) = world
+            .stored
+            .get(&(bucket.to_owned(), name.to_owned()))
+            .context("app_ci_results_http_404")?;
+        ensure!(
+            stored.generation == generation && bytes.len() as u64 == size,
+            "app_ci_results_http_404"
+        );
+        Ok(bytes.clone())
     }
 }
 
@@ -278,6 +311,7 @@ pub(crate) fn instance(sdk: &str) -> Instance {
                 verification: 6,
             },
         ],
+        app_ci: None,
     }
 }
 
@@ -345,11 +379,12 @@ impl Scenario {
             tools: Box::new(self.fake.clone()),
             cache: Some(self.path("cache")),
             token: Some(TOKEN.into()),
+            storage: Box::new(self.fake.clone()),
         }
     }
 
     /// The CLI's request for `mode`, with the files it names written.
-    fn request(&self, mode: Mode) -> Value {
+    pub(crate) fn request(&self, mode: Mode) -> Value {
         fs::write(self.path("binding.json"), self.binding.to_string()).unwrap();
         let path = |name: &str| json!(self.path(name));
         let (binding, commit, inputs_value, archive, output) = match mode {
@@ -398,18 +433,18 @@ impl Scenario {
             "inputs": inputs_value, "archive": archive, "output": output})
     }
 
-    fn session_with(&self, mode: Mode, request: &Value) -> Result<Session> {
+    pub(crate) fn session_with(&self, mode: Mode, request: &Value) -> Result<Session> {
         let raw = self.path("request.json");
         fs::write(&raw, request.to_string())?;
         Session::prepare(&raw, mode, self.effects())
     }
 
-    fn session(&self, mode: Mode) -> Result<Session> {
+    pub(crate) fn session(&self, mode: Mode) -> Result<Session> {
         self.session_with(mode, &self.request(mode))
     }
 
     /// Every step of `mode`; the last one's receipt.
-    fn run(&self, mode: Mode) -> Result<Value> {
+    pub(crate) fn run(&self, mode: Mode) -> Result<Value> {
         let mut session = self.session(mode)?;
         let mut last = Value::Null;
         for step in mode.steps() {

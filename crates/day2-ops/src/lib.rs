@@ -3,6 +3,7 @@ pub mod backup;
 pub mod chrome_extension;
 pub mod ci_check;
 pub mod ci_fetch;
+pub mod ci_results;
 pub mod ci_store;
 pub mod ci_workflow;
 pub mod infra;

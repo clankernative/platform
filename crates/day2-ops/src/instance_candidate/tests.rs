@@ -609,6 +609,8 @@ struct World {
     artifact: Vec<u8>,
     inputs: String,
     binding: Value,
+    /// App CI's names, set for a build with forge.oidc.
+    app_ci: Option<crate::instance_source::app_ci::AppCi>,
 }
 
 impl World {
@@ -694,6 +696,7 @@ impl World {
             artifact,
             inputs,
             binding,
+            app_ci: None,
         };
         world.route_checked(COMMIT);
         world
@@ -747,6 +750,7 @@ impl World {
                     verification: 6,
                 },
             ],
+            app_ci: self.app_ci.clone(),
         }
     }
 
@@ -759,6 +763,7 @@ impl World {
                 tools: Box::new(self.fake.clone()),
                 cache: Some(self.path("cache")),
                 token: Some(TOKEN.into()),
+                storage: Box::new(self.fake.clone()),
             },
             store: Box::new(self.store.clone()),
             host: Box::new(self.host.clone()),
@@ -3071,5 +3076,186 @@ fn write_protect_removes_write_bits_and_refuses_links() -> Result<()> {
     for directory in [tree.clone(), tree.join("nested")] {
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))?;
     }
+    Ok(())
+}
+
+/// With forge.oidc: the binding names the app's derived repository, and app CI's run 41, attempt 2, stored the
+/// checked artifact and its receipt for COMMIT.
+fn app_ci_world() -> World {
+    let mut world = World::new();
+    let prefix = format!("{SERVER}/api/v1/repos/tools/links");
+    world.binding["repository"] = json!("tools/links");
+    world.binding["source"]["repository"] = json!("tools/links");
+    world.app_ci = Some(crate::instance_source::app_ci::AppCi {
+        repository: "tools/day2-ci".into(),
+        buckets: ["links", "notes"]
+            .map(|app| crate::instance_source::app_ci::Bucket {
+                id: app.into(),
+                bucket: format!("exampleco-tools-{app}-ci"),
+            })
+            .to_vec(),
+    });
+    let fake = &world.fake;
+    fake.route(
+        &format!("{prefix}/archive/{COMMIT}.tar.gz"),
+        vec![bytes(world.archive.clone())],
+    );
+    fake.route(
+        &format!("{SERVER}/api/v1/repos/tools/day2-ci"),
+        vec![crate::instance_source::tests::ok(
+            json!({"id": 412, "full_name": "tools/day2-ci", "owner": {"id": 74, "login": "tools"}}),
+        )],
+    );
+    let run = json!({"id": 41, "head_sha": COMMIT, "event": "push", "head_branch": "main",
+        "path": "verification.yml@refs/heads/main", "is_scoped": true, "workflow_repository_id": 412,
+        "workflow_repository": {"id": 412, "full_name": "tools/day2-ci"},
+        "workflow_commit_sha": "9".repeat(40), "repository": {"id": 42, "full_name": "tools/links"},
+        "run_attempt": 2, "status": "completed", "conclusion": "success",
+        "started_at": "2026-11-25T18:00:00Z", "completed_at": "2026-11-25T18:20:00Z"});
+    fake.route(
+        &format!(
+            "{prefix}/actions/workflows/verification.yml/runs?scoped_workflow_source_repo_id=412\
+             &event=push&branch=main&head_sha={COMMIT}&limit=50"
+        ),
+        vec![crate::instance_source::tests::ok(
+            json!({"workflow_runs": [run.clone()]}),
+        )],
+    );
+    fake.route(
+        &format!("{prefix}/actions/runs/41"),
+        vec![crate::instance_source::tests::ok(run)],
+    );
+    let archive = BlobIdentity::of(&world.artifact);
+    let receipt = json!({"version": 1, "source_inputs": world.inputs, "artifact_id": ARTIFACT,
+        "sdk_distribution": {"digest": world.published.release.distribution.digest,
+            "bytes": world.published.release.distribution.bytes},
+        "verification": {"version": 1, "seed": 42, "cases": 4},
+        "archive": {"digest": archive.digest, "bytes": archive.bytes},
+        "examples": 12, "generated": 40, "lanes": ["native", "extension", "javascript"]});
+    let metadata: BTreeMap<String, String> = [
+        ("run", "41"),
+        ("attempt", "2"),
+        ("head", COMMIT),
+        ("event", "push"),
+    ]
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .into();
+    let path = format!("{}/{}-4/41/2", &world.sdk()[7..], &world.inputs[7..]);
+    for (file, bytes, generation) in [
+        ("receipt.json", receipt.to_string().into_bytes(), "2"),
+        ("artifact.tar.gz", world.artifact.clone(), "1"),
+    ] {
+        fake.0.borrow_mut().stored.insert(
+            (
+                "exampleco-tools-links-ci".to_owned(),
+                format!("{path}/{file}"),
+            ),
+            (
+                crate::ci_results::Stored {
+                    generation: generation.into(),
+                    size: bytes.len() as u64,
+                    time_created: "2026-11-25T18:10:00.000Z".into(),
+                    metadata: metadata.clone(),
+                },
+                bytes,
+            ),
+        );
+    }
+    world
+}
+
+#[test]
+fn with_forge_oidc_a_build_never_writes_the_earlier_provenance() -> Result<()> {
+    // Records built before the switch, from the app repository's own workflow (version 1).
+    let legacy = World::new();
+    legacy.build(COMMIT, "candidate.json")?;
+    let inputs_name = format!("{}.json", &legacy.inputs[7..]);
+    let earlier_inputs = legacy
+        .object(&legacy.uri("checked-inputs", &inputs_name))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&earlier_inputs)?["ci_artifact"]["version"],
+        1
+    );
+    // With forge.oidc, a cached checked result of version 1 is kept but not reused: the artifact comes from app CI,
+    // is built again, and only the commit's candidate record is created, as version 2.
+    let world = app_ci_world();
+    let inputs_uri = world.uri("checked-inputs", &inputs_name);
+    world
+        .store
+        .0
+        .borrow_mut()
+        .objects
+        .insert(inputs_uri.clone(), (earlier_inputs.clone(), 1));
+    let (receipt, steps) = world.build(COMMIT, "candidate.json")?;
+    assert_eq!(receipt["outcome"], "built");
+    assert!(steps.contains(&"native".to_owned()) && !steps.contains(&"reuse".to_owned()));
+    assert_eq!(world.object(&inputs_uri).unwrap(), earlier_inputs);
+    let writes: Vec<String> = world
+        .store
+        .0
+        .borrow()
+        .calls
+        .iter()
+        .filter(|call| call.starts_with("write "))
+        .cloned()
+        .collect();
+    let candidate_uri = world.uri("candidates", &format!("{COMMIT}.json"));
+    assert_eq!(
+        writes,
+        [format!("write {candidate_uri} from record.json if 0")]
+    );
+    let written: Value = serde_json::from_slice(&world.object(&candidate_uri).unwrap())?;
+    assert_eq!(written["ci_artifact"]["version"], 2);
+    record::check(&written, "links", &scope())?;
+    Ok(())
+}
+
+/// As `selected_candidate`, for a build with forge.oidc: its record carries app CI's provenance, version 2.
+pub(crate) fn selected_app_ci_candidate() -> (Value, Vec<u8>) {
+    let world = app_ci_world();
+    world.build(COMMIT, "candidate.json").unwrap();
+    let bytes = fs::read(world.path("candidate.json")).unwrap();
+    (
+        record::decode(&bytes).unwrap(),
+        world.published.manifest.clone(),
+    )
+}
+
+#[test]
+fn with_forge_oidc_a_build_promotes_app_ci_s_artifact_and_records_its_provenance() -> Result<()> {
+    let world = app_ci_world();
+    let (receipt, steps) = world.build(COMMIT, "candidate.json")?;
+    // The same steps as before: instance candidate build's interface does not change.
+    assert_eq!(
+        steps,
+        [
+            "stored", "archive", "inputs", "controls", "cached", "run", "job", "artifact",
+            "download", "attempt", "release", "stage", "native", "collect", "record"
+        ]
+    );
+    assert_eq!(receipt["outcome"], "built");
+    let record: Value = serde_json::from_slice(&fs::read(world.path("candidate.json"))?)?;
+    let provenance = &record["ci_artifact"];
+    assert_eq!(provenance["version"], 2);
+    assert_eq!(provenance["run"], 41);
+    assert_eq!(provenance["attempt"], 2);
+    assert_eq!(provenance["workflow"]["repository_id"], 412);
+    assert_eq!(provenance["receipt"]["artifact_id"], ARTIFACT);
+    assert_eq!(record["artifact_id"], ARTIFACT);
+    // Deploy promotion and release reads check the record as they check any other.
+    record::check(&record, "links", &scope())?;
+    // The app repository's own workflow and its Gitea artifacts were never read.
+    assert!(
+        world
+            .fake
+            .calls()
+            .iter()
+            .all(|(url, _)| !url.contains("roc.yml") && !url.contains("/actions/artifacts/"))
+    );
+    // A record whose provenance was tampered with is refused.
+    let mut tampered = record.clone();
+    tampered["ci_artifact"]["commit"] = json!(OTHER);
+    assert!(record::check(&tampered, "links", &scope()).is_err());
     Ok(())
 }

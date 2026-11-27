@@ -75,7 +75,6 @@ pub const PULL_REQUEST: &str = "pull_request runs are verified, not stored: code
      ran could have written their artifact, so only main's push run is stored";
 const ARTIFACT: &str = "artifact.tar.gz";
 const RECEIPT: &str = "receipt.json";
-const LANES: [&str; 3] = ["native", "extension", "javascript"];
 const REQUEST_LIMIT: u64 = 65_536;
 const RESPONSE_LIMIT: u64 = 65_536;
 /// One mint request's longest wait, as the instance workflows' `--max-time`.
@@ -663,24 +662,9 @@ fn checked(output: &Path) -> Result<Checked> {
         names == [OsString::from("app.tar.gz"), OsString::from(RECEIPT)],
         "ci check's output must hold exactly app.tar.gz and receipt.json"
     );
-    let bytes = day2_assets::read_regular(&output.join(RECEIPT), REQUEST_LIMIT)?;
+    let bytes = day2_assets::read_regular(&output.join(RECEIPT), crate::ci_check::RECEIPT_LIMIT)?;
     let receipt: Receipt = day2::json::decode(&bytes).context("invalid ci check receipt")?;
-    let verification = &receipt.verification;
-    ensure!(
-        receipt.version == 1
-            && receipt.lanes == LANES
-            && instance_source::hash(&receipt.source_inputs)
-            && instance_source::lower_hex(&receipt.artifact_id, 64)
-            && instance_source::hash(&receipt.sdk_distribution.digest)
-            && receipt.sdk_distribution.bytes > 0
-            && instance_source::hash(&receipt.archive.digest)
-            && (1..=instance_source::ARTIFACT_LIMIT).contains(&receipt.archive.bytes)
-            && verification.version == 1
-            && verification.seed == crate::ci_check::SEED
-            && (4..=100).contains(&verification.cases)
-            && receipt.generated > 0,
-        "invalid ci check receipt"
-    );
+    receipt.check()?;
     ensure!(
         fs::symlink_metadata(output.join("app.tar.gz"))?.len() == receipt.archive.bytes,
         "the artifact is not the size its receipt names"

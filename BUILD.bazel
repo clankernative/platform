@@ -10,6 +10,7 @@ exports_files([
     "cli/main.roc",
     "cli/fixtures/release-receipt.json",
     "cli/fixtures/source-receipt.json",
+    "cli/fixtures/source-receipt-app-ci.json",
     "cli/fixtures/candidate-receipt.json",
     "cli/fixtures/deploy-receipt.json",
     "cli/fixtures/ci-check-report.json",

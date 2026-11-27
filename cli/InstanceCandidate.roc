@@ -1,6 +1,7 @@
 import Cli
 import Problem
 import InstanceSpec
+import InstanceSource
 import "fixtures/candidate-receipt.json" as golden_receipt : Str
 
 ## `day2 instance candidate`: the request the CLI hands the platform host, rendered from day2.json, and the receipt the
@@ -58,6 +59,7 @@ InstanceCandidate :: [].{
 				apply_identity : Str,
 				build_host : Str,
 				apps : List({ id : Str, sdk : Str, verification : U64 }),
+				app_ci : Try(InstanceSource.AppCiNames, [Null]),
 			},
 			[Null],
 		)
@@ -74,6 +76,7 @@ InstanceCandidate :: [].{
 					apply_identity: names.apply_identity,
 					build_host: names.build_host.name,
 					apps: names.apps.map(|entry| { id: entry.id, sdk: entry.sdk, verification: entry.verification }),
+					app_ci: InstanceSource.app_ci_names(names),
 				})
 			}
 			Err(Null) => Err(Null)
