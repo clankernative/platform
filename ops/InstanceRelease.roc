@@ -16,9 +16,10 @@ InstanceRelease :: [].{
 		for image in ["runtime", "tooling"] {
 			_ = Capability.call!("instance-release-image", Json.to_str({ name: image }), host!)?
 		}
-		for blob in ["native", "strict", "distribution", "operator"] {
+		for blob in ["native", "strict", "distribution"] {
 			_ = Capability.call!("instance-release-blob", Json.to_str({ name: blob }), host!)?
 		}
+		rolling_evidence!("operator", host!)?
 		Capability.call!("instance-release-manifest", "{}", host!)
 	}
 
@@ -28,11 +29,24 @@ InstanceRelease :: [].{
 	fetch! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	fetch! = |request, host!| {
 		prepare!(request, host!)?
-		for blob in ["manifest", "distribution", "native", "strict"] {
+		for blob in ["manifest", "distribution", "native"] {
 			_ = Capability.call!("instance-release-blob", Json.to_str({ name: blob }), host!)?
 		}
+		rolling_evidence!("strict", host!)?
 		Capability.call!("instance-release-operator", "{}", host!)
 	}
+}
+
+rolling_evidence! : Str, (Str => Try(Str, Str)) => Try({}, Str)
+rolling_evidence! = |previous, host!| {
+	text = Capability.call!("instance-release-blob", Json.to_str({ name: previous }), host!)?
+	result : Try({ rolling_required : Bool }, _)
+	result = Json.parse(text)
+	status = result.map_err(|_| "Invalid release evidence receipt")?
+	if status.rolling_required {
+		_ = Capability.call!("instance-release-blob", Json.to_str({ name: "rolling" }), host!)?
+	}
+	Ok({})
 }
 
 prepare! : Str, (Str => Try(Str, Str)) => Try({}, Str)

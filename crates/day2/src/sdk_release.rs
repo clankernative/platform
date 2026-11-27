@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, fs, io::Read, os::unix::fs::OpenOptionsExt, path::Path};
 
-/// The only release profile: one exclusive SQLite runtime per app. Rolling
-/// releases (`linux_sqlite_rwo_v1`) are unused and refused.
+/// The native and strict qualification baseline.
 pub const PROFILE: &str = "linux_sqlite_single_v1";
+/// That same native distribution plus a same-node RWO acceptance campaign.
+pub const ROLLING_PROFILE: &str = "linux_sqlite_rwo_v1";
 pub const TARGET: &str = "linux-x86_64";
 pub const MANIFEST_LIMIT: u64 = 65_536;
 pub const DISTRIBUTION_LIMIT: u64 = 65_536;
@@ -140,12 +141,14 @@ impl Image {
     }
 }
 
-/// The release's native qualification and its strict-admission supplement.
+/// The release's native and strict receipts plus the rolling receipt if qualified.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Evidence {
     pub native: BlobIdentity,
     pub strict: BlobIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rolling: Option<BlobIdentity>,
 }
 
 /// The release manifest an instance approves by its digest.
@@ -168,8 +171,13 @@ impl Release {
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let value: Value = crate::json::decode(bytes)?;
         ensure!(
-            value.is_object() && value["profile"] == PROFILE,
-            "unsupported qualified release profile: only {PROFILE} releases are supported"
+            value.is_object()
+                && matches!(value["profile"].as_str(), Some(PROFILE | ROLLING_PROFILE)),
+            "unsupported qualified release profile"
+        );
+        ensure!(
+            value["evidence"].get("rolling").is_some() == (value["profile"] == ROLLING_PROFILE),
+            "rolling evidence must match the qualified release profile"
         );
         let release: Self =
             serde_json::from_value(value).context("invalid qualified release fields")?;
@@ -177,11 +185,13 @@ impl Release {
         Ok(release)
     }
 
-    /// Version 1 of the one supported profile and target, at an exact platform
+    /// Version 1 of the supported profiles and target, at an exact platform
     /// commit, with digest-pinned images and blobs within their byte budgets.
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 1 && self.profile == PROFILE && self.target == TARGET,
+            self.version == 1
+                && matches!(self.profile.as_str(), PROFILE | ROLLING_PROFILE)
+                && self.target == TARGET,
             "unsupported qualified release profile"
         );
         ensure!(
@@ -198,6 +208,49 @@ impl Release {
         self.operator.check(FILE_LIMIT)?;
         self.evidence.native.check(EVIDENCE_LIMIT)?;
         self.evidence.strict.check(EVIDENCE_LIMIT)?;
+        ensure!(
+            self.evidence.rolling.is_some() == (self.profile == ROLLING_PROFILE),
+            "rolling evidence must match the qualified release profile"
+        );
+        if let Some(rolling) = &self.evidence.rolling {
+            rolling.check(EVIDENCE_LIMIT)?;
+        }
+        Ok(())
+    }
+
+    /// Bind the complete live rolling campaign to these exact artifacts.
+    pub fn bind_rolling_evidence(&self, receipt: &Value) -> Result<()> {
+        const REQUIRED: [&str; 9] = [
+            "current-authority",
+            "exact-request-resume",
+            "failed-candidate-keeps-incumbent",
+            "final-infrastructure-noop",
+            "ingress-read-write",
+            "old-forms-and-assets",
+            "released-backup-selection",
+            "retained-original-artifact-work",
+            "source-offsite-checkpoint",
+        ];
+        ensure!(
+            self.profile == ROLLING_PROFILE
+                && self.evidence.rolling.is_some()
+                && receipt["format"] == 1
+                && receipt["scope"] == ROLLING_PROFILE
+                && receipt["status"] == "passed"
+                && receipt["platform_commit"] == self.platform_commit
+                && receipt["runtime_image"] == self.runtime.image
+                && receipt["tooling_image"] == self.tooling.image
+                && receipt["operator"] == self.operator.digest
+                && receipt["native_qualification"] == self.evidence.native.digest
+                && receipt["availability_failures"].as_u64() == Some(0)
+                && receipt["checks"].as_array().is_some_and(|checks| {
+                    checks.len() == REQUIRED.len()
+                        && REQUIRED
+                            .iter()
+                            .all(|name| checks.iter().any(|check| check == *name))
+                }),
+            "rolling acceptance does not qualify this release"
+        );
         Ok(())
     }
 
@@ -454,6 +507,7 @@ mod tests {
             evidence: Evidence {
                 native: BlobIdentity::of(&raw_native),
                 strict: BlobIdentity::of(&serde_json::to_vec(&strict).unwrap()),
+                rolling: None,
             },
         };
         (release, distribution, native, strict)

@@ -43,6 +43,10 @@ impl Sdk {
     fn load(root: &Path, manifest: &BlobIdentity) -> Result<Self> {
         let release = Release::decode(&blob(root, manifest, MANIFEST_LIMIT)?)
             .context("unsupported pair SDK release")?;
+        ensure!(
+            release.profile == sdk_release::PROFILE,
+            "runtime pair index requires a native SDK release"
+        );
         let distribution: Distribution =
             day2::json::decode(&blob(root, &release.distribution, DISTRIBUTION_LIMIT)?)?;
         distribution

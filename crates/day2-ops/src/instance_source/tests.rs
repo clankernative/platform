@@ -168,6 +168,7 @@ pub(crate) fn manifest() -> Vec<u8> {
         evidence: Evidence {
             native: blob("native"),
             strict: blob("strict"),
+            rolling: None,
         },
     }
     .encode()

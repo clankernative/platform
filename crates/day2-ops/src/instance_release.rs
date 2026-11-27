@@ -24,7 +24,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use day2::sdk_release::{
     self, BlobIdentity, DISTRIBUTION_LIMIT, Distribution, EVIDENCE_LIMIT, Evidence, FILE_LIMIT,
-    Image, MANIFEST_LIMIT, OPERATOR_FILES, PROFILE, Release, TARGET,
+    Image, MANIFEST_LIMIT, OPERATOR_FILES, PROFILE, ROLLING_PROFILE, Release, TARGET,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -102,6 +102,7 @@ struct Publication {
     operator: PathBuf,
     native: PathBuf,
     strict: PathBuf,
+    rolling: Option<PathBuf>,
 }
 
 fn project(value: &str) -> bool {
@@ -684,7 +685,7 @@ impl Session {
                     publication.verified.len() == 2,
                     "both images are verified before anything is published"
                 );
-                let expected = PUBLISHED.get(publication.published).copied();
+                let expected = next_blob(&PUBLISHED, publication.published, &publication.release);
                 let Some(next) = expected.filter(|next| *next == name) else {
                     bail!(
                         "publication uploads {} next, not {name}",
@@ -701,7 +702,8 @@ impl Session {
                 )?;
                 publication.published += 1;
                 Ok(
-                    json!({"name": name, "digest": input.identity.digest, "bytes": input.identity.bytes}),
+                    json!({"name": name, "digest": input.identity.digest, "bytes": input.identity.bytes,
+                        "rolling_required": publication.release.evidence.rolling.is_some()}),
                 )
             }
             State::Fetch(fetch) => fetch.blob(name, self.tools.as_mut()),
@@ -714,7 +716,7 @@ impl Session {
             bail!("only a publication writes a manifest");
         };
         ensure!(
-            publish.published == PUBLISHED.len(),
+            publish.published == publish.inputs.len(),
             "every blob is published before the manifest"
         );
         let bytes = publish.release.encode()?;
@@ -762,13 +764,13 @@ impl Session {
         let State::Fetch(fetch) = &mut self.state else {
             bail!("only a fetch installs an operator");
         };
-        ensure!(
-            fetch.files.len() == FETCHED.len(),
-            "the manifest, distribution and evidence are verified before the operator"
-        );
         let (Some(release), Some(distribution)) = (&fetch.release, &fetch.distribution) else {
             bail!("the manifest and distribution are verified before the operator");
         };
+        ensure!(
+            fetch.files.len() == evidence_count(&FETCHED, release),
+            "the manifest, distribution and evidence are verified before the operator"
+        );
         let cli = fetch
             .cache
             .operator(release, distribution, self.tools.as_mut())?;
@@ -881,13 +883,17 @@ impl Publish {
         let bytes = read_bounded(raw, EVIDENCE_LIMIT)?;
         let value: Value = day2::json::decode(&bytes)?;
         ensure!(
-            value.is_object() && value["profile"] == PROFILE,
-            "explicit SDK release profile required: only {PROFILE} releases are published"
+            matches!(value["profile"].as_str(), Some(PROFILE | ROLLING_PROFILE)),
+            "explicit SDK release profile required"
+        );
+        ensure!(
+            value.get("rolling").is_some() == (value["profile"] == ROLLING_PROFILE),
+            "rolling evidence must match the qualified release profile"
         );
         let publication: Publication =
             serde_json::from_value(value).context("invalid release publication request")?;
         let mut inputs = BTreeMap::new();
-        for (name, path, limit) in [
+        let required = [
             ("native", &publication.native, EVIDENCE_LIMIT),
             ("strict", &publication.strict, EVIDENCE_LIMIT),
             (
@@ -896,7 +902,13 @@ impl Publish {
                 DISTRIBUTION_LIMIT,
             ),
             ("operator", &publication.operator, FILE_LIMIT),
-        ] {
+        ];
+        for (name, path, limit) in required.into_iter().chain(
+            publication
+                .rolling
+                .as_ref()
+                .map(|path| ("rolling", path, EVIDENCE_LIMIT)),
+        ) {
             let path = std::path::absolute(path)?;
             let identity = sdk_release::identity(&path, limit)
                 .with_context(|| format!("the publication's {name}"))?;
@@ -921,6 +933,7 @@ impl Publish {
             evidence: Evidence {
                 native: inputs["native"].identity.clone(),
                 strict: inputs["strict"].identity.clone(),
+                rolling: inputs.get("rolling").map(|input| input.identity.clone()),
             },
         };
         release.validate()?;
@@ -935,6 +948,9 @@ impl Publish {
         let native: Value = day2::json::decode_evidence(&read("native")?)?;
         let strict: Value = day2::json::decode_evidence(&read("strict")?)?;
         sdk_release::bind_evidence(&release, &distribution, &native, &strict)?;
+        if release.evidence.rolling.is_some() {
+            release.bind_rolling_evidence(&day2::json::decode_evidence(&read("rolling")?)?)?;
+        }
         Ok(Self {
             objects,
             release,
@@ -947,7 +963,7 @@ impl Publish {
 }
 
 /// Only `reference`'s manifest, through `cache`: decoded as the one supported
-/// profile and pinned under `registry`. A day2-app root reads it to check a
+/// profiles and pinned under `registry`. A day2-app root reads it to check a
 /// selected release's profile and native evidence; its distribution and
 /// evidence are not fetched.
 pub fn manifest(
@@ -990,6 +1006,16 @@ pub fn verified(
     for name in FETCHED {
         fetch.blob(name, tools)?;
     }
+    if fetch
+        .release
+        .as_ref()
+        .context("manifest")?
+        .evidence
+        .rolling
+        .is_some()
+    {
+        fetch.blob("rolling", tools)?;
+    }
     Ok(Verified {
         release: fetch.release.context("manifest")?,
         manifest: fetch.files.remove("manifest").context("manifest")?,
@@ -997,11 +1023,28 @@ pub fn verified(
     })
 }
 
+fn evidence_count(required: &[&str], release: &Release) -> usize {
+    required.len() + usize::from(release.evidence.rolling.is_some())
+}
+
+fn next_blob(
+    required: &[&'static str],
+    completed: usize,
+    release: &Release,
+) -> Option<&'static str> {
+    required.get(completed).copied().or_else(|| {
+        (completed == required.len() && release.evidence.rolling.is_some()).then_some("rolling")
+    })
+}
+
 impl Fetch {
     /// Each blob in `FETCHED` order: the manifest (pinned in the instance's
     /// registry), then the distribution it names, then its evidence.
     fn blob(&mut self, name: &str, tools: &mut dyn Tools) -> Result<Value> {
-        let expected = FETCHED.get(self.files.len()).copied();
+        let expected = match &self.release {
+            Some(release) => next_blob(&FETCHED, self.files.len(), release),
+            None => Some("manifest"),
+        };
         let Some(next) = expected.filter(|next| *next == name) else {
             bail!(
                 "fetch reads {} next, not {name}",
@@ -1013,6 +1056,14 @@ impl Fetch {
             ("distribution", Some(release)) => (release.distribution.clone(), DISTRIBUTION_LIMIT),
             ("native", Some(release)) => (release.evidence.native.clone(), EVIDENCE_LIMIT),
             ("strict", Some(release)) => (release.evidence.strict.clone(), EVIDENCE_LIMIT),
+            ("rolling", Some(release)) => (
+                release
+                    .evidence
+                    .rolling
+                    .clone()
+                    .context("rolling evidence")?,
+                EVIDENCE_LIMIT,
+            ),
             _ => bail!("the manifest is verified first"),
         };
         let bytes = self.cache.read(&identity, limit, tools)?;
@@ -1028,7 +1079,7 @@ impl Fetch {
                 self.distribution = Some(distribution);
             }
             "native" => self.native = Some(day2::json::decode_evidence(&bytes)?),
-            _ => {
+            "strict" => {
                 let strict: Value = day2::json::decode_evidence(&bytes)?;
                 sdk_release::bind_evidence(
                     self.release.as_ref().context("manifest")?,
@@ -1037,10 +1088,17 @@ impl Fetch {
                     &strict,
                 )?;
             }
+            "rolling" => self
+                .release
+                .as_ref()
+                .context("manifest")?
+                .bind_rolling_evidence(&day2::json::decode_evidence(&bytes)?)?,
+            _ => unreachable!("the fetch admits only its ordered blobs"),
         }
         let path = self.cache.root.join(identity.check(limit)?);
         let reported = json!({"name": name, "digest": identity.digest, "bytes": identity.bytes,
-            "path": text(&path)?});
+            "path": text(&path)?,
+            "rolling_required": self.release.as_ref().context("manifest")?.evidence.rolling.is_some()});
         self.files.insert(next, path);
         Ok(reported)
     }
@@ -1256,6 +1314,7 @@ mod tests {
             evidence: Evidence {
                 native: BlobIdentity::of(&raw_native),
                 strict: BlobIdentity::of(&serde_json::to_vec(&strict).unwrap()),
+                rolling: None,
             },
         };
         Fixture {
@@ -1709,10 +1768,9 @@ mod tests {
         }
         assert!(session.blob("strict").is_err());
         assert!(session.operator().is_err());
-        // A rolling manifest is refused.
+        // A rolling manifest cannot omit the rolling acceptance receipt.
         let mut rolling = serde_json::to_value(&fixture.release)?;
         rolling["profile"] = json!("linux_sqlite_rwo_v1");
-        rolling["evidence"]["rolling"] = json!(fixture.release.evidence.native);
         let rolling = fake.store(&serde_json::to_vec(&rolling)?);
         let mut session = fetch_session(directory.path(), &fake, &rolling)?;
         assert!(session.blob("manifest").is_err());
@@ -1835,6 +1893,73 @@ mod tests {
             session.blob(name)?;
         }
         session.manifest()
+    }
+
+    #[test]
+    fn rolling_publication_and_fetch_require_the_complete_bound_receipt() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let fake = Fake::default();
+        let fixture = fixture();
+        let release = &fixture.release;
+        let mut rolling = json!({
+            "format": 1, "scope": ROLLING_PROFILE, "status": "passed",
+            "platform_commit": release.platform_commit,
+            "runtime_image": release.runtime.image, "tooling_image": release.tooling.image,
+            "operator": release.operator.digest, "native_qualification": release.evidence.native.digest,
+            "availability_failures": 0,
+            "checks": ["ingress-read-write", "failed-candidate-keeps-incumbent",
+                "exact-request-resume", "retained-original-artifact-work", "old-forms-and-assets",
+                "current-authority", "source-offsite-checkpoint", "released-backup-selection",
+                "final-infrastructure-noop"]
+        });
+        let publication = fixture.publication(directory.path());
+        let mut supplied: Value = day2::json::decode(&fs::read(&publication)?)?;
+        let evidence_path = directory.path().join("rolling.json");
+        supplied["rolling"] = json!(evidence_path);
+        supplied["profile"] = json!(ROLLING_PROFILE);
+        fs::write(&publication, serde_json::to_vec(&supplied)?)?;
+        let request = request_file(
+            directory.path(),
+            &json!({"mode": "publish", "bucket": BUCKET, "registry": REGISTRY,
+                "publication": publication, "output": directory.path().join("manifest.json"),
+                "reference": null}),
+        );
+        let prepare = || Session::prepare(&request, Mode::Publish, Box::new(fake.clone()), None);
+        rolling["availability_failures"] = json!(1);
+        fs::write(&evidence_path, serde_json::to_vec(&rolling)?)?;
+        assert!(prepare().is_err());
+        assert!(fake.calls().is_empty());
+        rolling["availability_failures"] = json!(0);
+        fs::write(&evidence_path, serde_json::to_vec(&rolling)?)?;
+        fake.0.borrow_mut().images = BTreeMap::from([
+            (
+                release.runtime.image.clone(),
+                release.runtime.config.clone(),
+            ),
+            (
+                release.tooling.image.clone(),
+                release.tooling.config.clone(),
+            ),
+        ]);
+        let mut session = prepare()?;
+        session.image("runtime")?;
+        session.image("tooling")?;
+        assert!(session.blob("rolling").is_err());
+        for name in PUBLISHED {
+            assert_eq!(session.blob(name)?["rolling_required"], true);
+        }
+        assert!(session.manifest().is_err());
+        session.blob("rolling")?;
+        let receipt = session.manifest()?;
+        let reference = serde_json::from_value(receipt["reference"].clone())?;
+        let mut session = fetch_session(directory.path(), &fake, &reference)?;
+        for name in FETCHED {
+            assert_eq!(session.blob(name)?["rolling_required"], true);
+        }
+        assert!(session.operator().is_err());
+        session.blob("rolling")?;
+        assert_eq!(session.operator()?["profile"], ROLLING_PROFILE);
+        Ok(())
     }
 
     #[test]

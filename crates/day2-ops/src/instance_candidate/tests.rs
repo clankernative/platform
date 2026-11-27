@@ -105,6 +105,7 @@ fn published() -> Published {
         evidence: Evidence {
             native: BlobIdentity::of(&raw_native),
             strict: BlobIdentity::of(&raw_strict),
+            rolling: None,
         },
     };
     Published {
