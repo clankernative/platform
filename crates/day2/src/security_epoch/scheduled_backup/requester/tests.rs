@@ -22,6 +22,10 @@ struct Fixture {
     objects: [Value; 7],
 }
 
+pub(super) fn policy_fixture_data() -> Result<RequesterPolicy> {
+    Ok(Fixture::new()?.policy)
+}
+
 impl Fixture {
     fn new() -> Result<Self> {
         let scope = AuthorityScope {
