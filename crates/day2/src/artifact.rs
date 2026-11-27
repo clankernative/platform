@@ -335,6 +335,8 @@ pub struct Artifact {
     pub assets: day2_assets::Catalog,
     #[serde(default)]
     pub web_resources: crate::web_resources::Catalog,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prototype: Option<crate::prototype::Page>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub public_downloads: crate::public_downloads::Catalog,
     #[serde(default)]
@@ -912,6 +914,7 @@ impl LoadedArtifact {
             "legacy artifact has web resources"
         );
         crate::web_resources::validate_blobs(&directory, &contract.web_resources)?;
+        crate::prototype::validate(&contract)?;
         crate::public_downloads::validate_blobs(&directory, &contract.public_downloads)?;
         ensure!(
             contract.format >= 6 || (contract.outputs.is_empty() && contract.templates.is_empty()),

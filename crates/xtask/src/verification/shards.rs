@@ -1589,7 +1589,7 @@ mod tests {
     fn preparation_join_rejects_foreign_identity_and_incomplete_or_swapped_parts() -> Result<()> {
         let complete = combine_parts(sample_parts()?, &sample_identity())?;
         assert_eq!(complete.passed, preparation_steps()?);
-        assert_eq!(complete.fixtures.len(), 28);
+        assert_eq!(complete.fixtures.len(), 29);
         for fixture in complete.fixtures.keys() {
             let mut parts = sample_parts()?;
             let removed: usize = parts
@@ -2271,8 +2271,9 @@ mod tests {
                 .iter()
                 .filter(|step| step.starts_with("build-"))
                 .count(),
-            28
+            29
         );
+        assert!(steps.contains("build-slack-dashboard"));
         assert!(steps.contains("build-lifecycle"));
         assert!(steps.contains("build-reports-search"));
         assert!(steps.contains("build-verification-actors"));

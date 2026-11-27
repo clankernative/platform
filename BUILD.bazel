@@ -45,6 +45,8 @@ exports_files([
     "assets/icons/log-out.svg",
     "assets/icons/shield-check.svg",
     "assets/navigation.js",
+    "assets/prototype-frame.js",
+    "assets/prototype-shell.js",
     "assets/reactive-queries.js",
     "assets/startup.js",
     "assets/restore-passkey-export.js",

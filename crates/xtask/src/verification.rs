@@ -1046,6 +1046,7 @@ fn fixture_build(
     match fixture {
         "app-ownership" => FixtureBuild::plain(root, "examples/app-ownership"),
         "chart-live" => FixtureBuild::plain(root, "examples/chart-live"),
+        "slack-dashboard" => FixtureBuild::plain(root, "examples/slack-dashboard"),
         "notifications" => {
             let peer = fixtures
                 .get("app-ownership")
@@ -1315,6 +1316,10 @@ fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, St
         ("apps/app-ownership", root.join("examples/app-ownership")),
         ("apps/notifications", root.join("examples/notifications")),
         ("apps/chart-live", root.join("examples/chart-live")),
+        (
+            "apps/slack-dashboard",
+            root.join("examples/slack-dashboard"),
+        ),
     ];
     if ["verify-fast", "verify-reports", "verify"].contains(&recipe) {
         sources.push(("apps/reports", root.join("examples/reports")));
@@ -1907,6 +1912,9 @@ fn configure_tests(
             command.args(["--skip", test]);
         }
     }
+    if !fixtures.contains_key("slack-dashboard") {
+        command.args(["--skip", "prototype_http::"]);
+    }
     if !fixtures.contains_key("chart-live") {
         for test in [
             "web::presentation_delivery_tests::http_delivery_rechecks_revocation_after_render",
@@ -2036,6 +2044,7 @@ fn configure_tests(
         ("app-ownership", "DAY2_TEST_APP_OWNERSHIP_ARTIFACT"),
         ("notifications", "DAY2_TEST_NOTIFICATIONS_ARTIFACT"),
         ("chart-live", "DAY2_TEST_CHART_LIVE_ARTIFACT"),
+        ("slack-dashboard", "DAY2_TEST_SLACK_DASHBOARD_ARTIFACT"),
         (
             "connection-declaration",
             "DAY2_TEST_CONNECTION_DECLARATION_ARTIFACT",
@@ -2116,6 +2125,7 @@ fn receipt(
         let app_ownership = artifact("app-ownership")?;
         let notifications = artifact("notifications")?;
         let chart_live = artifact("chart-live")?;
+        let slack_dashboard = artifact("slack-dashboard")?;
         let baseline = artifact("relational")?;
         let lifecycle = artifact("lifecycle")?;
         let collection = artifact("collection")?;
@@ -2176,6 +2186,10 @@ fn receipt(
         let report = report
             .as_object_mut()
             .context("verification receipt object")?;
+        report.insert(
+            "slack_dashboard".into(),
+            serde_json::Value::String(artifact_id(&slack_dashboard)),
+        );
         report.insert(
             "repeated_field".into(),
             serde_json::Value::String(artifact_id(&repeated_field)),
@@ -2286,6 +2300,7 @@ fn required_steps(scope: &str) -> Result<Vec<&'static str>> {
             "build-app-ownership",
             "build-notifications",
             "build-chart-live",
+            "build-slack-dashboard",
             "browser-navigation",
             "build-redirect",
             "build-relational",
@@ -2835,6 +2850,7 @@ mod tests {
             "examples/app-ownership",
             "examples/notifications",
             "examples/chart-live",
+            "examples/slack-dashboard",
             "examples/reports",
         ] {
             fs::create_dir_all(root.join(name))?;
@@ -2869,11 +2885,14 @@ mod tests {
         fs::write(&action, b"approved input")?;
         for relative in [
             "examples/chart-live/App.roc",
+            "examples/slack-dashboard/prototype/index.html",
             "examples/chart-live/ui/app.js",
             "crates/day2/tests/navigation.test.mjs",
             "crates/day2/tests/reactive_queries.test.mjs",
             "crates/day2/tests/reactive_query_forms.test.mjs",
             "assets/reactive-queries.js",
+            "assets/prototype-frame.js",
+            "assets/prototype-shell.js",
             "crates/day2/tests/restore_passkey_export.test.mjs",
             "crates/day2/tests/protected_restore_browser.test.mjs",
             "assets/restore-passkey-export.js",
@@ -3830,6 +3849,7 @@ mod tests {
             "build-owned-probe",
             "build-repeated-field",
             "build-chart-live",
+            "build-slack-dashboard",
             "browser-navigation",
             "test-workspace-runtime",
             "test-parallel-runtime",

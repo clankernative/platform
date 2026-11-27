@@ -3,8 +3,8 @@
 An app's owners are exactly `policy.admins` in its active authority document.
 There is no separate registry, global owner role or mutable desired-file grant.
 The shared native `owners::authorize_in` guard covers `audit.read`,
-`secrets.list`, `secrets.read`, `secrets.create`, `secrets.rotate`, `secrets.delete` and
-`sqlite.download`. Audit reads and [app secret storage](APP-SECRETS.md) use this
+`secrets.list`, `secrets.read`, `secrets.create`, `secrets.rotate`, `secrets.delete`,
+`sqlite.download` and `prototype.source.download`. Audit reads and [app secret storage](APP-SECRETS.md) use this
 guard, including reveal/deletion and [business SQLite export](APP-SQLITE.md).
 
 Checks require an enabled app, current validated authority, the exact installation

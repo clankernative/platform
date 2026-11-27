@@ -27,9 +27,11 @@ pub enum Permission {
     SecretsDelete,
     #[serde(rename = "sqlite.download")]
     SqliteDownload,
+    #[serde(rename = "prototype.source.download")]
+    PrototypeSourceDownload,
 }
 
-pub const PERMISSIONS: [Permission; 7] = [
+pub const PERMISSIONS: [Permission; 8] = [
     Permission::AuditRead,
     Permission::SecretsList,
     Permission::SecretsRead,
@@ -37,6 +39,7 @@ pub const PERMISSIONS: [Permission; 7] = [
     Permission::SecretsRotate,
     Permission::SecretsDelete,
     Permission::SqliteDownload,
+    Permission::PrototypeSourceDownload,
 ];
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -62,7 +65,7 @@ pub struct Inspection {
     pub owners: BTreeSet<String>,
     pub desired_owners: BTreeSet<String>,
     pub desired_matches_active: bool,
-    pub permissions: [Permission; 7],
+    pub permissions: [Permission; PERMISSIONS.len()],
 }
 
 fn operator_instance(runtime: &Runtime, operator: &LocalOperator) -> Result<Instance> {

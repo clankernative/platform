@@ -30,6 +30,8 @@ maud = "0.27"
 url = "2.5"
 percent-encoding = "2.3"
 base64 = "0.22"
+flate2 = "=1.1.10"
+tar = { version = "=0.4.46", default-features = false }
 crc32c = "0.6"
 # Already in the lock through rustls. Named directly to verify identity
 # assertions at the edge, rather than adding a second signature library.
@@ -60,8 +62,6 @@ tonic-prost = "=0.14.6"
 tower = { version = "=0.5.3", features = ["util"] }
 
 [dev-dependencies]
-# Lossless bounded fixture evidence; use the already locked xtask codec.
-flate2 = "=1.1.10"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 # Keep in-process generators without optional subprocess or bit-set dependencies.
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
