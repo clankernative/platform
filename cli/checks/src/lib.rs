@@ -2375,13 +2375,17 @@ mod tests {
             ("instance.release.publish", "release_failed")
         );
         assert!(message.contains("request.json"), "{message}");
+        // An SDK cannot opt into the rolling profile without its acceptance receipt.
         fs::write(
             &request,
             serde_json::to_vec(&json!({"profile": "linux_sqlite_rwo_v1"})).unwrap(),
         )
         .unwrap();
         let (_, _, message) = release(&publish, 6);
-        assert!(message.contains("only linux_sqlite_single_v1"), "{message}");
+        assert!(
+            message.contains("rolling evidence must match the qualified release profile"),
+            "{message}"
+        );
         assert!(!manifest.exists());
         // A publication never overwrites a manifest file.
         fs::write(&manifest, b"reviewed").unwrap();
