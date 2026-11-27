@@ -430,3 +430,48 @@ fn canonical_bounded_data_refuses_duplicates_sequences_unknowns_and_foreign_erro
     }
     Ok(())
 }
+
+#[test]
+fn each_policy_tie_refuses_even_self_consistent_resigned_expected_data() -> Result<()> {
+    let f = Fixture::new()?;
+    f.check(&f.record)?;
+    let original = serde_json::to_value(&f.record.data)?;
+    for (key, replacement) in [
+        ("namespace_uid", serde_json::to_value(uid(99))?),
+        ("cron_job_uid", serde_json::to_value(uid(99))?),
+        ("service_account_uid", serde_json::to_value(uid(99))?),
+        ("cron_spec", serde_json::to_value(digest("wrong-selected-cron-spec"))?),
+        ("admission", serde_json::to_value(digest("wrong-selected-admission"))?),
+        ("policy", serde_json::to_value(digest("wrong-selected-policy"))?),
+    ] {
+        let mut value = original.clone();
+        value["binding"][key] = replacement.clone();
+        if key == "cron_job_uid" {
+            // Keep the event chain internally consistent. Otherwise its owner
+            // equality could mask deletion of the actual selected-policy tie.
+            value["job"]["owner_uid"] = replacement;
+        }
+        let signed = f.signed(value)?;
+        assert!(signed.verify_data(
+            &f.policy,
+            &f.certificate,
+            &signed.data.tap,
+            &signed.data.binding,
+            &signed.data.challenge,
+        ).is_err(), "{key}");
+    }
+    let mut value = original;
+    value["tap"]["cluster_incarnation"] = serde_json::to_value(digest("wrong-selected-cluster"))?;
+    let signed = f.signed(value)?;
+    assert!(signed.verify_data(
+        &f.policy,
+        &f.certificate,
+        &signed.data.tap,
+        &signed.data.binding,
+        &signed.data.challenge,
+    ).is_err());
+    // Dynamic Job/Pod identities and registry fields are intentionally not
+    // tested against a fictitious global-current registry: their independent
+    // expected values must come from the actual retained caller context.
+    Ok(())
+}

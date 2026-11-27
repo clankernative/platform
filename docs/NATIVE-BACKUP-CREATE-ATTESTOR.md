@@ -1,6 +1,6 @@
 # F fallback CREATE attestor — design, not deployment approval
 
-The user approved parallel provider clarification and fallback design on November 26. The user sends PROVIDER-CONTRACT-QUESTIONS.md; this worker does not contact Google. All source work is local or draft review. No service, endpoint, resource, IAM, audit policy, key or workload is deployed.
+The user approved parallel provider clarification and fallback design on November 26. The user sends PROVIDER-CONTRACT-QUESTIONS.md; this worker does not contact Google. All source work is local or draft review. No service, endpoint, resource, IAM, audit policy, key or workload is deployed. Parallel work means provider clarification plus this design, not runtime failover. A later reviewed configuration selects exactly one qualified origin profile for an attempt; an error, timeout, missing proof or Unknown never switches source paths or starts a new attempt/original.
 
 ## Chosen trust boundary
 
