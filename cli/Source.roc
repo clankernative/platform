@@ -33,18 +33,18 @@ Source :: { request : Cli.Describe, context : Context, view : Catalog.View }.{
 	}
 
 	load! : Cli.Describe => Try(Source, Problem)
-	load! = |request| {
-		parts = request.parts()
+	load! = |describe| {
+		parts = describe.parts()
 		match parts.source {
 			Cli.Source.Demo => {
 				if parts.app_name.to_str() != "links" {
 					return Err(Problem.AppNotFound(parts.app_name.to_str(), ["links"]))
 				}
 				catalog = Catalog.from_json(demo_artifact)?
-				view = catalog.select(parts.filter)?
-				Ok({ request, context: Demo, view })
+				selected = catalog.select(parts.filter)?
+				Ok({ request: describe, context: Demo, view: selected })
 			}
-			Cli.Source.Instance(path) => load_local!(request, path)
+			Cli.Source.Instance(path) => load_local!(describe, path)
 			Cli.Source.Environment => {
 				text = match Env.var_str!("DAY2_INSTANCE") {
 					Ok(value) => value
@@ -64,7 +64,7 @@ Source :: { request : Cli.Describe, context : Context, view : Catalog.View }.{
 									"DAY2_INSTANCE must contain a nonblank path of at most 4096 bytes",
 								),
 						)?
-				load_local!(request, path)
+				load_local!(describe, path)
 			}
 		}
 	}

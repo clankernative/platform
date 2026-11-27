@@ -19,9 +19,9 @@ Selection(a) :: {
 	deleted : Str,
 }.{
 	indexed : Model(a), Str, Str, Cursor, PageSize -> Selection(a)
-	indexed = |model, field, value, after, limit| {
-		model,
-		predicate: Predicate.define(model, field, "equal", Json.to_str(value)),
+	indexed = |source, field, value, after, limit| {
+		model: source,
+		predicate: Predicate.define(source, field, "equal", Json.to_str(value)),
 		orders: [],
 		field,
 		value,
@@ -33,8 +33,8 @@ Selection(a) :: {
 	}
 
 	all : Model(a), Cursor, PageSize -> Selection(a)
-	all = |model, after, limit| {
-		model,
+	all = |source, after, limit| {
+		model: source,
 		predicate: Predicate.all([]),
 		orders: [],
 		field: "",
@@ -47,8 +47,8 @@ Selection(a) :: {
 	}
 
 	filter : Model(a), Predicate(a) -> Selection(a)
-	filter = |model, predicate| {
-		..all(model, Cursor.start, PageSize.default),
+	filter = |source, predicate| {
+		..all(source, Cursor.start, PageSize.default),
 		predicate,
 		legacy: Bool.False,
 	}

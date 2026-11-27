@@ -6,7 +6,7 @@ import Operation
 # Inferred from App.definition.operations; only generated code may call define.
 Read(a, b) :: { key : Str, input : Input(a), output : Output(b), input_witness : List(a), output_witness : List(b) }.{
 	define : Str, Input(a), Output(b) -> Read(a, b)
-	define = |key, input, output| { key, input, output, input_witness: [], output_witness: [] }
+	define = |key, accepts, returns| { key, input: accepts, output: returns, input_witness: [], output_witness: [] }
 
 	name : Read(a, b) -> Str
 	name = |read| read.key

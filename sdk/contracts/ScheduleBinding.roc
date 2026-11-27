@@ -19,7 +19,7 @@ ScheduleBinding :: { metadata : Metadata }.{
 	}
 
 	define : Metadata -> ScheduleBinding
-	define = |metadata| { metadata: metadata }
+	define = |declared| { metadata: declared }
 
 	metadata : ScheduleBinding -> Metadata
 	metadata = |binding| binding.metadata

@@ -646,7 +646,10 @@ fn supported_formatter_pair(compiler: &str, formatter: &str) -> bool {
     compiler == formatter
         || matches!(
             (compiler, formatter),
-            ("nightly-2026-10-13-b17d287", "nightly-2026-09-12-220fd47")
+            (
+                "nightly-2026-11-24-ff5e544-safe",
+                "nightly-2026-09-12-220fd47"
+            )
         )
 }
 
@@ -901,7 +904,7 @@ mod tests {
     #[test]
     fn compiler_upgrade_retains_only_the_reviewed_formatter_pair() {
         let previous = "nightly-2026-09-12-220fd47";
-        let current = "nightly-2026-10-13-b17d287";
+        let current = "nightly-2026-11-24-ff5e544-safe";
         assert!(supported_formatter_pair(previous, previous));
         assert!(supported_formatter_pair(current, previous));
         assert!(!supported_formatter_pair(current, "unreviewed-formatter"));

@@ -4,10 +4,10 @@ import Write
 # randomness. Failures are explicit and cannot count as executed test cases.
 Generator :: { name : Str, operation : Str, generate : U64 -> Try(Str, Str) }.{
 	command : Str, Write(a, b), (U64 -> Try(a, Str)) -> Generator
-	command = |name, command, generate| {
+	command = |name, declared, generate| {
 		name,
-		operation: command.name(),
-		generate: |seed| generate(seed).map_ok(|input| command.encode_input(input)),
+		operation: declared.name(),
+		generate: |seed| generate(seed).map_ok(|input| declared.encode_input(input)),
 	}
 
 	encode : List(Generator), Str -> Str

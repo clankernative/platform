@@ -48,15 +48,17 @@ shape =
 
 	}
 
-app_shape = |_| shape
+# Glue requires a determined argument type and boxed functions in host-visible
+# values. App.definition holds handlers, so its witness record is boxed.
+app_shape = |{}| Box.box(shape)
 
 domains = SchemaSource.domains
 
-domain_shape = |_| domains
+domain_shape = |{}| domains
 
 storage = SchemaSource.storage
 
-storage_shape = |_| storage
+storage_shape = |{}| Box.box(storage)
 
 command_input : Api.CommandDef(input, output, inputs, outputs), input -> input
 command_input = |_handler, value| value

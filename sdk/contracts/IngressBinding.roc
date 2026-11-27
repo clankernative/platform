@@ -15,7 +15,7 @@ IngressBinding :: { metadata : Metadata }.{
 	}
 
 	define : Metadata -> IngressBinding
-	define = |metadata| { metadata: metadata }
+	define = |declared| { metadata: declared }
 
 	metadata : IngressBinding -> Metadata
 	metadata = |binding| binding.metadata

@@ -53,7 +53,7 @@ Cli :: [].{
 		InstanceCiWorkflow,
 	].{
 		name : Command -> Str
-		name = |command| match command {
+		name = |reported| match reported {
 			AppDescribe => "app.describe"
 			InstanceCheck => "instance.check"
 			InstanceRender => "instance.render"
@@ -125,16 +125,16 @@ Cli :: [].{
 		with_format = |request, format| { ..request, format }
 
 		## The command a response reports.
-		command : Roots -> Command
-		command = |request| match request.mode {
+		reported_command : Roots -> Command
+		reported_command = |request| match request.mode {
 			InstanceRender.Mode.Plan => Command.InstancePlan
 			# The parser never builds a deploy here: a deploy's roots run inside its own command, which reports them.
 			InstanceRender.Mode.Apply(_) | InstanceRender.Mode.Deploy => Command.InstanceApply
 		}
 
 		## The same instance, as `check` and `render` read it.
-		instance : Roots -> Instance
-		instance = |request| Instance.{ directory: request.directory, format: request.format }
+		as_instance : Roots -> Instance
+		as_instance = |request| Instance.{ directory: request.directory, format: request.format }
 	}
 
 	## An approved release manifest, named by its digest and size.
@@ -163,15 +163,15 @@ Cli :: [].{
 		fetching = |request, reference| { ..request, action: ReleaseAction.Fetch(reference) }
 
 		## The command a response reports.
-		command : Release -> Command
-		command = |request| match request.action {
+		reported_command : Release -> Command
+		reported_command = |request| match request.action {
 			ReleaseAction.Publish(_) => Command.InstanceReleasePublish
 			ReleaseAction.Fetch(_) => Command.InstanceReleaseFetch
 		}
 
 		## The same instance, as `check` and `render` read it.
-		instance : Release -> Instance
-		instance = |request| Instance.{ directory: request.directory, format: request.format }
+		as_instance : Release -> Instance
+		as_instance = |request| Instance.{ directory: request.directory, format: request.format }
 	}
 
 	## A source command and its paths. BINDING is the file holding the deploy controller's source binding for the app;
@@ -217,8 +217,8 @@ Cli :: [].{
 		}
 
 		## The command's arguments after its verb.
-		arguments : SourceAction -> List(Str)
-		arguments = |action| match action {
+		verb_arguments : SourceAction -> List(Str)
+		verb_arguments = |action| match action {
 			Head(paths) => [paths.directory.to_str(), paths.binding.to_str()]
 			Archive(paths) => [paths.directory.to_str(), paths.binding.to_str(), paths.commit, paths.output.to_str()]
 			Controls(archive) => [archive.to_str()]
@@ -241,8 +241,8 @@ Cli :: [].{
 		with_format = |request, format| { ..request, format }
 
 		## The command a response reports.
-		command : SourceRequest -> Command
-		command = |request| match request.action {
+		reported_command : SourceRequest -> Command
+		reported_command = |request| match request.action {
 			SourceAction.Head(_) => Command.InstanceSourceHead
 			SourceAction.Archive(_) => Command.InstanceSourceArchive
 			SourceAction.Controls(_) => Command.InstanceSourceControls
@@ -251,8 +251,8 @@ Cli :: [].{
 		}
 
 		## The same instance, as `check` and `render` read it; `controls` has none.
-		instance : SourceRequest -> Try(Instance, [Null])
-		instance = |request| match request.action.directory() {
+		as_instance : SourceRequest -> Try(Instance, [Null])
+		as_instance = |request| match request.action.directory() {
 			Ok(directory) => Ok(Instance.{ directory, format: request.format })
 			Err(Null) => Err(Null)
 		}
@@ -302,8 +302,8 @@ Cli :: [].{
 		}
 
 		## The command's arguments after its verb.
-		arguments : CandidateAction -> List(Str)
-		arguments = |action| match action {
+		verb_arguments : CandidateAction -> List(Str)
+		verb_arguments = |action| match action {
 			Build(paths) => [paths.directory.to_str(), paths.binding.to_str(), paths.commit, paths.output.to_str()]
 			Preflight(paths) => [paths.directory.to_str(), paths.candidate.to_str()]
 			Check(paths) => [paths.directory.to_str(), paths.app_id, paths.candidate.to_str()]
@@ -319,8 +319,8 @@ Cli :: [].{
 		with_format = |request, format| { ..request, format }
 
 		## The command a response reports.
-		command : CandidateRequest -> Command
-		command = |request| match request.action {
+		reported_command : CandidateRequest -> Command
+		reported_command = |request| match request.action {
 			CandidateAction.Build(_) => Command.InstanceCandidateBuild
 			CandidateAction.Preflight(_) => Command.InstanceCandidatePreflight
 			CandidateAction.Check(_) => Command.InstanceCandidateCheck
@@ -329,8 +329,8 @@ Cli :: [].{
 		}
 
 		## The same instance, as `check` and `render` read it; the build host's commands have none.
-		instance : CandidateRequest -> Try(Instance, [Null])
-		instance = |request| match request.action.directory() {
+		as_instance : CandidateRequest -> Try(Instance, [Null])
+		as_instance = |request| match request.action.directory() {
 			Ok(directory) => Ok(Instance.{ directory, format: request.format })
 			Err(Null) => Err(Null)
 		}
@@ -372,8 +372,8 @@ Cli :: [].{
 		with_format = |request, format| { ..request, format }
 
 		## The command's arguments after `day2 ci check`.
-		arguments : CiCheckRequest -> List(Str)
-		arguments = |request| {
+		positional_arguments : CiCheckRequest -> List(Str)
+		positional_arguments = |request| {
 			base = match request.base {
 				Ok(path) => [path.to_str()]
 				Err(Null) => []
@@ -780,9 +780,9 @@ Cli :: [].{
 					},
 				)
 			Request.Source(value) => ["day2", "instance", "source", value.parts().action.verb()]
-				.concat(value.parts().action.arguments())
+				.concat(value.parts().action.verb_arguments())
 			Request.Candidate(value) => ["day2", "instance", "candidate", value.parts().action.verb()]
-				.concat(value.parts().action.arguments())
+				.concat(value.parts().action.verb_arguments())
 			Request.Deploy(value) => [
 				"day2",
 				"instance",
@@ -798,7 +798,7 @@ Cli :: [].{
 					Err(Null) => []
 				},
 			)
-			Request.CiCheck(value) => ["day2", "ci", "check"].concat(value.arguments())
+			Request.CiCheck(value) => ["day2", "ci", "check"].concat(value.positional_arguments())
 			Request.CiFetch(value) => ["day2", "ci", "fetch", value.parts().directory.to_str()]
 			Request.CiStore(value) => ["day2", "ci", "store", value.parts().directory.to_str()]
 			Request.CiWorkflow(value) => ["day2", "instance", "ci-workflow", value.directory.to_str()]
@@ -1229,7 +1229,7 @@ expect match Cli.parse(
 	Ok(Cli.Request.Release(value)) => match value.parts().action {
 		Cli.ReleaseAction.Fetch(approved) => approved.bytes
 			== 1236
-			and value.command().name() == "instance.release.fetch"
+			and value.reported_command().name() == "instance.release.fetch"
 		_ => Bool.False
 	}
 	_ => Bool.False
@@ -1282,7 +1282,7 @@ expect match Cli.parse([
 	"new.tar.gz",
 	"--agent",
 ]) {
-	Ok(Cli.Request.Source(value)) => value.command().name()
+	Ok(Cli.Request.Source(value)) => value.reported_command().name()
 		== "instance.source.checked-artifact"
 		and Cli.Action.new("", Cli.Request.Source(value)).dto().argv
 			== [
@@ -1300,12 +1300,14 @@ expect match Cli.parse([
 	_ => Bool.False
 }
 expect match Cli.parse(["instance", "source", "controls", "source.tar.gz"]) {
-	Ok(Cli.Request.Source(value)) => value.command().name() == "instance.source.controls" and value.instance().is_err()
+	Ok(Cli.Request.Source(value)) => value.reported_command().name()
+		== "instance.source.controls"
+		and value.as_instance().is_err()
 	_ => Bool.False
 }
 expect match Cli.parse(["instance", "source", "verify-controls", ".", "binding.json", "source.tar.gz"]) {
 	Ok(Cli.Request.Source(value)) => value.parts().action.directory().is_ok()
-		and value.command().name()
+		and value.reported_command().name()
 			== "instance.source.verify-controls"
 	_ => Bool.False
 }

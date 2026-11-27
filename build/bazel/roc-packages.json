@@ -3,13 +3,13 @@
   "packages": [
     {
       "name": "basic-cli",
-      "version": "0.26.0-rc2",
-      "archive": "Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst",
-      "bytes": 23067712,
-      "sha256": "5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b",
-      "tree_sha256": "5031e75bb41e27c5eefe7c99378700980b84d64840623d107f63cf92a87f2580",
-      "files": 204,
-      "expanded_bytes": 81410950
+      "version": "0.28.1",
+      "archive": "7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst",
+      "bytes": 23779196,
+      "sha256": "aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356",
+      "tree_sha256": "9c89c580d1ad0033bd9a5cbc215cd189324360e50d66e238eafe81cca87091cd",
+      "files": 217,
+      "expanded_bytes": 89256198
     },
     {
       "name": "http",

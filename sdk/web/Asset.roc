@@ -1,6 +1,6 @@
 Asset :: { key : Str }.{
 	define : Str -> Asset
-	define = |key| { key: key }
+	define = |asset_key| { key: asset_key }
 
 	key : Asset -> Str
 	key = |asset| asset.key

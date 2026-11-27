@@ -18,15 +18,15 @@ use std::{fs, path::Path};
 const FACTORIES: &[(&str, &str)] = &[
     (
         "CredentialMetadataAccess.roc",
-        "\tdefine : Str -> CredentialMetadataAccess\n\tdefine = |family| { family: family, action: \"metadata\" }\n\n\tdefine_issue : Str -> CredentialMetadataAccess\n\tdefine_issue = |family| { family: family, action: \"issue\" }\n\n\tdefine_rotate : Str -> CredentialMetadataAccess\n\tdefine_rotate = |family| { family: family, action: \"rotate\" }\n\n\tdefine_revoke : Str -> CredentialMetadataAccess\n\tdefine_revoke = |family| { family: family, action: \"revoke\" }\n",
+        "\tdefine : Str -> CredentialMetadataAccess\n\tdefine = |credential_family| { family: credential_family, action: \"metadata\" }\n\n\tdefine_issue : Str -> CredentialMetadataAccess\n\tdefine_issue = |credential_family| { family: credential_family, action: \"issue\" }\n\n\tdefine_rotate : Str -> CredentialMetadataAccess\n\tdefine_rotate = |credential_family| { family: credential_family, action: \"rotate\" }\n\n\tdefine_revoke : Str -> CredentialMetadataAccess\n\tdefine_revoke = |credential_family| { family: credential_family, action: \"revoke\" }\n",
     ),
     (
         "Model.roc",
-        "\tdefine : Str, Str, (Str -> Try(a, Str)), (a -> Str) -> Model(a)\n\tdefine = |name, prefix, decode, encode| { name, prefix, decode, encode }\n",
+        "\tdefine : Str, Str, (Str -> Try(a, Str)), (a -> Str) -> Model(a)\n\tdefine = |model_name, prefix, decode, encoder| { name: model_name, prefix, decode, encode: encoder }\n",
     ),
     (
         "Input.roc",
-        "\tdefine : Str, (Str -> Try(a, Str)), (a -> Str) -> Input(a)\n\tdefine = |name, decoder, encoder| { name, decoder, encoder }\n",
+        "\tdefine : Str, (Str -> Try(a, Str)), (a -> Str) -> Input(a)\n\tdefine = |input_name, decoder, encoder| { name: input_name, decoder, encoder }\n",
     ),
     (
         "Output.roc",
@@ -34,11 +34,11 @@ const FACTORIES: &[(&str, &str)] = &[
     ),
     (
         "Field.roc",
-        "\tdefine : Str -> Field(a)\n\tdefine = |name| { name, witness: [] }\n",
+        "\tdefine : Str -> Field(a)\n\tdefine = |field_name| { name: field_name, witness: [] }\n",
     ),
     (
         "Asset.roc",
-        "\tdefine : Str -> Asset\n\tdefine = |key| { key: key }\n",
+        "\tdefine : Str -> Asset\n\tdefine = |asset_key| { key: asset_key }\n",
     ),
 ];
 
@@ -186,12 +186,12 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Selection.roc",
         "indexed",
-        "9b3a52cf8baa7f91cc4f90cb3c2f1b71757df07f3ebfb336014e5b0c8174b104",
+        "f7f94d4f2a181a8fb789bb6cfd4bb91798aa4ca0993da64a01d76045cf3e7287",
     ),
     (
         "Api.roc",
         "",
-        "27f2a49a659e2275ea069a0b21c2ee1246682f8cfb29f1969ae9506a5a0f5b3f",
+        "ea0510504bf2b25105bb74d32c4214ca1d8524a59d6d0bed57a397b82403abca",
     ),
     (
         "Effects.roc",
@@ -231,12 +231,12 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Write.roc",
         "define",
-        "bd082ba2d59c1e3dab2fb36434b55a166c85440371a18d6d09c1777daf3b6d4b",
+        "c6fdb87639a336fcae4d7e11eaffe9cae4b62d77a6382c6f0e434a839a38c793",
     ),
     (
         "Read.roc",
         "define",
-        "ef1221214095749f681956caa6261405ada3e94893d7b86a81dabe3d672701f7",
+        "41bfd9c9ab216f3fd575b6ee487ab01b0682461b554cb5171d379d4dc6e2a56c",
     ),
     (
         "CommandBinding.roc",
@@ -266,7 +266,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Operation.roc",
         "",
-        "60d4fdac7d8a9f6a8c6c43a8073f04c52696134536c57b3b2a972de3980aa181",
+        "f6f80b48d57038bcc229f6fc84932eb7abb2498eb76f118ce2c4b6ca673dffd7",
     ),
 ];
 
@@ -422,13 +422,13 @@ fn restrict_sealed(module: &str, source: &str) -> Result<String> {
 fn restrict_sdk(module: &str, source: &str) -> Result<String> {
     let reviewed_digest = match module {
         "CredentialMetadataAccess.roc" => {
-            "b2a17cd26b7dd4d55a07f071e287bbb99658a5d7977718555818cd86e654ff64"
+            "730b36abd6ed3e52db0fad73e2680e867b12768e7c41d8a74b21c0761336e8a7"
         }
-        "Model.roc" => "260a6b7f24ec648fe54d8488b102f155485be3ec192ea032902a2da643b482bb",
-        "Input.roc" => "983d57859994106787ef3dd02b642c8770ddd12987fc7973a32c3500e6238715",
+        "Model.roc" => "d62cf8e8eed4a7d1739793a75bb5fb8233561d52d0e5024b1e12bc5a875cdc40",
+        "Input.roc" => "66eddbe8fb29493a21cb2a2e44e09e0e92f1fd857979774f49059e3328127064",
         "Output.roc" => "d8e95f12bdb90baf693fe3de58094c9dda1afb23e5a49a15c92e077eb6cac42b",
-        "Field.roc" => "1746349c9c7333536b15e0d4b2a6f928f549083abc7232663c3d8e7a881f1823",
-        "Asset.roc" => "0799a3bd5222274c31be03edaa1b97ad358648f1838c0f5d4731b9773b2f487b",
+        "Field.roc" => "6ce7b2b532dcaf02fddd051dd015312b6a44c4de2d34ec97d4bc72c7016bec05",
+        "Asset.roc" => "69094730b08a412b7fef3d7326a1b3dc85d1107e619c89283e6cd675ad6179a5",
         _ => anyhow::bail!("unknown restricted SDK module"),
     };
     ensure!(

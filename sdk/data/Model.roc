@@ -8,7 +8,7 @@ Model(a) :: { name : Str, prefix : Str, decode : Str -> Try(a, Str), encode : a 
 	Entity(a) : { id : Ref(a), version : RowVersion, created_at : I64, value : a }
 
 	define : Str, Str, (Str -> Try(a, Str)), (a -> Str) -> Model(a)
-	define = |name, prefix, decode, encode| { name, prefix, decode, encode }
+	define = |model_name, prefix, decode, encoder| { name: model_name, prefix, decode, encode: encoder }
 
 	name : Model(a) -> Str
 	name = |model| model.name

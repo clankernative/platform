@@ -182,24 +182,24 @@ jobs:
       - run: build-out/bin/xtask source-check
       - run: build-out/bin/xtask notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
-      - name: Download pinned roc_nightly-macos_apple_silicon-2026-10-13-b17d287.tar.gz
+      - name: Download pinned roc_nightly-macos_apple_silicon-2026-11-24-ff5e544-safe.tar.gz
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/nightlies
-          tag: nightly-2026-10-13-b17d287
-          asset: roc_nightly-macos_apple_silicon-2026-10-13-b17d287.tar.gz
-          sha256: 2a3ccaa478e3ac0557c88bb880fec4381103dbd2ee586f30ac17b22d9c3be6f1
-          path: .cache/day2-release/2a3ccaa478e3ac0557c88bb880fec4381103dbd2ee586f30ac17b22d9c3be6f1
-      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          tag: nightly-2026-11-24-ff5e544-safe
+          asset: roc_nightly-macos_apple_silicon-2026-11-24-ff5e544-safe.tar.gz
+          sha256: ac429f001215a1ccf4149015287614abc9e872ce048c7fcc6a450d97eb1339c5
+          path: .cache/day2-release/ac429f001215a1ccf4149015287614abc9e872ce048c7fcc6a450d97eb1339c5
+      - name: Download pinned 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/basic-cli
-          tag: 0.26.0-rc2
-          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
-          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
-          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          tag: 0.28.1
+          asset: 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
+          sha256: aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
+          path: .cache/day2-release/aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
       - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release

@@ -1,9 +1,9 @@
 {
-  "roc_version": "nightly-2026-10-13-b17d287",
-  "roc_binary_sha256": "cc8c9f51444a7e7a9b60301045d2e092d250c7682f4b74eafd7812399b80d149",
-  "roc_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-10-13-b17d287/roc_nightly-linux_arm64-2026-10-13-b17d287.tar.gz",
-  "roc_archive_sha256": "44208d5598ec53cd23d4194bbbd63ac47e69293d5193acc318f816346b218030",
-  "roc_source_archive_sha256": "b8d4cfe189e68e7c92a8a19e747f5f4239d5856afb9cb7aa9218ecefc279e986",
+  "roc_version": "nightly-2026-11-24-ff5e544-safe",
+  "roc_binary_sha256": "4bc923470cf516ab6d32b66779dd3392c9d6ef327b3a24b34844057c46b930a8",
+  "roc_archive": "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-11-24-ff5e544-safe/roc_nightly-linux_arm64-2026-11-24-ff5e544-safe.tar.gz",
+  "roc_archive_sha256": "cdde1e3bfccf26c55216cfc58b5c5aa3aa6deea52568e598784955b913a9da5a",
+  "roc_source_archive_sha256": "9b262a21d9e7cc0c67e27f4c2519f2982aa1a89943aa83dd00105736200fcd15",
   "rust_version": "1.100.0",
   "host_target": "aarch64-unknown-linux-gnu"
 }

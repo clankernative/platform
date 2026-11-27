@@ -24,8 +24,10 @@ schema_shape = SchemaSource.schema
 
 domains = SchemaSource.domains
 
-domain_shape = |_| domains
+domain_shape = |{}| domains
 
 storage = SchemaSource.storage
 
-storage_shape = |_| storage
+# Glue requires a determined argument type and boxed functions in host-visible
+# values. The witness record holds functions, so it is returned in a Box.
+storage_shape = |{}| Box.box(storage)

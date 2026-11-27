@@ -1,18 +1,17 @@
 # Upstream Code
 
 RustGlue.roc originates from src/glue/src/RustGlue.roc in the pinned Roc source
-archive nightly-2026-10-13-b17d287. Its license is preserved in ROC-LICENSE (UPL
+archive nightly-2026-11-24-ff5e544. The pinned `-safe` compiler release is built
+from the same commit and publishes no separate source archive. Its license is preserved in ROC-LICENSE (UPL
 1.0). The archive checksum and compiler pin are in ../toolchain.json.
 
-Local change: explicit unsafe blocks around generated raw-pointer operations in
-unsafe functions, for Rust 2024's unsafe_op_in_unsafe_fn checking. The same four
-reviewed allocation/capture-pointer patch hunks are applied to October 13's
-upstream generator. No local layout or calling-convention changes were made;
-upstream ABI updates are retained verbatim.
+The November 24 upstream generator includes explicit unsafe blocks for all four
+allocation and capture-pointer sites previously patched locally for Rust 2024.
+RustGlue.roc now matches the upstream source byte for byte.
 
 RustGlueSep5.roc retains the exact prior September 5 generator, including those
 same four Rust 2024 safety hunks. The native compiler catalog selects RustGlue.roc
-for official October 13 on every supported target, and RustGlueSep5.roc only for
+for official November 24 on every supported target, and RustGlueSep5.roc only for
 the reviewed historical macOS backport. Both generator files are included in
 platform source fingerprints. Linux target execution is qualified by its own CI
 lane; downloading and checking its compiler bytes is not runtime qualification.

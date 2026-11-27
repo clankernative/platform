@@ -157,24 +157,24 @@ jobs:
           path: ~/.cache/bazel-disk
           key: ${{ steps.bazel_actions.outputs.cache-primary-key }}
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+      - name: Download pinned roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/nightlies
-          tag: nightly-2026-10-13-b17d287
-          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
-          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          tag: nightly-2026-11-24-ff5e544-safe
+          asset: roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
+          sha256: 1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+          path: .cache/day2-release/1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+      - name: Download pinned 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/basic-cli
-          tag: 0.26.0-rc2
-          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
-          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
-          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          tag: 0.28.1
+          asset: 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
+          sha256: aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
+          path: .cache/day2-release/aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
       - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
@@ -404,24 +404,24 @@ jobs:
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
-      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+      - name: Download pinned roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/nightlies
-          tag: nightly-2026-10-13-b17d287
-          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
-          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          tag: nightly-2026-11-24-ff5e544-safe
+          asset: roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
+          sha256: 1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+          path: .cache/day2-release/1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+      - name: Download pinned 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/basic-cli
-          tag: 0.26.0-rc2
-          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
-          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
-          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          tag: 0.28.1
+          asset: 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
+          sha256: aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
+          path: .cache/day2-release/aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
       - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
@@ -879,26 +879,26 @@ jobs:
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
-      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+      - name: Download pinned roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/nightlies
-          tag: nightly-2026-10-13-b17d287
-          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
-          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          tag: nightly-2026-11-24-ff5e544-safe
+          asset: roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
+          sha256: 1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+          path: .cache/day2-release/1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+      - name: Download pinned 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/basic-cli
-          tag: 0.26.0-rc2
-          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
-          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
-          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          tag: 0.28.1
+          asset: 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
+          sha256: aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
+          path: .cache/day2-release/aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
       - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         timeout-minutes: 2
@@ -1220,26 +1220,26 @@ jobs:
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
-      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+      - name: Download pinned roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/nightlies
-          tag: nightly-2026-10-13-b17d287
-          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
-          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          tag: nightly-2026-11-24-ff5e544-safe
+          asset: roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
+          sha256: 1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+          path: .cache/day2-release/1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+      - name: Download pinned 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/basic-cli
-          tag: 0.26.0-rc2
-          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
-          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
-          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          tag: 0.28.1
+          asset: 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
+          sha256: aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
+          path: .cache/day2-release/aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
       - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         timeout-minutes: 2
@@ -1663,26 +1663,26 @@ jobs:
         with:
           path: /__w/${{ github.event.repository.name }}/.toolchains
           key: day2-native-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.json', 'toolchains/**', 'tools/**', 'crates/xtask/src/native_toolchain.rs', 'crates/xtask/src/main.rs', 'crates/xtask/src/formatting.rs', 'crates/xtask/src/formatter_bootstrap.rs') }}
-      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+      - name: Download pinned roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/nightlies
-          tag: nightly-2026-10-13-b17d287
-          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
-          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          tag: nightly-2026-11-24-ff5e544-safe
+          asset: roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
+          sha256: 1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+          path: .cache/day2-release/1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+      - name: Download pinned 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/basic-cli
-          tag: 0.26.0-rc2
-          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
-          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
-          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          tag: 0.28.1
+          asset: 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
+          sha256: aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
+          path: .cache/day2-release/aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
       - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
         if: ${{ steps.native_tools.outputs.cache-hit != 'true' }}
         timeout-minutes: 2
@@ -1924,24 +1924,24 @@ jobs:
       - run: build-out/bin/xtask source-check
       - run: build-out/bin/xtask notices
       - run: git diff --exit-code -- THIRD-PARTY-NOTICES.txt dependency-inventory.json
-      - name: Download pinned roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
+      - name: Download pinned roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/nightlies
-          tag: nightly-2026-10-13-b17d287
-          asset: roc_nightly-linux_x86_64-2026-10-13-b17d287.tar.gz
-          sha256: 3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-          path: .cache/day2-release/3b613b155be6ea04c9a1ae4e315fb4cf911e2d0b7096708d07ef147647da578b
-      - name: Download pinned Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
+          tag: nightly-2026-11-24-ff5e544-safe
+          asset: roc_nightly-linux_x86_64-2026-11-24-ff5e544-safe.tar.gz
+          sha256: 1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+          path: .cache/day2-release/1a4ca2b8a6f2e65377bcc4b73d14358cb76f416ab7ab1d74de63c1f8b0c3a7b3
+      - name: Download pinned 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release
         with:
           repository: roc-lang/basic-cli
-          tag: 0.26.0-rc2
-          asset: Gj3zVDr3qrQa6aTh7Z1zgUfe9NeBE6R76T5ho3xrc8af.tar.zst
-          sha256: 5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
-          path: .cache/day2-release/5778e6dc0354d5e7fb5b0725eff8e04da3c8d656049c63b43e3cc275ebefaf8b
+          tag: 0.28.1
+          asset: 7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst
+          sha256: aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
+          path: .cache/day2-release/aabb4b24baca04f86607b644be9f4ec8ff373de131b9aea909e2ec722e908356
       - name: Download pinned 6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst
         timeout-minutes: 2
         uses: ./.github/actions/pinned-release

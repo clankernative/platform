@@ -34,7 +34,7 @@ Api :: [].{
 
 	ModelField(model) :: { name : Str, witness : List(model) }.{
 		name : ModelField(model) -> Str
-		name = |field| field.name
+		name = |model_field| model_field.name
 	}
 
 	FollowUp : { target : Target, when : Str }
@@ -784,10 +784,11 @@ Api :: [].{
 	}
 
 	read : Read(a, b) -> Target
-	read = |read| { operation: read.name(), input_type: read.input().name(), output_type: read.output().name() }
+	read = |handle| { operation: handle.name(), input_type: handle.input().name(), output_type: handle.output().name() }
 
 	write : Write(a, b) -> Target
-	write = |write| { operation: write.name(), input_type: write.input().name(), output_type: write.output().name() }
+	write =
+		|handle| { operation: handle.name(), input_type: handle.input().name(), output_type: handle.output().name() }
 
 	create : Model(a) -> Effect
 	create = |model| { kind: "create", model: model.name(), fields: [], command: "" }
