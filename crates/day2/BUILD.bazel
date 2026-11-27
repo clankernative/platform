@@ -65,6 +65,7 @@ COMPILE_INPUTS = [
     "//:ops/InstanceSource.roc",
     "//:ops/InstanceCandidate.roc",
     "//:ops/InstanceDeploy.roc",
+    "//:ops/InstanceSelection.roc",
     "//:ops/InstanceRoots.roc",
     "//:ops/Linux.roc",
     "//:ops/RuntimeImage.roc",

@@ -8,6 +8,7 @@ package
 		InstanceSource,
 		InstanceCandidate,
 		InstanceDeploy,
+		InstanceSelection,
 		InstanceCiWorkflow,
 		Build,
 		Delegation,

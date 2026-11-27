@@ -11,6 +11,7 @@ pub mod instance_candidate;
 pub mod instance_deploy;
 pub mod instance_release;
 pub mod instance_roots;
+pub mod instance_selection;
 pub mod instance_source;
 pub mod local_dev;
 pub mod maintenance;

@@ -1222,6 +1222,21 @@ the same.
   Python controller wrote them; it must accept version 2 proofs before
   `forge.oidc` is set, or move into the platform first.
 
+## Selection
+
+`day2 instance selection DIRECTORY APP [--agent]` reads the durable
+single-replica release selection for an app declared in `day2.json`. Run it
+with read access to the instance's private state bucket. It reports
+`unreleased` if the object is absent. An existing selection is read at its
+exact generation, and the command checks the saved candidate's app, forge,
+artifact and provenance using the same validator as `instance candidate check`.
+
+For an activating selection, the command also reads the saved
+`blocked-activation` record. A matching commit and image mean that recovery
+requires explicit approval of the selected commit. Malformed records and
+failed reads fail the command. The command writes no state and makes no
+promotion decision.
+
 ## Roadmap
 
 1. **Spec and derivation (done).** `day2.json`, its exact parser and
@@ -1239,7 +1254,8 @@ the same.
    checking deployment candidates with `day2 instance candidate`; slice 4a,
    planning and applying each app's day2-app root with its release inputs, and
    the deploy mode a deploy runs it in; slice 4b, deploying one selected
-   non-rolling candidate with `day2 instance deploy`).** Deployment, promotion, webhook and
+   non-rolling candidate with `day2 instance deploy`; slice 5 started with
+   checked release selection and recovery reads).** Deployment, promotion, webhook and
    artifact provenance logic moves from instance repositories into `ops/*.roc` recipes
    with narrow Rust capabilities. Instance workflows become rendered shims that
    call `day2 instance plan` and `day2 instance apply`; any edit to a shim fails

@@ -19,6 +19,7 @@ import InstanceRelease
 import InstanceSource
 import InstanceCandidate
 import InstanceDeploy
+import InstanceSelection
 import InstanceCiWorkflow
 import CiCheck
 import CiFetch
@@ -80,6 +81,7 @@ main! = |args| {
 		Cli.Request.Source(source) => sourced!(source)
 		Cli.Request.Candidate(candidate) => candidated!(candidate)
 		Cli.Request.Deploy(deploy) => deployed!(deploy)
+		Cli.Request.Selection(selection) => selected!(selection)
 		Cli.Request.CiCheck(check) => ci_checked!(check)
 		Cli.Request.CiFetch(run) => ci_fetched!(run)
 		Cli.Request.CiStore(run) => ci_stored!(run)
@@ -278,6 +280,26 @@ deployed! = |deploy| {
 		}
 		Err(CallbackErr(error)) => failed(InstanceDeploy.problem(error))
 		Err(_) => failed(Problem.DeployFailed("cannot use a private temporary directory"))
+	}
+}
+
+selected! : Cli.Selection => Output.Outcome
+selected! = |selection| {
+	failed = |problem| Output.Outcome.Failed(problem, selection.format, Cli.Command.InstanceSelection)
+	(path, spec) = match InstanceSpec.load!(selection.directory) {
+		Ok(found) => found
+		Err(problem) => return failed(problem)
+	}
+	request = match InstanceSelection.request(spec, selection.app_id) {
+		Ok(value) => value
+		Err(problem) => return failed(problem)
+	}
+	match Host.instance_selection!(request) {
+		Ok(raw) => match InstanceSelection.receipt(raw, selection.app_id) {
+			Ok(value) => Output.Outcome.Selected(selection, path, value)
+			Err(_) => failed(Problem.SelectionFailed("the platform host returned an unreadable selection receipt"))
+		}
+		Err(error) => failed(Problem.SelectionFailed(error))
 	}
 }
 
