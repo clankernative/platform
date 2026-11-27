@@ -94,3 +94,28 @@ public creator nonces and released only by consuming Known after every creator
 post; it proves neither the receiver's later persistence nor a fresh role/source.
 Positive recovery remains closed pending that complete proof and qualified
 nonrollback history. This codec has no runtime/native accepting caller.
+
+## Native creator (not installed)
+
+The fixed creator borrows the actual active Controller's physical, retained
+counter and lineage owners on the same ordinary five-second Current original.
+The checked enrollment policy selects only the configured Scope/CronJob. The
+current volume must already be Admitted; full bootstrap admission and the warm
+full-durability refusal are unchanged. No second provider acquisition, admin
+read relabeling or new role is used for pending metadata.
+
+The whole parent stays live through the fixed private directory/header creation,
+file and directory sync/readback, immutable external create, a strong post-read
+of the actual lineage, counter completion and consuming physical completion.
+Only infallible continuity moves follow the final post. An ephemeral private
+whole-parent seal binds the lower write to its exact actual counter, stage and
+pending resources. The ordinary counter read port still refuses writes.
+
+This first create is bracketing, not an atomic assertion of current writer at
+provider commit. A concurrent lineage change may leave an obsolete pending or
+orphan row; it cannot produce Known or ever be adopted. Known is continuity of
+this actual completed creator, not source/capture authority or a statement that
+the writer was current at the instant of commit. Positive reboot/recovery stays
+closed, and no row/file/marker supplies a constructor. Runtime installation,
+protected CREATE provenance, native execution and five-second fitness remain
+unqualified. No scheduling or deployment is enabled.

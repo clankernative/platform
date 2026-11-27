@@ -110,6 +110,11 @@
       "fingerprint": "sha256:402680cea4de59bf18c1e3bc5b5feb3ee3fe8e4578bb344899563cbdb64e2236"
     },
     {
+      "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+      "scope": "const",
+      "fingerprint": "sha256:17bf5635e4de876273b4829b99b69d11ec1c99562096a8fe3cef39c12bd4bb5c"
+    },
+    {
       "source": "crates/day2/src/security_epoch/credential_material.rs",
       "scope": "const",
       "fingerprint": "sha256:10d5afa272f4b447e9b29d5e934ea00fc853003d091eaf134498827b5ab66491",
@@ -264,6 +269,11 @@
       "fingerprint": "sha256:c7702966aa32edf55e27b64e9a08d786e0648629971df1f9cf3fdb1918d68c4b"
     },
     {
+      "source": "crates/day2/src/security_epoch/scheduled_backup/journal/root_files.rs",
+      "scope": "const",
+      "fingerprint": "sha256:992ebcffd39571d3b058d99b50063d4641863aec1a7e51b4a88518e4312def5d"
+    },
+    {
       "source": "crates/day2/src/security_epoch/serving/restored.rs",
       "scope": "const",
       "fingerprint": "sha256:bcf5b9bdca66b29026bd50432577116ad52af0bed977c697b5fee3465b17bb0d",
@@ -291,6 +301,11 @@
       "scope": "const",
       "fingerprint": "sha256:1a70081f74da0e1d2884201da14b711c7f8b4f059e51e5309398ba4b06305870",
       "registration": null
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+      "scope": "const",
+      "fingerprint": "sha256:835d11dd03d1f9471bc6532024a73a302f1de7bf564bce1ca220af210a070879"
     },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation/continuity.rs",
@@ -3041,6 +3056,7 @@
         "pub (in crate :: security_epoch) fn check_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , observation : & mut EpochObservation) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_restored_observation (& mut self , stage : & mut EnrolledRoleStage < '_ > , names : & firestore :: RestoreWriterPeerRead , observation : & mut RestoredEpochObservation) -> Result < () >",
         "pub (in crate :: security_epoch) fn confirm_restore_reservation (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & firestore :: RestoreConfirmationNames) -> Result < crate :: security_epoch :: kernel :: Snapshot >",
+        "pub (in crate :: security_epoch) fn create_scheduled_backup_root (& mut self , stage : & mut EnrolledRoleStage < '_ > , pending : & mut crate :: security_epoch :: storage_authority :: PendingBackupRoot , permit : crate :: security_epoch :: bootstrap :: RootBirthWritePermit < '_ , '_ , '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_restored (mut self , stage : & mut EnrolledRoleStage < '_ > , names : & firestore :: RestoreWriterPeerRead , mut observation : RestoredEpochObservation) -> Result < CompletedRestoredCounterRead >",
         "fn post (& mut self , stage : & mut EnrolledRoleStage < '_ > , url : & str , body : & [u8] , budget : & mut Budget , max_bytes : usize) -> Result < EpochReply >",
@@ -3083,6 +3099,10 @@
         {
           "owner": "CounterRequest < '_ >",
           "signature": "pub (in crate :: security_epoch) fn confirm_restore_reservation (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & firestore :: RestoreConfirmationNames) -> Result < crate :: security_epoch :: kernel :: Snapshot >"
+        },
+        {
+          "owner": "CounterRequest < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn create_scheduled_backup_root (& mut self , stage : & mut EnrolledRoleStage < '_ > , pending : & mut crate :: security_epoch :: storage_authority :: PendingBackupRoot , permit : crate :: security_epoch :: bootstrap :: RootBirthWritePermit < '_ , '_ , '_ >) -> Result < () >"
         },
         {
           "owner": "CounterRequest < '_ >",
@@ -3561,6 +3581,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/protected_operator.rs",
             "module": "controller"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "scheduled_backup"
+          }
         }
       ],
       "methods": [
@@ -3685,6 +3712,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/protected_operator.rs",
             "module": "controller"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "scheduled_backup"
+          }
         }
       ],
       "methods": [
@@ -3692,6 +3726,7 @@
         "pub (in crate :: security_epoch) fn begin_accepting_admin_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , stage : EnrolledRoleStage < 'role > , operation : & Digest , principals : [& str ; 2] , trace : & 'storage ServingTiming) -> Result < Option < ControllerAdminReader < 'metadata , 'storage , 'role > > >",
         "pub (in crate :: security_epoch) fn begin_admin_read < 'storage , 'role > (& 'storage mut self , stage : EnrolledRoleStage < 'role > , operation : & Digest , trace : & 'storage ServingTiming) -> Result < ControllerAdminReadLoan < 'storage , 'role > >",
         "pub (in crate :: security_epoch) fn begin_restore_execution_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , mut stage : EnrolledRoleStage < 'role > , record : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , trace : & 'storage ServingTiming) -> Result < Option < RestoreExecutionReader < 'metadata , 'storage , 'role > > >",
+        "pub (in crate :: security_epoch) fn begin_scheduled_root_birth < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < PendingScheduledRootBirth < 'storage , 'role > >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn serve_app_current (& mut self , stage : EnrolledRoleStage < '_ > , trace : & ServingTiming) -> Result < ServingObservation >",
         "pub (in crate :: security_epoch) fn serve_shell_current (& mut self , mut stage : EnrolledRoleStage < '_ > , peer : & mut crate :: security_epoch :: native_enrollment :: ControllerServingPeer) -> Result < ServingObservation >"
@@ -3726,6 +3761,10 @@
         {
           "owner": "ActiveControllerStorageContinuity",
           "signature": "pub (in crate :: security_epoch) fn begin_restore_execution_reader < 'metadata , 'storage , 'role > (& 'storage mut self , metadata : & 'metadata crate :: store :: InitialStoreMetadata , mut stage : EnrolledRoleStage < 'role > , record : & crate :: security_epoch :: restore_approval :: signed :: SignedApprovalRecord , operation : & Digest , trace : & 'storage ServingTiming) -> Result < Option < RestoreExecutionReader < 'metadata , 'storage , 'role > > >"
+        },
+        {
+          "owner": "ActiveControllerStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_scheduled_root_birth < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < PendingScheduledRootBirth < 'storage , 'role > >"
         },
         {
           "owner": "ActiveControllerStorageContinuity",
@@ -3832,6 +3871,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/protected_operator.rs",
             "module": "controller"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "scheduled_backup"
           }
         }
       ],
@@ -4003,6 +4049,13 @@
             "source": "crates/day2/src/security_epoch/bootstrap/protected_operator.rs",
             "module": "controller"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "scheduled_backup"
+          }
         }
       ],
       "methods": [
@@ -4112,6 +4165,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/protected_operator.rs",
             "module": "controller"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "scheduled_backup"
           }
         }
       ],
@@ -4228,6 +4288,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/bootstrap/protected_operator.rs",
             "module": "controller"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/bootstrap.rs",
+            "module": "scheduled_backup"
           }
         }
       ],
@@ -7314,6 +7381,81 @@
       "proof_uses": []
     },
     {
+      "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+      "type_name": "KnownScheduledBackupRoot",
+      "owning_children": [],
+      "methods": [],
+      "factories": [
+        {
+          "owner": "PendingScheduledRootBirth < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn create_known (mut self) -> Result < KnownScheduledBackupRoot >"
+        }
+      ],
+      "material_uses": [],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+      "type_name": "PendingScheduledRootBirth",
+      "owning_children": [],
+      "methods": [
+        "fn check (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn create_known (mut self) -> Result < KnownScheduledBackupRoot >",
+        "fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "ActiveControllerStorageContinuity",
+          "signature": "pub (in crate :: security_epoch) fn begin_scheduled_root_birth < 'storage , 'role > (& 'storage mut self , mut stage : EnrolledRoleStage < 'role >) -> Result < PendingScheduledRootBirth < 'storage , 'role > >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingScheduledRootBirth < '_ , '_ >",
+          "signature": "fn check (& mut self) -> Result < () >"
+        },
+        {
+          "owner": "PendingScheduledRootBirth < '_ , '_ >",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "PendingScheduledRootBirth < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn create_known (mut self) -> Result < KnownScheduledBackupRoot >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": [
+        "create_known"
+      ],
+      "destructor": "sha256:1a63188fea2fc524a2f8dbe1fcf65477eac51c810e6c0da8c589aaca73335700"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/bootstrap/scheduled_backup.rs",
+      "type_name": "RootBirthWritePermit",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn require_actual (& self , reads : & CounterRequest < '_ > , stage : & EnrolledRoleStage < '_ > , pending : & PendingBackupRoot) -> Result < () >"
+      ],
+      "factories": [
+        {
+          "owner": "PendingScheduledRootBirth < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn create_known (mut self) -> Result < KnownScheduledBackupRoot >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "RootBirthWritePermit < '_ , '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn require_actual (& self , reads : & CounterRequest < '_ > , stage : & EnrolledRoleStage < '_ > , pending : & PendingBackupRoot) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
       "source": "crates/day2/src/security_epoch/control_slot_io.rs",
       "type_name": "KnownClaim",
       "owning_children": [],
@@ -9691,6 +9833,7 @@
         "pub (in crate :: security_epoch) fn narrow_storage_metadata_observation_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >",
         "fn require_storage_authentication_purpose (& mut self) -> Result < () >",
         "fn require_storage_peer_purpose (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch) fn scheduled_backup_root_selection (& mut self) -> Result < crate :: security_epoch :: scheduled_backup :: requester :: RequesterPolicy >",
         "pub (in crate :: security_epoch :: native_enrollment) fn sign_storage_message (& mut self , body : Body) -> Result < Message >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_code (& mut self) -> Result < Digest >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_role (& mut self) -> Result < NativeRole >",
@@ -9799,6 +9942,10 @@
         {
           "owner": "EnrolledStorageStage < '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn narrow_storage_metadata_observation_io_acquisition (& mut self , max_lease_seconds : u32) -> Result < NativeAcquisition >"
+        },
+        {
+          "owner": "EnrolledStorageStage < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch) fn scheduled_backup_root_selection (& mut self) -> Result < crate :: security_epoch :: scheduled_backup :: requester :: RequesterPolicy >"
         },
         {
           "owner": "FrozenRoleIssuer",
@@ -21539,6 +21686,40 @@
       "proof_uses": []
     },
     {
+      "source": "crates/day2/src/security_epoch/scheduled_backup/journal/root_files.rs",
+      "type_name": "PendingRootFiles",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn birth_turn_data (& self , selection : & EpochStore) -> Result < super :: birth :: BirthTurn >",
+        "pub (in crate :: security_epoch) fn check_pending (& mut self) -> Result < () >",
+        "fn create_binding (parent : & File , binding : RootBindingData) -> Result < Self >",
+        "pub (in crate :: security_epoch) fn create_pending (parent : & File , policy : & RequesterPolicy , physical_disk : Digest , creator_nonce : Digest) -> Result < Self >"
+      ],
+      "factories": [
+        {
+          "owner": "PendingRootFiles",
+          "signature": "fn create_binding (parent : & File , binding : RootBindingData) -> Result < Self >"
+        },
+        {
+          "owner": "PendingRootFiles",
+          "signature": "pub (in crate :: security_epoch) fn create_pending (parent : & File , policy : & RequesterPolicy , physical_disk : Digest , creator_nonce : Digest) -> Result < Self >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingRootFiles",
+          "signature": "pub (in crate :: security_epoch) fn birth_turn_data (& self , selection : & EpochStore) -> Result < super :: birth :: BirthTurn >"
+        },
+        {
+          "owner": "PendingRootFiles",
+          "signature": "pub (in crate :: security_epoch) fn check_pending (& mut self) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
+    },
+    {
       "source": "crates/day2/src/security_epoch/serving.rs",
       "type_name": "CurrentShellServingPhase",
       "owning_children": [
@@ -21878,6 +22059,13 @@
           }
         },
         {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
+          }
+        },
+        {
           "source": "crates/day2/src/security_epoch/storage_authority/persistent_disk.rs",
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority.rs",
@@ -22162,10 +22350,12 @@
         "pub (in crate :: security_epoch) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_admin_database (& mut self , db : & rusqlite :: Connection) -> Result < () >",
         "pub (in crate :: security_epoch) fn check_opened_admin_database (& mut self , db : & rusqlite :: Connection) -> Result < () >",
+        "pub (in crate :: security_epoch) fn check_scheduled_backup_root (& mut self , pending : & mut super :: PendingBackupRoot) -> Result < () >",
         "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (in crate :: security_epoch) fn finish_app_known (mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn finish_controller_known (mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stop : & crate :: security_epoch :: kernel :: restore :: StopSelection) -> Result < crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer >",
+        "pub (in crate :: security_epoch) fn prepare_scheduled_backup_root (& mut self) -> Result < super :: PendingBackupRoot >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
         "pub (in crate :: security_epoch) fn release_restore_stop (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >",
         "pub (in crate :: security_epoch) fn require_restore_stopped (& mut self , stopped : & crate :: security_epoch :: native_enrollment :: AuthorityStopData) -> Result < () >",
@@ -22236,6 +22426,10 @@
         },
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn check_scheduled_backup_root (& mut self , pending : & mut super :: PendingBackupRoot) -> Result < () >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
         },
         {
@@ -22249,6 +22443,10 @@
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch) fn freeze_restore_issuer (& mut self , stop : & crate :: security_epoch :: kernel :: restore :: StopSelection) -> Result < crate :: security_epoch :: native_enrollment :: FrozenRoleIssuer >"
+        },
+        {
+          "owner": "CurrentControllerStoragePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch) fn prepare_scheduled_backup_root (& mut self) -> Result < super :: PendingBackupRoot >"
         },
         {
           "owner": "CurrentControllerStoragePhase < '_ , 'role >",
@@ -22440,6 +22638,13 @@
             "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
             "module": "restore_approval"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
+          }
         }
       ],
       "methods": [
@@ -22451,8 +22656,10 @@
         "pub (super) fn check_authentication (& mut self , reads : & mut ControllerEpochReads) -> Result < () >",
         "pub (super) fn check_directory (& mut self , directory : & File , identity : & DirectoryIdentity) -> Result < () >",
         "pub (super) fn check_durability_profile (& mut self) -> Result < () >",
+        "pub (in crate :: security_epoch :: storage_authority) fn check_scheduled_backup_root (& mut self , directory : & File , anchor : & DirectoryIdentity , pending : & mut PendingBackupRoot) -> Result < () >",
         "pub (super) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (super) fn controller_stage_after_file_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
+        "pub (in crate :: security_epoch :: storage_authority) fn prepare_scheduled_backup_root (& mut self , directory : & File , anchor : & DirectoryIdentity) -> Result < PendingBackupRoot >",
         "pub (super) fn retire_restore_native (mut self) -> Result < crate :: security_epoch :: native_enrollment :: RetainedControllerNative < 'role > >"
       ],
       "factories": [
@@ -22493,6 +22700,14 @@
         {
           "owner": "CurrentVolumePhase < '_ , '_ >",
           "signature": "pub (in crate :: security_epoch :: storage_authority) fn capture_approval_source (& mut self , clock : UnfencedControllerClock) -> Result < NativeApprovalSource >"
+        },
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn check_scheduled_backup_root (& mut self , directory : & File , anchor : & DirectoryIdentity , pending : & mut PendingBackupRoot) -> Result < () >"
+        },
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn prepare_scheduled_backup_root (& mut self , directory : & File , anchor : & DirectoryIdentity) -> Result < PendingBackupRoot >"
         },
         {
           "owner": "CurrentVolumePhase < '_ , '_ >",
@@ -22547,6 +22762,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
             "module": "restore_approval"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
           }
         }
       ],
@@ -22610,6 +22832,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
             "module": "restore_approval"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
           }
         }
       ],
@@ -22684,6 +22913,13 @@
             "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
             "module": "restore_approval"
           }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
+          }
         }
       ],
       "methods": [
@@ -22727,6 +22963,13 @@
           "registration": {
             "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
             "module": "restore_approval"
+          }
+        },
+        {
+          "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+          "registration": {
+            "source": "crates/day2/src/security_epoch/storage_authority/native_volume.rs",
+            "module": "scheduled_backup"
           }
         }
       ],
@@ -22939,6 +23182,43 @@
       "kind": "private_material",
       "consuming_methods": [],
       "destructor": "sha256:5b23676f526101993a586c5d6d37bec206551a88005cc1d2a30a8270f66dc95f"
+    },
+    {
+      "source": "crates/day2/src/security_epoch/storage_authority/native_volume/scheduled_backup.rs",
+      "type_name": "PendingBackupRoot",
+      "owning_children": [],
+      "methods": [
+        "pub (in crate :: security_epoch) fn observe_birth_data (& mut self , bytes : & [u8]) -> Result < () >",
+        "pub (in crate :: security_epoch) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch) fn submit_birth_data (& mut self , selection : & EpochStore) -> Result < serde_json :: Value >"
+      ],
+      "factories": [
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn prepare_scheduled_backup_root (& mut self , directory : & File , anchor : & DirectoryIdentity) -> Result < PendingBackupRoot >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CurrentVolumePhase < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn check_scheduled_backup_root (& mut self , directory : & File , anchor : & DirectoryIdentity , pending : & mut PendingBackupRoot) -> Result < () >"
+        },
+        {
+          "owner": "PendingBackupRoot",
+          "signature": "pub (in crate :: security_epoch) fn observe_birth_data (& mut self , bytes : & [u8]) -> Result < () >"
+        },
+        {
+          "owner": "PendingBackupRoot",
+          "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "PendingBackupRoot",
+          "signature": "pub (in crate :: security_epoch) fn submit_birth_data (& mut self , selection : & EpochStore) -> Result < serde_json :: Value >"
+        }
+      ],
+      "proof_uses": [],
+      "kind": "private_material",
+      "consuming_methods": []
     },
     {
       "source": "crates/day2/src/security_epoch/storage_authority/preparation.rs",
@@ -23291,9 +23571,11 @@
         "pub (crate) fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch :: storage_authority) fn check_admin_database (& mut self , db : & rusqlite :: Connection , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < () >",
         "pub (in crate :: security_epoch :: storage_authority) fn check_opened_admin_database (& mut self , db : & rusqlite :: Connection , cohort : & crate :: security_epoch :: native_enrollment :: SqliteCohort) -> Result < () >",
+        "pub (in crate :: security_epoch :: storage_authority) fn check_scheduled_backup_root (& mut self , pending : & mut crate :: security_epoch :: storage_authority :: PendingBackupRoot) -> Result < () >",
         "pub (crate) fn controller_stage (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (in crate :: security_epoch :: storage_authority) fn controller_stage_after_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >",
         "pub (crate) fn finish_checked (mut self) -> Result < () >",
+        "pub (in crate :: security_epoch :: storage_authority) fn prepare_scheduled_backup_root (& mut self) -> Result < crate :: security_epoch :: storage_authority :: PendingBackupRoot >",
         "pub (crate) fn refuse (& mut self)",
         "pub (in crate :: security_epoch :: storage_authority) fn retire_restore_native (mut self) -> Result < crate :: security_epoch :: native_enrollment :: RetainedControllerNative < 'role > >"
       ],
@@ -23346,7 +23628,15 @@
         },
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn check_scheduled_backup_root (& mut self , pending : & mut crate :: security_epoch :: storage_authority :: PendingBackupRoot) -> Result < () >"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
           "signature": "pub (in crate :: security_epoch :: storage_authority) fn controller_stage_after_check (& mut self) -> Result < & mut EnrolledRoleStage < 'role > >"
+        },
+        {
+          "owner": "CurrentPhysicalFilePhase < '_ , 'role >",
+          "signature": "pub (in crate :: security_epoch :: storage_authority) fn prepare_scheduled_backup_root (& mut self) -> Result < crate :: security_epoch :: storage_authority :: PendingBackupRoot >"
         },
         {
           "owner": "CurrentPhysicalFilePhase < '_ , 'role >",

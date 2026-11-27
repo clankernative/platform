@@ -744,6 +744,55 @@ impl CounterRequest<'_> {
         Ok(snapshot)
     }
 
+    /// One fixed create-only root record on the genuine Controller connection.
+    /// The outer fixed creator retains actual physical/lineage fencing and the
+    /// SAME original; generic counter read ports still refuse every write.
+    pub(in crate::security_epoch) fn create_scheduled_backup_root(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        pending: &mut crate::security_epoch::storage_authority::PendingBackupRoot,
+        permit: crate::security_epoch::bootstrap::RootBirthWritePermit<'_, '_, '_>,
+    ) -> Result<()> {
+        let requested: Result<()> = (|| {
+            permit.require_actual(self, stage, pending)?;
+            ensure!(
+                self.connection.purpose == NativeRole::EpochController,
+                "backup_root_writer_controller_required"
+            );
+            self.check(stage)?;
+            stage.storage()?.scheduled_backup_root_selection()?;
+            let body = serde_json::to_vec(&pending.submit_birth_data(&self.connection.store)?)?;
+            ensure!(body.len() <= 65_536, "backup_root_write_bound");
+            self.check(stage)?;
+            let authorization = self.connection.credential.authorization(
+                &mut self.request.acquisition,
+                self.connection.store.max_lease_seconds,
+            )?;
+            let timeout = self
+                .request
+                .acquisition
+                .remaining()?
+                .min(Duration::from_secs(5));
+            let bytes = self.connection.http.request_with_ceiling(
+                Route::ScheduledBackupRootCommit,
+                &authorization,
+                Some(&body),
+                &mut self.request.acquisition,
+                timeout,
+            )?;
+            pending.observe_birth_data(&bytes)
+        })();
+        // A real independent post is required even on request/codec error.
+        // Never replace an earlier primary or infer an unapplied write.
+        let checked = self.check(stage);
+        if requested.is_err() || checked.is_err() {
+            pending.refuse();
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch) fn finish(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -2427,6 +2476,16 @@ mod tests {
             let calls = method_calls(source, "CounterRequest", "post");
             let at = |name| calls.iter().position(|call| call == name);
             calls.iter().filter(|call| call.as_str() == "check").count() == 2
+                && calls
+                    .iter()
+                    .filter(|call| call.as_str() == "matches")
+                    .count()
+                    == 1
+                && calls
+                    .iter()
+                    .filter(|call| call.as_str() == "authorization")
+                    .count()
+                    == 1
                 && at("matches").is_some()
                 && at("matches") < at("authorization")
                 && at("authorization") < at("request_with_ceiling")
@@ -2450,21 +2509,38 @@ mod tests {
             "actual calls: {:?}",
             method_calls(source, "CounterRequest", "post")
         );
-        for changed in [
-            source.replacen("self.connection.http.matches(&route, url)?", "true", 1),
-            source.replacen(
-                "let authorization = self.connection.credential.authorization(",
-                "let authorization = self.connection.credential.unchecked_authorization(",
-                1,
-            ),
-            source.replacen(
-                "self.check(stage)?;\n            budget.remaining_native",
-                "budget.remaining_native",
-                1,
-            ),
-        ] {
-            assert_ne!(source, changed);
-            assert!(!guarded(&changed));
+        // Mutate the actual read-only post method, not the first matching
+        // token elsewhere in the file (the separate root writer also matches
+        // recipients). Keep all three original negative boundaries.
+        for (method, occurrence) in [("matches", 1), ("authorization", 1), ("check", 2)] {
+            use quote::ToTokens as _;
+            let mut parsed = syn::parse_file(source).unwrap();
+            let mut selected = parsed.items.iter_mut().filter_map(|item| match item {
+                syn::Item::Impl(item) if matches!(&*item.self_ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|part|part.ident=="CounterRequest")) => Some(item),
+                _ => None,
+            }).flat_map(|item| &mut item.items).filter_map(|item| match item {
+                syn::ImplItem::Fn(function) if function.sig.ident=="post" => Some(function),
+                _ => None,
+            });
+            let function = selected.next().unwrap();
+            assert!(selected.next().is_none(), "exact read-only method");
+            // Scope token mutation to that parsed method; its unique call
+            // counts bind each target, including matches inside ensure!.
+            let mut body = function.to_token_stream().to_string();
+            let needle = format!(". {method} (");
+            let targets = body
+                .match_indices(&needle)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            assert_eq!(targets.len(), occurrence, "actual target count");
+            let at = targets[occurrence - 1];
+            body.replace_range(at..at + needle.len(), ". unchecked_guard (");
+            *function = syn::parse_str(&body).unwrap();
+            let changed = parsed.to_token_stream().to_string();
+            assert!(
+                !guarded(&changed),
+                "selected {method} boundary bypass admitted"
+            );
         }
     }
 }

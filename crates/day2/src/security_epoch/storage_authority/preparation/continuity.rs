@@ -640,6 +640,41 @@ impl<'role> CurrentPhysicalFilePhase<'_, 'role> {
         Ok(files)
     }
 
+    pub(in crate::security_epoch::storage_authority) fn prepare_scheduled_backup_root(
+        &mut self,
+    ) -> Result<crate::security_epoch::storage_authority::PendingBackupRoot> {
+        self.check()?;
+        let requested = self
+            .inner
+            .phase
+            .prepare_scheduled_backup_root(self.inner.directory, self.inner.anchor);
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        let pending = requested?;
+        checked?;
+        Ok(pending)
+    }
+
+    pub(in crate::security_epoch::storage_authority) fn check_scheduled_backup_root(
+        &mut self,
+        pending: &mut crate::security_epoch::storage_authority::PendingBackupRoot,
+    ) -> Result<()> {
+        self.check()?;
+        let requested = self.inner.phase.check_scheduled_backup_root(
+            self.inner.directory,
+            self.inner.anchor,
+            pending,
+        );
+        let checked = self.check();
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch::storage_authority) fn admit_restore_creator_root(
         &mut self,
         held_root: &File,

@@ -23,6 +23,8 @@ use day2_capabilities::{
 };
 use std::{cell::RefCell, rc::Rc};
 
+mod scheduled_backup;
+pub(in crate::security_epoch) use scheduled_backup::RootBirthWritePermit;
 mod admin_read;
 pub(in crate::security_epoch) use admin_read::{
     PendingControllerCurrentInstallation, RestoreInstalledOutputLoan,

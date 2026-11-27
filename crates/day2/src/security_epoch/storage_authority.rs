@@ -28,6 +28,7 @@ pub(crate) use native_volume::AuthenticationStoreFiles;
 pub(in crate::security_epoch) use native_volume::HistoricalKeyAvailability;
 pub(crate) use native_volume::NativeApprovalSource;
 use native_volume::NativeVolumeObservation;
+pub(in crate::security_epoch) use native_volume::PendingBackupRoot;
 pub(in crate::security_epoch) use native_volume::{
     RestoreCreatorRoot, restore_staging_root_path_data,
 };

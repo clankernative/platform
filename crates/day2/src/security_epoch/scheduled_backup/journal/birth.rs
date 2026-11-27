@@ -87,14 +87,14 @@ enum DispositionData {
 /// retained pending local creator, current writer and SAME native original.
 /// There is no deserialize/reopen/reset operation on this turn. Native callers
 /// must durably mark uncertainty before dispatch and never reconstruct from it.
-struct BirthTurn {
+pub(in crate::security_epoch) struct BirthTurn {
     name: String,
     record: RootRecordData,
     disposition: DispositionData,
 }
 
 impl BirthTurn {
-    fn new_data(selected: &EpochStore, binding: RootBindingData) -> Result<Self> {
+    pub(super) fn new_data(selected: &EpochStore, binding: RootBindingData) -> Result<Self> {
         Ok(Self {
             name: document_data(selected, &binding)?,
             record: RootRecordData::new_data(selected, binding)?,
@@ -102,7 +102,7 @@ impl BirthTurn {
         })
     }
 
-    fn submit_data(&mut self) -> Result<Value> {
+    pub(in crate::security_epoch) fn submit_data(&mut self) -> Result<Value> {
         let before = std::mem::replace(&mut self.disposition, DispositionData::Unknown);
         ensure!(before == DispositionData::Fresh, "backup_root_turn_spent");
         let payload = serde_json::to_string(&self.record)?;
@@ -115,7 +115,11 @@ impl BirthTurn {
         Ok(write)
     }
 
-    fn observe_data(&mut self, status: u16, bytes: &[u8]) -> Result<UpdateTime> {
+    pub(in crate::security_epoch) fn observe_data(
+        &mut self,
+        status: u16,
+        bytes: &[u8],
+    ) -> Result<UpdateTime> {
         let before = std::mem::replace(&mut self.disposition, DispositionData::Unknown);
         ensure!(
             before == DispositionData::May,
@@ -128,7 +132,7 @@ impl BirthTurn {
         Ok(updated)
     }
 
-    fn lose_data(&mut self) {
+    pub(in crate::security_epoch) fn lose_data(&mut self) {
         self.disposition = DispositionData::Unknown;
     }
 }
