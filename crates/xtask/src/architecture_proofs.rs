@@ -2742,7 +2742,9 @@ mod tests {
 
     #[test]
     fn reviewed_proof_catalog_has_a_finite_361_entry_budget() -> Result<()> {
-        for count in [130, 256, 263, 320, 321, 326, 339, 348, 349, 354, 355, 356, 361] {
+        for count in [
+            130, 256, 263, 320, 321, 326, 339, 348, 349, 354, 355, 356, 361,
+        ] {
             validate_policy(&serde_json::from_value(proof_catalog(count))?)?;
         }
         for count in [0, 362] {
