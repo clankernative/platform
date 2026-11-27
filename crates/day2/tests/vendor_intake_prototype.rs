@@ -1,7 +1,6 @@
 //! The real pinned submit bridge reaches the admitted command and membership
 //! preparation for both the starter and a saved revision.
-#[path = "support/http_session.rs"]
-mod http;
+use crate::support::http_session as http;
 
 use anyhow::{Context, Result};
 use day2::{

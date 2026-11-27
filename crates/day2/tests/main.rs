@@ -75,4 +75,5 @@ mod support {
     pub mod commands;
     pub mod compiler;
     pub mod evidence;
+    pub mod http_session;
 }
