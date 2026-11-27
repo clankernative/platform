@@ -21,6 +21,7 @@ Cli :: [].{
 		Source(SourceRequest),
 		Candidate(CandidateRequest),
 		Deploy(Deploy),
+		Selection(Selection),
 		CiCheck(CiCheckRequest),
 		CiFetch(CiRun),
 		CiStore(CiRun),
@@ -47,6 +48,7 @@ Cli :: [].{
 		InstanceCandidateNativeBuild,
 		InstanceCandidateNativeProbe,
 		InstanceDeploy,
+		InstanceSelection,
 		CiCheck,
 		CiFetch,
 		CiStore,
@@ -72,6 +74,7 @@ Cli :: [].{
 			InstanceCandidateNativeBuild => "instance.candidate.native-build"
 			InstanceCandidateNativeProbe => "instance.candidate.native-probe"
 			InstanceDeploy => "instance.deploy"
+			InstanceSelection => "instance.selection"
 			CiCheck => "ci.check"
 			CiFetch => "ci.fetch"
 			CiStore => "ci.store"
@@ -257,6 +260,9 @@ Cli :: [].{
 			Err(Null) => Err(Null)
 		}
 	}
+
+	## `instance selection` inspects a single-replica app's saved release.
+	Selection : { directory : Names.LocalPath, app_id : Str, format : Format }
 
 	## `instance deploy` runs a selected candidate on a single-replica app.
 	Deploy : {
@@ -471,6 +477,7 @@ Cli :: [].{
 					["instance", "source", ..] => Ok(Request.Help(raw.format))
 					["instance", "candidate", ..] => Ok(Request.Help(raw.format))
 					["instance", "deploy", ..] => Ok(Request.Help(raw.format))
+					["instance", "selection", ..] => Ok(Request.Help(raw.format))
 					["instance", "ci-workflow", ..] => Ok(Request.Help(raw.format))
 					["ci", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
@@ -526,6 +533,19 @@ Cli :: [].{
 					)
 				}
 				["instance", "deploy", ..] if raw.positionals.len() < 7 => Err(Problem.MissingArgument)
+				["instance", "selection"] | ["instance", "selection", _] => Err(Problem.MissingArgument)
+				["instance", "selection", directory, app_id] => {
+					if has_options(raw) {
+						return Err(Problem.ConflictingOptions("instance selection accepts only --agent or --json."))
+					}
+					Ok(
+						Request.Selection({
+							directory: local_path("selection", directory, "an instance directory")?,
+							app_id: candidate_app(app_id, "instance selection")?,
+							format: raw.format,
+						}),
+					)
+				}
 				["instance", "release"]
 				| ["instance", "release", "publish"]
 				| ["instance", "release", "publish", _]
@@ -724,6 +744,7 @@ Cli :: [].{
 		Request.Source(value) => value.parts().format
 		Request.Candidate(value) => value.parts().format
 		Request.Deploy(value) => value.format
+		Request.Selection(value) => value.format
 		Request.CiCheck(value) => value.parts().format
 		Request.CiFetch(value) => value.parts().format
 		Request.CiStore(value) => value.parts().format
@@ -798,6 +819,7 @@ Cli :: [].{
 					Err(Null) => []
 				},
 			)
+			Request.Selection(value) => ["day2", "instance", "selection", value.directory.to_str(), value.app_id]
 			Request.CiCheck(value) => ["day2", "ci", "check"].concat(value.positional_arguments())
 			Request.CiFetch(value) => ["day2", "ci", "fetch", value.parts().directory.to_str()]
 			Request.CiStore(value) => ["day2", "ci", "store", value.parts().directory.to_str()]
@@ -1042,6 +1064,7 @@ instance_command = |args| match args {
 	["plan", ..] => Cli.Command.InstancePlan
 	["apply", ..] => Cli.Command.InstanceApply
 	["deploy", ..] => Cli.Command.InstanceDeploy
+	["selection", ..] => Cli.Command.InstanceSelection
 	["ci-workflow", ..] => Cli.Command.InstanceCiWorkflow
 	["release", .. as rest] => release_command(rest)
 	["source", .. as rest] => source_command(rest)

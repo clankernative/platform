@@ -2,8 +2,8 @@
 use anyhow::{Context, Result, ensure};
 use day2_ops::{
     backup, chrome_extension, ci_check, ci_fetch, ci_store, ci_workflow, infra, instance_candidate,
-    instance_deploy, instance_release, instance_roots, instance_source, local_dev, maintenance,
-    process, projection,
+    instance_deploy, instance_release, instance_roots, instance_selection, instance_source,
+    local_dev, maintenance, process, projection,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -45,6 +45,7 @@ struct Operations {
     candidate_mode: Option<instance_candidate::Mode>,
     candidate_session: Option<instance_candidate::Session>,
     deploy_session: Option<instance_deploy::Session>,
+    selection_session: Option<instance_selection::Session>,
     /// Whether the host action started `day2 ci check`, and its session.
     ci_mode: bool,
     ci_session: Option<ci_check::Session>,
@@ -1019,6 +1020,21 @@ impl Operations {
                     .step(&name)
                     .map_err(instance_source::reported)
             }
+            "instance-selection-read" | "instance-selection-blocked" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {}
+                let _: Input = input(&request)?;
+                let session = self
+                    .selection_session
+                    .as_mut()
+                    .context("selection session required")?;
+                if request.action == "instance-selection-read" {
+                    session.read()
+                } else {
+                    session.blocked()
+                }
+            }
             "instance-deploy-prepare" => {
                 ensure!(
                     self.instance_mode == Some(instance_roots::Mode::Deploy)
@@ -1209,6 +1225,7 @@ fn run(request: Request) -> Result<Value> {
         candidate_mode: None,
         candidate_session: None,
         deploy_session: None,
+        selection_session: None,
         ci_mode: false,
         ci_session: None,
         fetch_mode: false,
@@ -1227,6 +1244,7 @@ fn run(request: Request) -> Result<Value> {
         "instance-plan",
         "instance-apply",
         "instance-deploy",
+        "instance-selection",
         "instance-release-publish",
         "instance-release-fetch",
         "ci-check",
@@ -1337,6 +1355,12 @@ fn run(request: Request) -> Result<Value> {
         let input: Input = input(&request)?;
         operations.instance_mode = Some(instance_roots::Mode::Deploy);
         vec!["instance-deploy-session".into(), input.request, input.roots]
+    } else if request.action == "instance-selection" {
+        operations.selection_session = Some(instance_selection::Session::new(
+            input(&request)?,
+            Box::new(instance_candidate::tools::Gcloud::native()),
+        )?);
+        vec!["instance-selection-session".into()]
     } else if request.action == "ci-check" {
         // `day2 ci check` only, as for the instance commands: the action
         // starts the session and the adapter validates the request.

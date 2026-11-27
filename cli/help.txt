@@ -25,6 +25,7 @@ USAGE
   day2 instance candidate native-probe <job directory> [--agent]
   day2 instance deploy <directory> <platform> <app> <candidate>
                        <new directory> [--deadline <unix seconds>] [--agent]
+  day2 instance selection <directory> <app> [--agent]
   day2 instance ci-workflow <directory> [--agent]
   day2 ci check <head> [<base>] <cases> <new directory> [--agent]
   day2 ci fetch <new directory> [--agent]
@@ -152,6 +153,9 @@ COMMANDS
                   app changes, or 8 if recovery must roll forward from the
                   migration fence. With --deadline, refuse to start a
                   stopped-app phase that can outlast the job's time limit.
+  instance selection
+                  Read a single-replica app's saved release generation and
+                  whether its exact activating candidate is blocked.
   instance ci-workflow
                   Validate <directory>/day2.json and print app CI's
                   org-scoped workflow for <org>/day2-ci,

@@ -9,6 +9,7 @@ import InstanceRelease
 import InstanceSource
 import InstanceCandidate
 import InstanceDeploy
+import InstanceSelection
 import InstanceCiWorkflow
 import CiCheck
 import CiFetch
@@ -27,6 +28,7 @@ Output :: { outcome : Outcome }.{
 		Sourced(Cli.SourceRequest, Try(Names.LocalPath, [Null]), InstanceSource.Report),
 		Candidated(Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report),
 		Deployed(Cli.Deploy, Names.LocalPath, InstanceDeploy.Report),
+		Selected(Cli.Selection, Names.LocalPath, InstanceSelection.Receipt),
 		CiChecked(Cli.CiCheckRequest, CiCheck.Report),
 		CiFetched(Cli.CiRun, CiFetch.Report),
 		CiStored(Cli.CiRun, CiStore.Report),
@@ -67,6 +69,7 @@ Output :: { outcome : Outcome }.{
 			Outcome.Sourced(request, path, report) => sourced_text(request, path, report)
 			Outcome.Candidated(request, path, report) => candidated_text(request, path, report)
 			Outcome.Deployed(request, path, report) => deployed_text(request, path, report.receipt)
+			Outcome.Selected(_, _, receipt) => selected_text(receipt)
 			Outcome.CiChecked(request, report) => ci_checked_text(request, report)
 			Outcome.CiFetched(request, report) => ci_fetched_text(request, report)
 			Outcome.CiStored(request, report) => ci_stored_text(request, report)
@@ -108,6 +111,7 @@ format = |outcome| match outcome {
 	Output.Outcome.Sourced(request, _, _) => request.parts().format
 	Output.Outcome.Candidated(request, _, _) => request.parts().format
 	Output.Outcome.Deployed(request, _, _) => request.format
+	Output.Outcome.Selected(request, _, _) => request.format
 	Output.Outcome.CiChecked(request, _) => request.parts().format
 	Output.Outcome.CiFetched(request, _) => request.parts().format
 	Output.Outcome.CiStored(request, _) => request.parts().format
@@ -171,6 +175,7 @@ json = |outcome| match outcome {
 	Output.Outcome.Sourced(request, path, report) => sourced_json(request, path, report)
 	Output.Outcome.Candidated(request, path, report) => candidated_json(request, path, report)
 	Output.Outcome.Deployed(_, path, report) => deployed_json(path, report)
+	Output.Outcome.Selected(_, path, receipt) => selected_json(path, receipt)
 	Output.Outcome.CiChecked(request, report) => ci_checked_json(request, report)
 	Output.Outcome.CiFetched(request, report) => ci_fetched_json(request, report)
 	Output.Outcome.CiStored(request, report) => ci_stored_json(request, report)
@@ -684,6 +689,41 @@ deployed_text = |request, path, receipt| Str.join_with(
 	],
 	"\n",
 )
+
+selected_json : Names.LocalPath, InstanceSelection.Receipt -> Str
+selected_json = |path, receipt| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	actions : List(Cli.ActionDto)
+	actions = []
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: "instance.selection",
+		exit_code: 0.I32,
+		context: { spec_path: path.to_str(), spec_validation: "checked" },
+		result: { receipt },
+		error: null,
+		next_actions: actions,
+	})
+}
+
+selected_text : InstanceSelection.Receipt -> Str
+selected_text = |receipt| {
+	summary = ["DAY2  /  instance selection", "", "  App       ${Output.safe(receipt.app_id)}"]
+	lines = match receipt.selection {
+		Err(Null) => ["  Status    unreleased"]
+		Ok(selection) => [
+			"  Status    ${Output.safe(selection.status)}",
+			"  Commit    ${Output.safe(selection.commit)}",
+			"  Image     ${Output.safe(selection.image)}",
+			"  Artifact  ${Output.safe(selection.artifact_id)}",
+			"  Generation  ${Output.safe(selection.generation)}",
+		]
+	}
+	recovery = if receipt.blocked_activation ["  Recovery requires approval of the selected commit."] else []
+	Str.join_with(summary.concat(lines).concat(recovery), "\n")
+}
 
 candidated_text : Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report -> Str
 candidated_text = |request, path, report| {

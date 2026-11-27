@@ -29,6 +29,7 @@ Problem := [
 	SourceUnavailable(Str),
 	CandidateFailed(Str),
 	DeployFailed(Str),
+	SelectionFailed(Str),
 	DeployUnavailable(Str),
 	DeployFenced(Str),
 	CiCheckFailed(Str),
@@ -65,6 +66,7 @@ Problem := [
 		| SourceFailed(_)
 		| CandidateFailed(_)
 		| DeployFailed(_)
+		| SelectionFailed(_)
 		| CiCheckFailed(_)
 		| CiFetchFailed(_)
 		| CiStoreFailed(_)
@@ -104,6 +106,7 @@ Problem := [
 		SourceUnavailable(_) => "source_unavailable"
 		CandidateFailed(_) => "candidate_failed"
 		DeployFailed(_) => "deploy_failed"
+		SelectionFailed(_) => "selection_failed"
 		DeployUnavailable(_) => "deploy_unavailable"
 		DeployFenced(_) => "deploy_fenced"
 		CiCheckFailed(_) => "ci_check_failed"
@@ -115,7 +118,7 @@ Problem := [
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This CLI implements app describe <app>, instance check|render|plan|apply|release|source|candidate|deploy|ci-workflow <directory> and ci check|fetch|store."
+		UnknownCommand => "This CLI implements app describe <app>, instance check|render|plan|apply|release|source|candidate|deploy|selection|ci-workflow <directory> and ci check|fetch|store."
 		MissingCommand => "Describe options require the command app describe <app>."
 		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
@@ -145,6 +148,7 @@ Problem := [
 		| SourceUnavailable(detail)
 		| CandidateFailed(detail)
 		| DeployFailed(detail)
+		| SelectionFailed(detail)
 		| DeployUnavailable(detail)
 		| DeployFenced(detail)
 		| CiCheckFailed(detail)
@@ -189,6 +193,9 @@ Problem := [
 			_,
 		) => "Run from the instance's CI job image with the apply identity's credentials and the forge token. This refusal is permanent for these inputs: a build's private evidence is in the instance's release state; fix the cause, then run again."
 		DeployFailed(_) => "Read the deploy and OpenTofu logs and any archived maintenance journal before retrying."
+		SelectionFailed(
+			_,
+		) => "Read with gcloud access to the instance's private release state. Check the saved selection and recovery marker before retrying."
 		DeployUnavailable(_) => "The deploy stopped before changing the app. Retry with enough time to finish."
 		DeployFenced(
 			_,

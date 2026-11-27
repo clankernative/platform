@@ -62,6 +62,15 @@ Host :: [].{
 		)
 	}
 
+	instance_selection! : Str => Try(Str, Str)
+	instance_selection! = |request| call!(
+		Json.to_str({
+			protocol: 1.U32,
+			action: "instance-selection",
+			input: request,
+		}),
+	)
+
 	## A deploy owns one deploy session and one day2-app root. Both requests travel as private files.
 	instance_deploy! : Str, Str => Try(Str, Str)
 	instance_deploy! = |request, roots| {
