@@ -341,10 +341,17 @@ fn canonical_bounded_data_refuses_duplicates_sequences_unknowns_and_foreign_erro
     f.check(&SignedCreateAttestationData::decode_data(&maximal_bytes)?)?;
     let base = serde_json::to_value(&f.record)?;
     for event in ["job", "pod"] {
-        for verb in [json!("update"), json!("patch"), json!("delete"), Value::Null] {
+        for verb in [
+            json!("update"),
+            json!("patch"),
+            json!("delete"),
+            Value::Null,
+        ] {
             let mut value = base.clone();
             value["data"][event]["verb"] = verb;
-            assert!(SignedCreateAttestationData::decode_data(&serde_json::to_vec(&value)?).is_err());
+            assert!(
+                SignedCreateAttestationData::decode_data(&serde_json::to_vec(&value)?).is_err()
+            );
         }
         let mut value = base.clone();
         value["data"][event].as_object_mut().unwrap().remove("verb");
