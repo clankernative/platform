@@ -21,7 +21,7 @@ const INTENT_DOMAIN: &str = "day2-scheduled-backup-intent-v1";
 /// a claim that all Kubernetes implementations use UUID-shaped UIDs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-struct WorkloadUid(String);
+pub(in crate::security_epoch) struct WorkloadUid(String);
 
 impl TryFrom<String> for WorkloadUid {
     type Error = anyhow::Error;
@@ -52,7 +52,7 @@ impl From<WorkloadUid> for String {
 /// Its trusted provenance is a separate mandatory issuer/admission obligation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-struct ScheduledSlot(String);
+pub(in crate::security_epoch) struct ScheduledSlot(String);
 
 impl TryFrom<String> for ScheduledSlot {
     type Error = anyhow::Error;

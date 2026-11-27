@@ -9,6 +9,8 @@ use ring::signature::{self, Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, marker::PhantomData, rc::Rc};
 
+pub(super) mod create_attestation;
+
 #[cfg(test)]
 #[path = "protocol/restore_tests.rs"]
 mod restore_tests;

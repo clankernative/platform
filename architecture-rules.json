@@ -571,6 +571,8 @@
     "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire.rs",
     "crates/day2/src/security_epoch/native_enrollment/protected_restore/wire/tests.rs",
     "crates/day2/src/security_epoch/native_enrollment/protocol.rs",
+    "crates/day2/src/security_epoch/native_enrollment/protocol/create_attestation.rs",
+    "crates/day2/src/security_epoch/native_enrollment/protocol/create_attestation/tests.rs",
     "crates/day2/src/security_epoch/native_enrollment/protocol/restore_tests.rs",
     "crates/day2/src/security_epoch/native_enrollment/qualification.rs",
     "crates/day2/src/security_epoch/native_enrollment/restore_peer_wire.rs",

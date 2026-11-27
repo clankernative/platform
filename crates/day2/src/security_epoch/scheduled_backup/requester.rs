@@ -253,6 +253,11 @@ pub(in crate::security_epoch) fn intent_digest_data(bytes: &[u8]) -> Result<Dige
     Intent::decode_data(bytes)?.commitment_data()
 }
 
+#[cfg(test)]
+pub(in crate::security_epoch) fn policy_fixture_data() -> Result<RequesterPolicy> {
+    tests::policy_fixture_data()
+}
+
 pub(in crate::security_epoch) fn validate_workload_data(
     selected: &RequesterPolicy,
     runtime_subject: &ReviewedSubject,
