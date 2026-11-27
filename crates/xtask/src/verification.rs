@@ -1047,6 +1047,7 @@ fn fixture_build(
         "app-ownership" => FixtureBuild::plain(root, "examples/app-ownership"),
         "chart-live" => FixtureBuild::plain(root, "examples/chart-live"),
         "slack-dashboard" => FixtureBuild::plain(root, "examples/slack-dashboard"),
+        "vendor-intake" => FixtureBuild::plain(root, "examples/vendor-intake"),
         "notifications" => {
             let peer = fixtures
                 .get("app-ownership")
@@ -1320,6 +1321,7 @@ fn verification_sources(root: &Path, recipe: &str) -> Result<BTreeMap<String, St
             "apps/slack-dashboard",
             root.join("examples/slack-dashboard"),
         ),
+        ("apps/vendor-intake", root.join("examples/vendor-intake")),
     ];
     if ["verify-fast", "verify-reports", "verify"].contains(&recipe) {
         sources.push(("apps/reports", root.join("examples/reports")));
@@ -1912,6 +1914,9 @@ fn configure_tests(
             command.args(["--skip", test]);
         }
     }
+    if !fixtures.contains_key("vendor-intake") {
+        command.args(["--skip", "vendor_intake_prototype::"]);
+    }
     if !fixtures.contains_key("slack-dashboard") {
         command.args(["--skip", "prototype_http::"]);
     }
@@ -2045,6 +2050,7 @@ fn configure_tests(
         ("notifications", "DAY2_TEST_NOTIFICATIONS_ARTIFACT"),
         ("chart-live", "DAY2_TEST_CHART_LIVE_ARTIFACT"),
         ("slack-dashboard", "DAY2_TEST_SLACK_DASHBOARD_ARTIFACT"),
+        ("vendor-intake", "DAY2_TEST_VENDOR_INTAKE_ARTIFACT"),
         (
             "connection-declaration",
             "DAY2_TEST_CONNECTION_DECLARATION_ARTIFACT",
@@ -2126,6 +2132,7 @@ fn receipt(
         let notifications = artifact("notifications")?;
         let chart_live = artifact("chart-live")?;
         let slack_dashboard = artifact("slack-dashboard")?;
+        let vendor_intake = artifact("vendor-intake")?;
         let baseline = artifact("relational")?;
         let lifecycle = artifact("lifecycle")?;
         let collection = artifact("collection")?;
@@ -2186,6 +2193,10 @@ fn receipt(
         let report = report
             .as_object_mut()
             .context("verification receipt object")?;
+        report.insert(
+            "vendor_intake".into(),
+            serde_json::Value::String(artifact_id(&vendor_intake)),
+        );
         report.insert(
             "slack_dashboard".into(),
             serde_json::Value::String(artifact_id(&slack_dashboard)),
@@ -2301,6 +2312,7 @@ fn required_steps(scope: &str) -> Result<Vec<&'static str>> {
             "build-notifications",
             "build-chart-live",
             "build-slack-dashboard",
+            "build-vendor-intake",
             "browser-navigation",
             "build-redirect",
             "build-relational",
@@ -2851,6 +2863,7 @@ mod tests {
             "examples/notifications",
             "examples/chart-live",
             "examples/slack-dashboard",
+            "examples/vendor-intake",
             "examples/reports",
         ] {
             fs::create_dir_all(root.join(name))?;
@@ -2886,6 +2899,7 @@ mod tests {
         for relative in [
             "examples/chart-live/App.roc",
             "examples/slack-dashboard/prototype/index.html",
+            "examples/vendor-intake/prototype/index.html",
             "examples/chart-live/ui/app.js",
             "crates/day2/tests/navigation.test.mjs",
             "crates/day2/tests/reactive_queries.test.mjs",
@@ -3850,6 +3864,7 @@ mod tests {
             "build-repeated-field",
             "build-chart-live",
             "build-slack-dashboard",
+            "build-vendor-intake",
             "browser-navigation",
             "test-workspace-runtime",
             "test-parallel-runtime",

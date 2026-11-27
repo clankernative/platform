@@ -274,6 +274,11 @@ providers! {
         world: "slack_webhook.simulated.sqlite",
         actions: { SlackWebhookPost => "slack_webhook.post.v1" (write, data) },
     },
+    Ramp {
+        kind: RampFundPolicy,
+        world: "ramp.simulated.sqlite",
+        actions: { RampCreateFund => "ramp.create_fund.v1" (write, data) },
+    },
     Slack {
         kind: SlackChannel,
         world: "slack.simulated.sqlite",

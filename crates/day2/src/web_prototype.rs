@@ -1,5 +1,5 @@
-//! Authenticated presentation of one artifact-declared, input-free public query.
-//! The draft only supplies HTML. It cannot choose an operation, input or actor.
+//! Authenticated presentation of artifact-declared operations. HTML can propose
+//! typed inputs. The installed artifact selects the operation and the session supplies the actor.
 use super::{Host, Session, security};
 use crate::{
     authority_state::{AuthorityStamp, authorize_in},
@@ -22,8 +22,8 @@ pub(super) fn matches(path: &str) -> bool {
     path == PREFIX || path.starts_with("/_prototype/")
 }
 
-pub(super) fn is_query(path: &str) -> bool {
-    matches(path) && path.ends_with("/query")
+pub(super) fn is_api(path: &str) -> bool {
+    matches(path) && (path.ends_with("/query") || path.ends_with("/submit"))
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -31,6 +31,7 @@ enum Part {
     Shell,
     Frame,
     Query,
+    Submit,
     Source,
 }
 
@@ -64,6 +65,7 @@ impl Route {
             None => Part::Shell,
             Some("frame") => Part::Frame,
             Some("query") => Part::Query,
+            Some("submit") => Part::Submit,
             Some("source") if revision.is_some() => Part::Source,
             _ => anyhow::bail!(Failure::NotFound),
         };
@@ -72,13 +74,13 @@ impl Route {
     }
 }
 
-fn require_shell_fetch(origin: &str, headers: &HeaderMap) -> Result<()> {
+fn require_shell_fetch(origin: &str, headers: &HeaderMap, marker: &str) -> Result<()> {
     let optional = |name, values: &[&str]| {
         !headers.contains_key(name)
             || web_api::single_header(headers, name).is_some_and(|v| values.contains(&v))
     };
     ensure!(
-        web_api::single_header(headers, "x-day2-prototype-query") == Some("1")
+        web_api::single_header(headers, marker) == Some("1")
             && optional("origin", &[origin])
             && optional("sec-fetch-site", &["same-origin"])
             && optional("sec-fetch-mode", &["cors", "same-origin"])
@@ -124,6 +126,10 @@ impl Viewer<'_> {
             } else {
                 None
             };
+            if self.route.part == Part::Submit {
+                let submit = self.page.submit_command.as_deref().context(Failure::NotFound)?;
+                authorize_in(tx, runtime, submit, actor)?;
+            }
             if self.route.part == Part::Source {
                 owners::authorize_in(tx, runtime, actor, Permission::PrototypeSourceDownload)?;
             }
@@ -232,13 +238,29 @@ pub(super) fn serve(
         .as_ref()
         .context(Failure::NotFound)?;
     let route = Route::parse(uri.path())?;
-    ensure!(method == Method::GET, Failure::UnsupportedMethod);
+    let submitting = route.part == Part::Submit;
     ensure!(
-        body.is_empty() && !headers.contains_key(web_api::ACT_AS_HEADER),
+        if submitting {
+            method == Method::POST
+        } else {
+            method == Method::GET
+        },
+        Failure::UnsupportedMethod
+    );
+    ensure!(
+        (submitting || body.is_empty()) && !headers.contains_key(web_api::ACT_AS_HEADER),
         Failure::InvalidInput
     );
-    if route.part == Part::Query {
-        require_shell_fetch(&host.origin, headers)?;
+    if route.part == Part::Query || submitting {
+        require_shell_fetch(
+            &host.origin,
+            headers,
+            if submitting {
+                "x-day2-prototype-submit"
+            } else {
+                "x-day2-prototype-query"
+            },
+        )?;
     }
     let viewer = Viewer {
         host,
@@ -265,11 +287,31 @@ pub(super) fn serve(
     } else {
         ensure!(uri.query() == Some(parameter.as_str()), Failure::Conflict);
     }
+    let submit_name = page
+        .submit_command
+        .as_deref()
+        .and_then(|name| name.split_once('.').map(|(_, suffix)| suffix));
     let response = match viewer.route.part {
         Part::Shell => {
             let path = uri.path();
             let source = (viewer.route.revision.is_some() && access.owner)
                 .then(|| format!("{path}/source?{parameter}"));
+            let submit_url = format!("{path}/submit?{parameter}");
+            let submit = page
+                .submit_command
+                .as_deref()
+                .map(|name| -> Result<_> {
+                    let fields = crate::prototype::submission_fields(
+                        host.runtime.artifact().contract(),
+                        name,
+                    )?;
+                    Ok(crate::prototype_browser::Submission {
+                        operation: name,
+                        url: &submit_url,
+                        fields: serde_json::to_string(&fields)?,
+                    })
+                })
+                .transpose()?;
             document(crate::prototype_browser::shell(
                 &format!("{path}/frame?{parameter}"),
                 &format!("{path}/query?{parameter}"),
@@ -279,9 +321,14 @@ pub(super) fn serve(
                     .as_deref()
                     .filter(|_| access.can_edit)
                     .map(|save| (save, html.as_str())),
+                submit,
             ))?
         }
-        Part::Frame => document(crate::prototype_browser::frame(&html, operation))?,
+        Part::Frame => document(crate::prototype_browser::frame(
+            &html,
+            operation,
+            submit_name,
+        ))?,
         Part::Source => (
             [
                 (header::CONTENT_TYPE, "application/gzip"),
@@ -293,6 +340,28 @@ pub(super) fn serve(
             crate::prototype::publication(host.runtime.artifact().contract(), &html)?,
         )
             .into_response(),
+        Part::Submit => {
+            let command = page.submit_command.as_deref().context(Failure::NotFound)?;
+            // An immutable confirmed body cannot name a different operation, actor
+            // or resource. Duplicate fields are refused before the typed API decoder.
+            let _: serde_json::Value = crate::json::decode(body).context(Failure::InvalidInput)?;
+            viewer.recheck(&access, &html)?;
+            web_api::RequestContext {
+                runtime: &host.runtime,
+                catalog: &host.api,
+                secret: &host.secret,
+                entropy: host.entropy.as_ref(),
+                session,
+                origin: &host.origin,
+                at,
+            }
+            .dispatch(
+                &Method::POST,
+                &format!("/api/{command}").parse()?,
+                headers,
+                body,
+            )?
+        }
         Part::Query => {
             viewer.recheck(&access, &html)?;
             // The receipt and audit retain this host-issued provenance. The
@@ -353,9 +422,13 @@ mod tests {
     #[test]
     fn connector_requests_require_a_bound_shell_fetch() {
         let mut headers = HeaderMap::new();
-        assert!(require_shell_fetch("https://app.example", &headers).is_err());
+        assert!(
+            require_shell_fetch("https://app.example", &headers, "x-day2-prototype-query").is_err()
+        );
         headers.insert("x-day2-prototype-query", "1".parse().unwrap());
-        assert!(require_shell_fetch("https://app.example", &headers).is_ok());
+        assert!(
+            require_shell_fetch("https://app.example", &headers, "x-day2-prototype-query").is_ok()
+        );
         for (name, value) in [
             ("origin", "null"),
             ("origin", "https://other.example"),
@@ -364,10 +437,15 @@ mod tests {
             ("sec-fetch-dest", "document"),
         ] {
             headers.insert(name, value.parse().unwrap());
-            assert!(require_shell_fetch("https://app.example", &headers).is_err());
+            assert!(
+                require_shell_fetch("https://app.example", &headers, "x-day2-prototype-query")
+                    .is_err()
+            );
             headers.remove(name);
         }
         headers.append("x-day2-prototype-query", "1".parse().unwrap());
-        assert!(require_shell_fetch("https://app.example", &headers).is_err());
+        assert!(
+            require_shell_fetch("https://app.example", &headers, "x-day2-prototype-query").is_err()
+        );
     }
 }

@@ -498,6 +498,10 @@ mod connections {
             Provider::GoogleWorkspace => Some(LiveConnection::GoogleWorkspace {
                 service_account: "workspace-reader@example-project.iam.gserviceaccount.com".into(),
             }),
+            Provider::Ramp => Some(LiveConnection::Ramp {
+                credential_ref: reference("ramp_token"),
+                business_id: "11111111-0000-4000-8000-000000000001".into(),
+            }),
             Provider::Slack => Some(LiveConnection::Slack {
                 credential_ref: reference("slack_token"),
                 signing_secret_ref: None,
@@ -777,7 +781,9 @@ mod carta_modes {
 /// unusable, and the pairwise match is why nobody noticed.
 mod narrowing {
     use super::*;
-    use crate::integrations::{LinearWorkSource, OpenAiText, SlackChannel, SnowflakeView};
+    use crate::integrations::{
+        LinearWorkSource, OpenAiText, RampFundPolicy, RampInterval, SlackChannel, SnowflakeView,
+    };
 
     /// A target of each kind. Exhaustive on purpose: a new kind does not compile
     /// until it is named here, and naming it enrols it in the gate below.
@@ -791,6 +797,14 @@ mod narrowing {
             ResourceKind::CartaIssuer => ResourceTarget::CartaIssuer {
                 issuer_id: "issuer-1".into(),
                 children: CartaChildren::Include,
+            },
+            ResourceKind::RampFundPolicy => ResourceTarget::RampFundPolicy {
+                profile: RampFundPolicy {
+                    owner_id: "11111111-0000-4000-8000-000000000002".into(),
+                    merchant_id: "11111111-0000-4000-8000-000000000003".into(),
+                    max_amount_cents: 25_000,
+                    interval: RampInterval::Monthly,
+                },
             },
             ResourceKind::GoogleDirectory => ResourceTarget::GoogleDirectory {
                 customer_id: "C01".into(),

@@ -362,6 +362,7 @@ pub(crate) fn authorized(
     let action = match instruction.model.as_str() {
         "slack.read.v1"
         | "slack.post.v1"
+        | "ramp.create_fund.v1"
         | "slack_webhook.post.v1"
         | "snowflake.read.v1"
         | "openai.generate.v1"
@@ -1531,6 +1532,15 @@ pub(crate) fn execute(
 ) -> ProviderResult {
     let request_bytes = capability.quote.request_bytes;
     let result = match capability.action {
+        Action::Live(call)
+            if matches!(
+                call.connection(),
+                day2_capabilities::integrations::LiveConnection::Ramp { .. }
+            ) =>
+        {
+            // Ramp receives the stable host effect ID, scoped by installation, app, invocation and ordinal.
+            return ProviderResult::live(runtime, &call, effect_id);
+        }
         Action::Live(call) => return ProviderResult::live(runtime, &call, attempt),
         Action::Freetool(request) => {
             return ProviderResult::freetool(call_freetool(runtime, &capability.resource, request));

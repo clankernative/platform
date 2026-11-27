@@ -1,6 +1,5 @@
 //! One real compiled prototype, with each browser signed in as its own actor.
-#[path = "support/http_session.rs"]
-mod http;
+use crate::support::http_session as http;
 
 use anyhow::{Context, Result};
 use day2::{

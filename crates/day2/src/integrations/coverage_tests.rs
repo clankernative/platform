@@ -145,7 +145,9 @@ fn demonstration(action: Action) -> Demonstration {
         Action::GoogleDirectoryCreateUser
         | Action::GoogleDirectoryPatchAttributes
         | Action::GoogleDirectoryEnsureGroupMember => Demonstration::EffectLandsInWorld,
-        Action::SlackPost | Action::SlackWebhookPost => Demonstration::EffectLandsInWorld,
+        Action::SlackPost | Action::SlackWebhookPost | Action::RampCreateFund => {
+            Demonstration::EffectLandsInWorld
+        }
         // Head reads the object record; a grant refuses a key the world does not
         // hold, so both depend on the world's contents rather than only on config.
         // Both grants are pure: a signature over the credential, key and clock,
@@ -471,6 +473,7 @@ fn fixture(variant: Variant) -> SimulatedFixture {
         // The group's name and membership, the calendar's summary and the
         // group's role in it, and the event's time all differ, so every
         // Workspace read can only answer from the world it was given.
+        ramp: crate::integrations::simulated::ramp_fixture(),
         google_workspace: crate::integrations::simulated::GoogleWorkspaceWorld {
             domain: "coverage.test".into(),
             service_account: GOOGLE_COVERAGE_ACCOUNT.into(),
@@ -848,6 +851,21 @@ fn reference() -> VersionRef {
 /// The connection and target for an action, plus the app input that invokes it.
 fn invocation(action: Action, variant: Variant) -> (LiveConnection, ResourceTarget, Value) {
     match action {
+        Action::RampCreateFund => (
+            LiveConnection::Ramp {
+                credential_ref: reference(),
+                business_id: simulated::RAMP_BUSINESS.into(),
+            },
+            ResourceTarget::RampFundPolicy {
+                profile: day2_capabilities::integrations::RampFundPolicy {
+                    owner_id: simulated::RAMP_OWNER.into(),
+                    merchant_id: simulated::RAMP_MERCHANT.into(),
+                    max_amount_cents: 1000,
+                    interval: day2_capabilities::integrations::RampInterval::Total,
+                },
+            },
+            json!({"handle":"opaque","amount_cents":250,"interval":"TOTAL"}),
+        ),
         Action::SlackWebhookPost => (
             LiveConnection::SlackWebhook {
                 credential_ref: reference(),

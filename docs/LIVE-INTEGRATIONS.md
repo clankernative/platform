@@ -1,7 +1,7 @@
 # Reviewed live integrations
 
-The live adapters implement four closed capabilities. Apps supply an opaque
-resource handle and operation data; the activated binding supplies the provider,
+Each live adapter implements a fixed set of capabilities. Apps supply an opaque
+resource handle and operation data. The activated binding supplies the provider,
 credential version, destination and profile. Nothing in the app request can
 select an endpoint, token, workspace, account, role, warehouse, model or project.
 
@@ -15,6 +15,7 @@ checks described in [resource enforcement](RESOURCE-ENFORCEMENT.md).
 
 | Capability | App input, in addition to `handle` | Activated resource | Returned data |
 | --- | --- | --- | --- |
+| [`ramp.create_fund.v1`](RAMP-FUNDS.md) | Positive USD cents and the approved cadence | One business, owner, card merchant, maximum amount and cadence | Fund ID after verification of the restrictions |
 | `slack.read.v1` | `limit` from 1 through 100 | One workspace and channel ID | Plain message text and timestamps, channel ID, explicit `has_more` |
 | `slack.post.v1` | Nonempty `text`, at most 4,000 characters | One workspace and channel ID | Channel ID, timestamp and accepted status |
 | `snowflake.read.v1` | `parameters`: array of `{name, kind, value}` | Exact database/schema/view, selected columns and required typed equality filters | Complete bounded rows, with each cell `{is_null, value}` |

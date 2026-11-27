@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vendor requests</title>
+<style>
+:root { color-scheme:light dark; font:16px/1.5 system-ui,sans-serif; color:#162d3d; background:#f6f8f8; }
+*{box-sizing:border-box} body{margin:0} main{width:min(100% - 2rem,60rem);margin:2rem auto 4rem}
+h1,h2,h3{line-height:1.15}h1{font-size:2.1rem;margin-bottom:.25rem}
+h2{font-size:1.35rem;margin-top:0}h3{font-size:1.05rem}header p,.hint{color:#435b65}
+section,fieldset{background:white;border:1px solid #cadae0;border-radius:.6rem;padding:1.35rem;margin:1rem 0}
+fieldset{min-width:0}legend{font-weight:650;padding:0 .35rem}label{display:block;font-weight:550}
+input,textarea,select,button{font:inherit}input:not([type=checkbox]),select,textarea{width:100%;border:1px solid #8096a0;border-radius:.3rem;padding:.5rem .65rem;color:inherit;background:transparent}
+label>span{display:block;font-size:.85rem;font-weight:400}textarea{resize:vertical}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(15rem,100%),1fr));gap:1rem}
+button{background:#174e5a;color:white;border:0;border-radius:.35rem;padding:.65rem 1rem;cursor:pointer;font-weight:600}
+button:disabled{opacity:.6;cursor:wait}button.secondary{background:white;color:#174e5a;border:1px solid #8096a0}
+footer,.section-heading{display:flex;align-items:center;gap:1rem;justify-content:space-between}
+.section-heading h2{margin:0}#folder{overflow-wrap:anywhere;user-select:all}
+ul{padding:0;list-style:none}li{border-top:1px solid #cadae0;padding:.8rem 0;overflow-wrap:anywhere}
+li p{margin:.2rem 0}li strong{font-size:1.05rem} #notice{min-height:1.5rem}
+[hidden]{display:none!important}
+@media(prefers-color-scheme:dark){:root{color:#e4edf0;background:#14232a}fieldset,section,select option{background:#1d3039;border-color:#56707b}header p,.hint{color:#b6cbd4}button{background:#a6dde1;color:#112f34}}
+</style>
+</head>
+<body><main>
+<header><h1>Vendor requests</h1><p>Propose a vendor allocation and spending control for review.</p></header>
+<form id="intake">
+<fieldset><legend>Vendor</legend><div class="grid">
+<label>Vendor name<input name="vendor" required maxlength="128" autocomplete="organization"></label>
+<label>Source department budget<span>Enter the department whose existing budget will fund this vendor.</span><input name="budget_owner" required maxlength="200"></label>
+</div><p><label>Business reason<textarea name="business_reason" rows="3" maxlength="2000" required></textarea></label></p></fieldset>
+<fieldset><legend>Spend allocation</legend>
+<p class="hint">Allocate funds to this vendor from the existing department budget. The proposed change to the department total is $0.</p>
+<div class="grid">
+<label>Allocation in USD<input name="spend" inputmode="decimal" placeholder="2400.00" pattern="([0-9]+)([.][0-9]{1,2})?" required></label>
+<label>Allocation period<select name="spend_period"><option value="one_time">One-time</option><option value="monthly">Monthly</option></select></label>
+<label>Allocation start<input type="date" name="spend_start" required></label></div></fieldset>
+<fieldset><legend>Ramp spending control</legend><p class="hint">Propose a merchant-restricted, virtual-card-only fund. Finance resolves the merchant and fund owner before applying the control.</p><div class="grid">
+<label>Control limit in USD<input name="ramp" inputmode="decimal" placeholder="200.00" pattern="([0-9]+)([.][0-9]{1,2})?" required></label>
+<label>Limit cadence<select name="ramp_cadence"><option value="monthly">Monthly</option><option value="one_time">One-time</option></select></label></div></fieldset>
+<fieldset><legend>Contract</legend>
+<label><input type="checkbox" name="has_contract"> A contract exists</label>
+<div id="contract" hidden><p>Place the signed file in the required Drive folder and paste its file link. The reviewer will check the file location.</p>
+<p>Required folder <code id="folder"></code></p>
+<label>Drive file URL<input name="contract_url" type="url" placeholder="https://drive.google.com/file/d/…/view" maxlength="256"></label></div></fieldset>
+<button id="send" type="button">Review submission</button>
+<p id="notice" role="status" aria-live="polite"></p>
+</form>
+<section aria-labelledby="requests"><div class="section-heading"><h2 id="requests">My recent requests</h2><button id="refresh" class="secondary" type="button">Refresh</button></div>
+<p id="history-status" role="status"></p><ul id="history"></ul></section>
+</main>
+<script>
+const form = document.querySelector("#intake");
+const fields = form.elements;
+const notice = document.querySelector("#notice");
+const historyStatus = document.querySelector("#history-status");
+const list = document.querySelector("#history");
+const contract = document.querySelector("#contract");
+const send = document.querySelector("#send");
+let folder = "";
+function contractState() {
+  contract.hidden = !fields.has_contract.checked;
+  fields.contract_url.required = fields.has_contract.checked;
+}
+fields.has_contract.addEventListener("change", contractState);
+function cents(raw) {
+  const match = /^([0-9]+)(?:\.([0-9]{1,2}))?$/.exec(raw.trim());
+  if (!match) throw new Error("Enter USD amounts with at most two decimal places.");
+  const result = BigInt(match[1]) * 100n + BigInt((match[2] || "").padEnd(2,"0"));
+  if (result < 1n || result > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Enter a positive USD amount within the supported range.");
+  return Number(result);
+}
+async function refresh() {
+  try {
+    const result = await day2.call("my_requests");
+    folder = result.contract_folder;
+    document.querySelector("#folder").textContent = folder;
+    list.replaceChildren();
+    for (const item of result.requests.items) {
+      const li = document.createElement("li");
+      const label = document.createElement("strong");
+      label.textContent = item.vendor;
+      const status = document.createElement("p");
+      status.textContent = "Request " + item.id + " · " + item.status;
+      li.append(label, status);
+      if (item.review_note) {
+        const note = document.createElement("p");
+        note.textContent = item.review_note;
+        li.append(note);
+      }
+      list.append(li);
+    }
+    historyStatus.textContent = result.requests.items.length ? (result.requests.has_more ? "Showing the 20 most recent requests." : "") : "No requests yet.";
+  } catch (error) {
+    historyStatus.textContent = "Could not load your requests: " + error.message;
+  }
+}
+send.addEventListener("click", async () => {
+  if (!form.reportValidity()) return;
+  send.disabled = true;
+  notice.textContent = "";
+  try {
+    if (!folder) throw new Error("An app owner must configure this installation before requests can be submitted. Refresh after configuration.");
+    const rawLink = fields.contract_url.value.trim();
+    let link = "";
+    if (fields.has_contract.checked) {
+      const parsed = new URL(rawLink);
+      if (parsed.origin !== "https://drive.google.com" || parsed.username || parsed.password || !/^\/file\/d\/[A-Za-z0-9_-]{1,200}\/view$/.test(parsed.pathname)) throw new Error("Paste a Drive file link ending in /view.");
+      link = parsed.origin + parsed.pathname;
+    }
+    const answer = await day2.submit("submit_request", {
+      vendor:fields.vendor.value.trim(), business_reason:fields.business_reason.value.trim(), budget_owner:fields.budget_owner.value.trim(),
+      spend_cents:cents(fields.spend.value), spend_period:fields.spend_period.value, spend_start:fields.spend_start.value,
+      ramp_limit_cents:cents(fields.ramp.value), ramp_cadence:fields.ramp_cadence.value,
+      has_contract:fields.has_contract.checked, contract_url:link
+    });
+    notice.textContent = "Request " + answer.id + " submitted for review.";
+    form.reset(); contractState(); await refresh();
+  } catch (error) {
+    notice.textContent = error.message;
+  } finally { send.disabled = false; }
+});
+document.querySelector("#refresh").addEventListener("click", refresh);
+refresh();
+</script></body></html>

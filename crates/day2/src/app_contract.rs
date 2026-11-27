@@ -142,11 +142,38 @@ pub struct Operation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observations: Vec<String>,
     pub verification_setup: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_actors: Vec<String>,
     pub verification_delegation: Vec<VerificationDelegation>,
 }
 
 impl Operation {
-    fn validate_verification_delegation(&self) -> Result<()> {
+    pub(crate) fn campaign_actor(&self) -> Option<&str> {
+        self.verification_actors
+            .first()
+            .map(String::as_str)
+            .or_else(|| {
+                self.verification_delegation
+                    .first()
+                    .map(|fixture| fixture.actor.as_str())
+            })
+    }
+
+    fn validate_verification_principal(&self) -> Result<()> {
+        ensure!(
+            self.verification_actors.len() <= 1,
+            "verification actor budget"
+        );
+        if let Some(actor) = self.verification_actors.first() {
+            ensure!(
+                self.verification_delegation.is_empty(),
+                "ambiguous verification principal"
+            );
+            ensure!(
+                valid_direct_verification_actor(actor),
+                "invalid direct verification actor"
+            );
+        }
         ensure!(
             self.verification_delegation.len() <= 1,
             "verification delegation budget"
@@ -337,6 +364,14 @@ pub struct Failure {
     pub verification_delegations: Vec<VerificationDelegationCase>,
 }
 
+fn valid_direct_verification_actor(actor: &str) -> bool {
+    !actor.is_empty()
+        && actor.len() <= 128
+        && actor
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"@._:+-".contains(&byte))
+}
+
 fn validate_verification_name(value: &str, label: &str) -> Result<()> {
     ensure!(
         !value.is_empty()
@@ -430,12 +465,7 @@ impl Failure {
                 "duplicate failure verification actor"
             );
             ensure!(
-                !override_actor.actor.is_empty()
-                    && override_actor.actor.len() <= 128
-                    && override_actor
-                        .actor
-                        .bytes()
-                        .all(|byte| { byte.is_ascii_alphanumeric() || b"._:-".contains(&byte) }),
+                valid_direct_verification_actor(&override_actor.actor),
                 "invalid failure verification actor"
             );
         }
@@ -546,7 +576,12 @@ pub struct Definition {
 
 impl Definition {
     pub(crate) fn is_verification_actor(&self, operation: &str, actor: &str) -> bool {
-        self.errors.values().any(|failure| {
+        self.operations.get(operation).is_some_and(|contract| {
+            contract
+                .verification_actors
+                .iter()
+                .any(|fixture| fixture == actor)
+        }) || self.errors.values().any(|failure| {
             failure.verification_actors.iter().any(|override_actor| {
                 override_actor.operation == operation && override_actor.actor == actor
             })
@@ -811,7 +846,7 @@ impl Definition {
             definition.validate_owned_rows(name, &artifact.schema)?;
             definition.validate_required_all_rows(&artifact.schema)?;
             definition.validate_observations(&artifact.connection_declarations)?;
-            definition.validate_verification_delegation()?;
+            definition.validate_verification_principal()?;
             validate_verification_setup(artifact, name, operation, definition)?;
         }
         if self.declares_audiences()? {
@@ -1433,7 +1468,7 @@ pub fn modules(
                 &crate::operation_catalog::output_schema(&output.shape),
                 "contract.outputs",
             );
-            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, audience: product.operations.{name}.audience(), execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), any_owner: product.operations.{name}.any_owner_models(), observations: product.operations.{name}.observations(), verification_setup: product.operations.{name}.verification_setup(), verification_delegation: product.operations.{name}.verification_delegation(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
+            source.push_str(&format!("    contract_{name} : AppContract.Product -> Try(Api.Metadata, Str)\n    contract_{name} = |product| {{\n        contract = product.operations.{name}.contract()\n        example = (contract.example)({{}})?\n        request_example = Inputs.{}.encode(example.input)\n        _ = Inputs.{}.decode(request_example)?\n        {execution}\n        Ok({{ intent: {{ target: Api.{}({handle}.{name}), title: contract.title, usage: contract.usage, inputs: {inputs}, outputs: {out}, input_sources: contract.input_sources, follow_ups: contract.follow_ups }}, request_example, response_example: Outputs.{}.encode(example.output), deprecated: contract.deprecated, audience: product.operations.{name}.audience(), execution: execution_metadata, credential_access: product.operations.{name}.credential_access(), required_all_rows: product.operations.{name}.required_all_rows(), any_owner: product.operations.{name}.any_owner_models(), observations: product.operations.{name}.observations(), verification_setup: product.operations.{name}.verification_setup(), verification_actors: product.operations.{name}.verification_actors(), verification_delegation: product.operations.{name}.verification_delegation(), export_version: product.operations.{name}.export_version() }})\n    }}\n", operation.input, operation.input, if kind == "command" { "write" } else { "read" }, operation.output));
         }
         bindings.insert(kind, bound.join(", "));
     }
@@ -2039,6 +2074,46 @@ fn selectors(
 #[cfg(test)]
 mod selector_tests {
     use super::*;
+
+    #[test]
+    fn direct_verification_principal_is_single_and_cannot_be_delegated() -> Result<()> {
+        let (_, _, contracts) = shared_failure_fixture()?;
+        let mut operation = contracts["create"].clone();
+        assert_eq!(operation.campaign_actor(), None);
+        for actors in [
+            vec![""],
+            vec!["bad actor"],
+            vec!["a@example.test", "b@example.test"],
+        ] {
+            operation.verification_actors = actors.into_iter().map(str::to_owned).collect();
+            assert!(operation.validate_verification_principal().is_err());
+        }
+        operation.verification_actors = vec!["person@example.test".into()];
+        operation.validate_verification_principal()?;
+        assert_eq!(operation.campaign_actor(), Some("person@example.test"));
+        let mut fixture = contracts;
+        fixture.insert("create".into(), operation.clone());
+        let definition = Definition {
+            operations: fixture,
+            identities: String::new(),
+            presentation: Presentation {
+                stylesheet: String::new(),
+                script: String::new(),
+            },
+            invariants: Default::default(),
+            domains: Default::default(),
+            errors: Default::default(),
+        };
+        assert!(definition.is_verification_actor("create", "person@example.test"));
+        assert!(!definition.is_verification_actor("preview", "person@example.test"));
+        assert!(!definition.is_verification_actor("create", "another@example.test"));
+        operation.verification_delegation = vec![VerificationDelegation {
+            actor: "synthetic".into(),
+            application: "sender".into(),
+        }];
+        assert!(operation.validate_verification_principal().is_err());
+        Ok(())
+    }
 
     #[test]
     fn directory_observation_requirements_reject_unknown_writes_and_duplicates() -> Result<()> {
@@ -2783,6 +2858,8 @@ mod selector_tests {
             actor_override.verification_actor(&actor_override.operation),
             Some("freetool-denied-synthetic")
         );
+        actor_override.verification_actors[0].actor = "person+outside@example.test".into();
+        actor_override.validate_targets(&operations, &contracts)?;
         for (actors, expected) in [
             (
                 vec![VerificationActor {

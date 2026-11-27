@@ -213,6 +213,9 @@ pub enum ResourceTarget {
         /// SHA-256 of the exact operator-reviewed URL; the URL itself is secret.
         endpoint_sha256: String,
     },
+    RampFundPolicy {
+        profile: crate::integrations::RampFundPolicy,
+    },
     SlackChannel {
         channel: crate::integrations::SlackChannel,
     },
@@ -310,6 +313,7 @@ impl ResourceTarget {
             Self::GiteaOrganization { .. } => ResourceKind::GiteaOrganization,
             Self::OperatorAlertDestination { .. } => ResourceKind::OperatorAlertDestination,
             Self::SlackWebhookDestination { .. } => ResourceKind::SlackWebhookDestination,
+            Self::RampFundPolicy { .. } => ResourceKind::RampFundPolicy,
             Self::SlackChannel { .. } => ResourceKind::SlackChannel,
             Self::SnowflakeView { .. } => ResourceKind::SnowflakeView,
             Self::OpenAiText { .. } => ResourceKind::OpenAiText,
@@ -359,6 +363,7 @@ impl ResourceTarget {
                 );
                 Ok(())
             }
+            Self::RampFundPolicy { profile } => profile.validate(),
             Self::SlackChannel { channel } => channel.validate(),
             Self::SnowflakeView { query } => query.validate(),
             Self::OpenAiText { profile } => profile.validate(),
@@ -500,6 +505,12 @@ impl ResourceTarget {
                     endpoint_sha256: parent,
                 },
             ) => endpoint_sha256 == parent,
+            (Self::RampFundPolicy { profile }, Self::RampFundPolicy { profile: parent }) => {
+                profile.owner_id == parent.owner_id
+                    && profile.merchant_id == parent.merchant_id
+                    && profile.interval == parent.interval
+                    && profile.max_amount_cents <= parent.max_amount_cents
+            }
             (Self::SlackChannel { channel }, Self::SlackChannel { channel: parent }) => {
                 channel == parent
             }
@@ -1015,6 +1026,7 @@ fn validate_connection(
     use crate::integrations::LiveConnection;
     match (provider, live) {
         (Provider::SlackWebhook, Some(value @ LiveConnection::SlackWebhook { .. }))
+        | (Provider::Ramp, Some(value @ LiveConnection::Ramp { .. }))
         | (Provider::Slack, Some(value @ LiveConnection::Slack { .. }))
         | (Provider::Snowflake, Some(value @ LiveConnection::Snowflake { .. }))
         | (Provider::ObjectStore, Some(value @ LiveConnection::ObjectStore { .. }))

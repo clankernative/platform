@@ -455,6 +455,7 @@ fn the_simulation_emits_no_field_the_provider_does_not() -> Result<()> {
                 max_input_tokens: 10,
             },
             workspace_directory: Default::default(),
+            ramp: crate::integrations::simulated::ramp_fixture(),
             google_workspace: Default::default(),
             carta: None,
         },
@@ -1063,6 +1064,7 @@ fn the_google_simulation_emits_exactly_the_documented_fields() -> Result<()> {
                 max_input_tokens: 1,
                 ..Default::default()
             },
+            ramp: crate::integrations::simulated::ramp_fixture(),
             google_workspace: world,
             ..Default::default()
         },
@@ -1648,6 +1650,7 @@ fn the_google_calendar_simulation_emits_only_documented_fields() -> Result<()> {
                 max_input_tokens: 1,
                 ..Default::default()
             },
+            ramp: crate::integrations::simulated::ramp_fixture(),
             google_workspace: world,
             ..Default::default()
         },
@@ -2088,6 +2091,7 @@ fn the_google_meet_simulation_emits_only_documented_fields() -> Result<()> {
                 max_input_tokens: 1,
                 ..Default::default()
             },
+            ramp: crate::integrations::simulated::ramp_fixture(),
             google_workspace: {
                 world.groups.insert(
                     "team@example.com".into(),

@@ -10,6 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum LiveConnection {
     /// An incoming webhook URL mounted as a secret, never serialized in configuration.
     SlackWebhook { credential_ref: VersionRef },
+    /// A mounted OAuth bearer is verified against the intended Ramp business before issuing funds.
+    Ramp {
+        credential_ref: VersionRef,
+        business_id: String,
+    },
     Slack {
         credential_ref: VersionRef,
         /// Verifies inbound deliveries. A different kind of secret from the bot
@@ -141,6 +146,7 @@ impl LiveConnection {
     pub fn credential_ref(&self) -> Option<&VersionRef> {
         match self {
             Self::SlackWebhook { credential_ref }
+            | Self::Ramp { credential_ref, .. }
             | Self::Slack { credential_ref, .. }
             | Self::Snowflake { credential_ref, .. }
             | Self::ObjectStore { credential_ref, .. }
@@ -165,6 +171,7 @@ impl LiveConnection {
                 signing_secret_ref, ..
             } => signing_secret_ref.as_ref(),
             Self::SlackWebhook { .. }
+            | Self::Ramp { .. }
             | Self::Snowflake { .. }
             | Self::OpenAi { .. }
             | Self::ObjectStore { .. }
@@ -194,7 +201,11 @@ impl LiveConnection {
                 credential_ref,
                 endpoint: _,
             } => vec![credential_ref],
-            Self::SlackWebhook { credential_ref } => vec![credential_ref],
+            Self::SlackWebhook { credential_ref }
+            | Self::Ramp {
+                credential_ref,
+                business_id: _,
+            } => vec![credential_ref],
             Self::Slack {
                 credential_ref,
                 signing_secret_ref,
@@ -265,6 +276,10 @@ impl LiveConnection {
         );
         match self {
             Self::SlackWebhook { .. } => Ok(()),
+            Self::Ramp { business_id, .. } => {
+                ensure!(ramp_uuid(business_id), "invalid_ramp_business");
+                Ok(())
+            }
             Self::FreetoolExecutor { endpoint, .. } => {
                 let host = endpoint
                     .strip_prefix("http://127.0.0.1:")
@@ -460,6 +475,46 @@ impl LinearWorkSource {
             Self::Label { label } => bounded(label, 256),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RampFundPolicy {
+    pub owner_id: String,
+    pub merchant_id: String,
+    pub max_amount_cents: u64,
+    pub interval: RampInterval,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum RampInterval {
+    Total,
+    Monthly,
+}
+
+impl RampFundPolicy {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            ramp_uuid(&self.owner_id)
+                && ramp_uuid(&self.merchant_id)
+                && (1..=i64::MAX as u64).contains(&self.max_amount_cents),
+            "invalid_ramp_fund_policy"
+        );
+        Ok(())
+    }
+}
+
+pub fn ramp_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value != "00000000-0000-0000-0000-000000000000"
+        && value.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+            }
+        })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,11 +1,17 @@
-//! The trusted shell is the only document that can fetch the fixed query.
+//! The trusted shell mediates the fixed query and optional confirmed business command.
 //! The opaque child receives a MessagePort and its own inline-only policy.
 const SHELL_SCRIPT: &str = include_str!("../../../assets/prototype-shell.js");
 const FRAME_SCRIPT: &str = include_str!("../../../assets/prototype-frame.js");
 
 const SHELL_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; worker-src 'none'";
 const FRAME_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'; worker-src 'none'";
-const SHELL_STYLE: &str = "html,body{height:100%;margin:0}body{display:flex;flex-direction:column;font:15px system-ui,sans-serif;color:#20262c}nav{display:flex;align-items:center;justify-content:space-between;padding:.6rem 1rem;border-bottom:1px solid #d5dce0}iframe{display:block;flex:1;min-height:0;width:100%;border:none}p{margin:1rem}details{padding:.5rem 1rem;border-bottom:1px solid #d5dce0}summary{cursor:pointer}textarea{display:block;box-sizing:border-box;width:100%;height:clamp(8rem,28vh,24rem);margin:.6rem 0;font:14px/1.4 ui-monospace,monospace}button{padding:.4rem .8rem}#save-status{margin-left:.75rem}";
+const SHELL_STYLE: &str = "html,body{height:100%;margin:0}body{display:flex;flex-direction:column;font:15px system-ui,sans-serif;color:#20262c}nav{display:flex;align-items:center;justify-content:space-between;padding:.6rem 1rem;border-bottom:1px solid #d5dce0}iframe{display:block;flex:1;min-height:0;width:100%;border:none}p{margin:1rem}details{padding:.5rem 1rem;border-bottom:1px solid #d5dce0}summary{cursor:pointer}textarea{display:block;box-sizing:border-box;width:100%;height:clamp(8rem,28vh,24rem);margin:.6rem 0;font:14px/1.4 ui-monospace,monospace}button{padding:.4rem .8rem}#save-status{margin-left:.75rem}dialog{max-width:min(44rem,85vw);max-height:80vh;overflow:auto;padding:1rem;border:1px solid #68756e;border-radius:.5rem}dialog::backdrop{background:#0006}dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;unicode-bidi:isolate;margin:1rem}dialog button{margin:.25rem}";
+
+pub(crate) struct Submission<'a> {
+    pub operation: &'a str,
+    pub url: &'a str,
+    pub fields: String,
+}
 
 pub(crate) fn shell(
     frame_url: &str,
@@ -13,6 +19,7 @@ pub(crate) fn shell(
     operation: &str,
     source_url: Option<&str>,
     editor: Option<(&str, &str)>,
+    submit: Option<Submission<'_>>,
 ) -> (String, String) {
     let body = maud::html! {
         (maud::DOCTYPE)
@@ -40,6 +47,16 @@ pub(crate) fn shell(
                     }
                 }
                 p id="load-status" role="status" { "Loading prototype…" }
+                @if let Some(submit) = submit {
+                    dialog id="submit-review" aria-labelledby="submit-title"
+                        data-operation=(submit.operation) data-url=(submit.url) data-fields=(submit.fields) {
+                        h2 id="submit-title" { "Confirm submission" }
+                        p { "Day2 will run " code { (submit.operation) } " with these values." }
+                        pre id="submit-input" dir="ltr" {}
+                        button type="button" id="cancel-submit" autofocus { "Cancel" }
+                        button type="button" id="confirm-submit" { "Confirm submission" }
+                    }
+                }
                 iframe title="Prototype" sandbox="allow-scripts" referrerpolicy="no-referrer" {}
                 script data-frame=(frame_url) data-query=(query_url) data-operation=(operation) {
                     (maud::PreEscaped(SHELL_SCRIPT))
@@ -50,14 +67,14 @@ pub(crate) fn shell(
     (body.into_string(), SHELL_CSP.to_owned())
 }
 
-pub(crate) fn frame(html: &str, operation: &str) -> (String, String) {
+pub(crate) fn frame(html: &str, operation: &str, submit: Option<&str>) -> (String, String) {
     // Prepend before *all* authored bytes. Response headers protect a direct
     // visit; srcdoc needs the meta policy because it inherits the shell CSP.
     let bootstrap = maud::html! {
         (maud::DOCTYPE)
         meta charset="utf-8";
         meta http-equiv="Content-Security-Policy" content=(FRAME_CSP);
-        script data-operation=(operation) { (maud::PreEscaped(FRAME_SCRIPT)) }
+        script data-operation=(operation) data-submit=(submit.unwrap_or_default()) { (maud::PreEscaped(FRAME_SCRIPT)) }
     };
     let mut body = bootstrap.into_string();
     body.push_str(html);

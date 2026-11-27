@@ -156,6 +156,25 @@ impl Fixture {
                     key_prefix: "uploads/".into(),
                 },
             )
+        } else if action == Action::RampCreateFund {
+            use integrations::simulated::{RAMP_BUSINESS, RAMP_MERCHANT, RAMP_OWNER};
+            (
+                LiveConnection::Ramp {
+                    credential_ref: VersionRef {
+                        id: "ramp".into(),
+                        revision: 1,
+                    },
+                    business_id: RAMP_BUSINESS.into(),
+                },
+                ResourceTarget::RampFundPolicy {
+                    profile: day2_capabilities::integrations::RampFundPolicy {
+                        owner_id: RAMP_OWNER.into(),
+                        merchant_id: RAMP_MERCHANT.into(),
+                        max_amount_cents: 5000,
+                        interval: day2_capabilities::integrations::RampInterval::Total,
+                    },
+                },
+            )
         } else if action == Action::SlackPost {
             (
                 LiveConnection::Slack {
@@ -197,6 +216,7 @@ impl Fixture {
         let provider_name = match action {
             Action::ObjectStoreGrantUpload | Action::ObjectStoreDelete => "object_store",
             Action::SlackPost => "slack",
+            Action::RampCreateFund => "ramp",
             _ => "open_ai",
         };
         let domain = format!("domain:{PEOPLE}");
@@ -328,6 +348,9 @@ impl Fixture {
                 json!({"handle":token,"key":"uploads/evidence.pdf"})
             }
             Action::SlackPost => json!({"handle":token,"text":"approved test message"}),
+            Action::RampCreateFund => {
+                json!({"handle":token,"amount_cents":3200,"interval":"TOTAL"})
+            }
             _ => json!({"handle":token,"text":"approved test prompt","max_output_tokens":20}),
         };
         let instruction = Instruction {
@@ -512,6 +535,89 @@ fn host_live_unknown_attempt_survives_reopen_and_cannot_retry_or_spend_held_capa
     let later = fixture.intent(request, &token, 0)?;
     assert!(execution::admit_dispatch(&fixture.runtime, &later).is_err());
     assert_eq!(provider.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn ramp_fund_receipt_replay_and_lost_reply_preserve_one_dispatch_per_intent_under_pressure()
+-> Result<()> {
+    use integrations::simulated::{self, RAMP_WORLD, ScheduledFault, SimulatedFault};
+    let mut fixture = Fixture::new(Action::RampCreateFund, 2, 4, Provider::new(vec![]))?;
+    let database = fixture.runtime.db().to_owned();
+    let scope = fixture.runtime.scope().to_owned();
+    simulated::seed_ramp(&database, &scope, &simulated::ramp_fixture())?;
+    fixture.runtime = fixture
+        .runtime
+        .with_integrations(integration_host::Host::simulated(&database, &scope));
+
+    let (request, token) = fixture.accept("approved", "alice")?;
+    let success = fixture.intent(request, &token, 0)?;
+    fixture.complete(&success)?;
+    let receipt = fixture.observed("approved", 0)?;
+    let settled = serde_json::to_value(fixture.ledger()?)?;
+    fixture.complete(&success)?;
+    assert_eq!(receipt, fixture.observed("approved", 0)?);
+    assert_eq!(settled, serde_json::to_value(fixture.ledger()?)?);
+    simulated::update_ramp(&database, &scope, |world| {
+        assert_eq!(world.calls, ["business", "funds.create"]);
+        let effect = &world.world.funds[&crate::digest(b"effect-approved-0")];
+        assert_eq!(effect.id, receipt["fund_id"]);
+        assert_eq!(effect.amount_cents, 3200);
+        Ok(())
+    })?;
+
+    simulated::schedule_faults(
+        &database,
+        &scope,
+        RAMP_WORLD,
+        vec![ScheduledFault {
+            endpoint: "funds.create".into(),
+            remaining: 1,
+            fault: SimulatedFault::ReplyLost,
+        }],
+    )?;
+    let (second, second_handle) = fixture.accept("uncertain", "alice")?;
+    let unknown = fixture.intent(second, &second_handle, 0)?;
+    let admitted = execution::admit_dispatch(&fixture.runtime, &unknown)?;
+    let lost = execution::perform(&fixture.runtime, admitted)?;
+
+    // A fresh transport and fresh SQLite connections see the durable attempt
+    // before settlement; neither a retry nor another approval can spend its reservation.
+    fixture.runtime = fixture
+        .runtime
+        .with_integrations(integration_host::Host::simulated(&database, &scope));
+    assert_eq!(
+        execution::admit_dispatch(&fixture.runtime, &unknown)
+            .err()
+            .context("second dispatch must fail")?
+            .to_string(),
+        "external_outcome_requires_reconciliation"
+    );
+    execution::settle(&fixture.runtime, &unknown, lost)?;
+    assert_eq!(fixture.ledger()?.outstanding_attempts, 1);
+    let (third, third_handle) = fixture.accept("later", "bob")?;
+    let pressure = fixture.intent(third, &third_handle, 0)?;
+    assert!(execution::admit_dispatch(&fixture.runtime, &pressure).is_err());
+    simulated::update_ramp(&database, &scope, |world| {
+        assert_eq!(
+            world.calls,
+            ["business", "funds.create", "business", "funds.create"]
+        );
+        assert_eq!(world.world.funds.len(), 2);
+        assert!(
+            world
+                .world
+                .funds
+                .contains_key(&crate::digest(b"effect-uncertain-0"))
+        );
+        Ok(())
+    })?;
+    let db = open(&database)?;
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM day2_external_attempts", [], |row| row
+            .get::<_, i64>(0))?,
+        2
+    );
     Ok(())
 }
 

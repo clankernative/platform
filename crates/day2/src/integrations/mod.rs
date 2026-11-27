@@ -9,6 +9,7 @@ mod object_store;
 mod openai;
 pub(crate) use openai::recording_exchange as openai_recording_exchange;
 pub(crate) use openai::recording_request as openai_recording_request;
+mod ramp;
 pub mod simulated;
 mod slack;
 mod slack_webhook;
@@ -113,6 +114,10 @@ pub(crate) struct PreparedCall {
 }
 
 enum ResponseProfile {
+    RampFund {
+        policy: day2_capabilities::integrations::RampFundPolicy,
+        amount_cents: u64,
+    },
     SlackWebhook {
         endpoint_sha256: String,
     },
@@ -178,7 +183,10 @@ impl PreparedCall {
     }
 
     pub(crate) fn max_calls(&self) -> u64 {
-        if matches!(self.connection, LiveConnection::Slack { .. }) {
+        if matches!(
+            self.connection,
+            LiveConnection::Slack { .. } | LiveConnection::Ramp { .. }
+        ) {
             2
         } else {
             1
@@ -280,6 +288,11 @@ pub(crate) fn prepare(
         return Err(AdapterError::InvalidRequest);
     }
     let mut call = match (action, connection, target) {
+        (
+            Action::RampCreateFund,
+            LiveConnection::Ramp { .. },
+            ResourceTarget::RampFundPolicy { profile },
+        ) => ramp::prepare(connection, profile, request_json)?,
         (
             Action::SlackWebhookPost,
             LiveConnection::SlackWebhook { .. },
@@ -383,6 +396,29 @@ pub(crate) fn execute(
         Some(credentials) => Authorization::Bearer(credentials),
         None => Authorization::Presigned,
     };
+    if let LiveConnection::Ramp { business_id, .. } = &call.connection {
+        let Some(identity) = transmit(
+            &ramp::identity(),
+            call,
+            authorization,
+            transport,
+            &mut outcome,
+            ExchangePhase::IdentityCheck,
+        ) else {
+            return outcome;
+        };
+        let verified = decode_http_json::<ramp::Business>(&identity).and_then(|business| {
+            if &business.id == business_id {
+                Ok(())
+            } else {
+                Err(AdapterError::ProviderDenied)
+            }
+        });
+        if let Err(error) = verified {
+            outcome.result = Err(error);
+            return outcome;
+        }
+    }
     // Verify Slack workspace identity before transmitting app content. auth.test
     // returns no channel content and is bounded by the same response-byte limit.
     if let LiveConnection::Slack { workspace_id, .. } = &call.connection {
@@ -424,6 +460,12 @@ pub(crate) fn execute(
             return outcome;
         };
         request.url = url.to_owned();
+    }
+    if matches!(call.response, ResponseProfile::RampFund { .. }) {
+        // The caller supplies the stable effect identity, including installation and operation ordinal.
+        request
+            .headers
+            .push(("x-idempotency-key", crate::digest(attempt.as_bytes())));
     }
     if matches!(call.connection, LiveConnection::OpenAi { .. }) {
         // Diagnostic correlation only; the API does not promise deduplication.
@@ -483,6 +525,15 @@ pub(crate) fn execute(
         outcome.outcome_unknown = unknown;
         return outcome;
     }
+    if let ResponseProfile::RampFund {
+        policy,
+        amount_cents,
+    } = &call.response
+    {
+        (outcome.result, outcome.outcome_unknown) =
+            ramp::response(&response, policy, *amount_cents);
+        return outcome;
+    }
     let parsed = parse_http_json(&response);
     if let Err(error) = parsed {
         outcome.result = Err(error);
@@ -494,7 +545,9 @@ pub(crate) fn execute(
     }
     let json = parsed.expect("checked JSON result");
     let (result, cost, unknown) = match &call.response {
-        ResponseProfile::SlackWebhook { .. } => (Err(AdapterError::ResponseInvalid), Some(0), true),
+        ResponseProfile::SlackWebhook { .. } | ResponseProfile::RampFund { .. } => {
+            (Err(AdapterError::ResponseInvalid), Some(0), true)
+        }
         ResponseProfile::SlackRead { channel, limit } => {
             (slack::read_response(&json, channel, *limit), Some(0), false)
         }
@@ -630,6 +683,12 @@ fn transmit(
 }
 
 fn parse_http_json(response: &transport::WireResponse) -> Result<Value, AdapterError> {
+    decode_http_json(response)
+}
+
+fn decode_http_json<T: serde::de::DeserializeOwned>(
+    response: &transport::WireResponse,
+) -> Result<T, AdapterError> {
     if response.status == 429 {
         return Err(AdapterError::RateLimited);
     }

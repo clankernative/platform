@@ -1,0 +1,6 @@
+{
+  "query": "vendorintake.my_requests",
+  "submit_command": "vendorintake.submit_request",
+  "revision_query": "vendorintake.revision",
+  "save_command": "vendorintake.save_revision"
+}

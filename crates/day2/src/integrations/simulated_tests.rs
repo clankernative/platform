@@ -71,6 +71,7 @@ impl Fixture {
 
 fn fixture() -> SimulatedFixture {
     SimulatedFixture {
+        ramp: crate::integrations::simulated::ramp_fixture(),
         slack_webhook: crate::integrations::simulated::slack_webhook_fixture(),
         delegation: Default::default(),
         gitea_actions: Default::default(),
@@ -536,3 +537,6 @@ fn a_drifted_statement_stops_the_simulation_answering() {
         assert!(parse_select(drifted).is_err(), "accepted drift: {drifted}");
     }
 }
+
+#[path = "ramp_tests.rs"]
+mod ramp;
