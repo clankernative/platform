@@ -10,6 +10,8 @@
     const inexactNumber = new Error("This browser cannot read the numeric result exactly.");
     const saveDenied = new Error("You don’t have permission to save.");
     let connected = false;
+    const review = document.getElementById("submit-review");
+    const attempts = new Map();
 
     function exactJson(text) {
         return JSON.parse(text, (_key, value, context) => {
@@ -35,6 +37,27 @@
         port.onmessage = async ({ data }) => {
             if (!data || !Number.isSafeInteger(data.id) || data.id < 1) return;
             const id = data.id;
+            if (Object.hasOwn(data, "submit")) {
+                if (active || !review || !navigator.userActivation?.isActive ||
+                    Object.keys(data).length !== 3 || !Object.hasOwn(data, "input") ||
+                    data.submit !== review.dataset.operation.split(".")[1]) {
+                    port.postMessage({ id, error: "Submission requires the declared operation and a user action." });
+                    return;
+                }
+                active = true;
+                try {
+                    const body = submissionBody(data.input, JSON.parse(review.dataset.fields));
+                    if (!await confirmSubmission(body)) throw new SubmissionError("Submission canceled.");
+                    port.postMessage({ id, result: await submitApproved(body) });
+                } catch (error) {
+                    const message = (error instanceof SubmissionError || error === inexactNumber)
+                        ? error.message : "Submission unavailable. Retry the same values to check its receipt.";
+                    port.postMessage({ id, error: message });
+                } finally {
+                    active = false;
+                }
+                return;
+            }
             if (Object.keys(data).length !== 2 || data.operation !== operation) {
                 port.postMessage({ id, error: "Unknown prototype operation or inputs." });
                 return;
@@ -62,6 +85,99 @@
             }
         };
     });
+
+    class SubmissionError extends Error {}
+
+    // The same immutable JSON string is shown to the human and posted. Escape
+    // invisible direction/format controls as JSON, so they cannot reorder the
+    // operation's trusted summary or disguise the next field.
+    function submissionBody(input, fields) {
+        const invalid = new SubmissionError("Submission fields do not match the operation.");
+        if (!input || Object.getPrototypeOf(input) !== Object.prototype ||
+            Object.keys(input).length !== Object.keys(fields).length) throw invalid;
+        const quote = text => JSON.stringify(text).replace(/[\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
+            ch => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
+        const lines = Object.keys(fields).map(key => {
+            if (!Object.hasOwn(input, key)) throw invalid;
+            const value = input[key];
+            let literal;
+            if (fields[key] === "string" && typeof value === "string") literal = quote(value);
+            else if (fields[key] === "boolean" && typeof value === "boolean") literal = String(value);
+            else if (fields[key] === "integer" && (Number.isSafeInteger(value) || typeof value === "bigint")) literal = String(value);
+            else throw invalid;
+            return "  " + quote(key) + ": " + literal;
+        });
+        const body = "{\n" + lines.join(",\n") + "\n}";
+        if (new TextEncoder().encode(body).length > 65536) throw new SubmissionError("Submission is too large.");
+        return body;
+    }
+
+    function confirmSubmission(body) {
+        const confirm = document.getElementById("confirm-submit");
+        const cancel = document.getElementById("cancel-submit");
+        document.getElementById("submit-input").textContent = body;
+        review.returnValue = "";
+        const accepted = new Promise(resolve => {
+            const controller = new AbortController();
+            const options = { signal: controller.signal };
+            confirm.addEventListener("click", event => { if (event.isTrusted) review.close("confirm"); }, options);
+            cancel.addEventListener("click", event => { if (event.isTrusted) review.close(); }, options);
+            frame.addEventListener("load", () => review.close(), options);
+            review.addEventListener("close", () => {
+                controller.abort();
+                document.getElementById("submit-input").textContent = "";
+                resolve(review.returnValue === "confirm");
+            }, { once: true });
+        });
+        review.showModal();
+        cancel.focus();
+        return accepted;
+    }
+
+    async function submitApproved(body) {
+        let key = attempts.get(body);
+        if (!key) {
+            if (attempts.size >= 8) throw new SubmissionError("Check an earlier pending submission first.");
+            key = crypto.randomUUID();
+        }
+        const session = await fetch("/api/session", {
+            ...request, signal: AbortSignal.timeout(15000), headers: { Accept: "application/json" }
+        });
+        if (!session.ok) throw new SubmissionError("Sign in to submit.");
+        const csrf = (await session.json()).csrf_token;
+        if (typeof csrf !== "string" || !csrf) throw new Error();
+        attempts.set(body, key);
+        const options = { ...request, method: "POST", referrerPolicy: "same-origin", body,
+            headers: { Accept: "application/json", "Content-Type": "application/json",
+                "X-CSRF-Token": csrf, "Idempotency-Key": key, "X-Day2-Prototype-Submit": "1" } };
+        // Recover a pending result through the same revision-granted operation
+        // and the same business receipt. No status URL or credential reaches the frame.
+        for (let i = 0; i < 3; i++) {
+            if (i) await new Promise(resolve => setTimeout(resolve, 1000));
+            const response = await fetch(review.dataset.url, { ...options, signal: AbortSignal.timeout(15000) });
+            if (response.status === 202) { await pendingInvocation(response); continue; }
+            if (response.status === 200) {
+                const result = exactJson(await response.text());
+                attempts.delete(body);
+                return result;
+            }
+            if (response.status === 400 || response.status === 422) {
+                attempts.delete(body);
+                const { error } = await response.json();
+                const message = typeof error?.message === "string" && error.message.length <= 2048
+                    ? error.message : "Day2 rejected the submitted values.";
+                throw new SubmissionError(message);
+            }
+            if ([401, 403, 404, 409].includes(response.status)) {
+                // An invocation may already have committed before revocation. Keep
+                // its key for an identical retry; distinct inputs get distinct keys.
+                throw new SubmissionError([401, 403].includes(response.status)
+                    ? "You don’t have permission to submit." : "Day2 rejected this submission.");
+            }
+            throw new Error();
+        }
+        throw new SubmissionError("Submission accepted. Retry the same values to check its receipt.");
+    }
 
     // frame-src 'none' in the parent permits srcdoc but blocks a network
     // navigation of this frame, including a location change made by its JS.

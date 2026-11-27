@@ -1,4 +1,4 @@
-//! A single sandboxed HTML document backed by one public, input-free Day2 query.
+//! A sandboxed HTML document with one public query and an optional confirmed local submission.
 //! A preview installation may also declare a query over its own saved revisions.
 use crate::{artifact::Artifact, output_schema::Type, schema::Kind};
 use anyhow::{Context, Result, ensure};
@@ -18,6 +18,8 @@ const MAX_SOURCE: usize = 512 * 1024;
 struct Bindings {
     query: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    submit_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     revision_query: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     save_command: Option<String>,
@@ -27,6 +29,8 @@ struct Bindings {
 #[serde(deny_unknown_fields)]
 pub struct Page {
     pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit_command: Option<String>,
     pub revision_query: Option<String>,
     pub save_command: Option<String>,
     pub html: String,
@@ -96,6 +100,7 @@ pub fn capture(captured: &Path, hashes: &BTreeMap<String, String>) -> Result<Opt
     );
     Ok(Some(Page {
         query: bindings.query,
+        submit_command: bindings.submit_command,
         revision_query: bindings.revision_query,
         save_command: bindings.save_command,
         html,
@@ -122,6 +127,7 @@ pub fn validate(artifact: &Artifact) -> Result<()> {
     let bindings: Bindings = crate::json::decode(page.manifest.as_bytes())?;
     ensure!(
         bindings.query == page.query
+            && bindings.submit_command == page.submit_command
             && bindings.revision_query == page.revision_query
             && bindings.save_command == page.save_command,
         "prototype bindings differ from captured source"
@@ -135,6 +141,13 @@ pub fn validate(artifact: &Artifact) -> Result<()> {
             .is_some_and(|record| record.fields.is_empty()),
         "prototype query must take empty input"
     );
+    if let Some(submit) = page.submit_command.as_deref() {
+        ensure!(
+            Some(submit) != page.save_command.as_deref(),
+            "prototype submit cannot edit its source"
+        );
+        submission_fields(artifact, submit)?;
+    }
     match (&page.revision_query, &page.save_command) {
         (None, None) => ensure!(
             page.sources.is_empty(),
@@ -159,6 +172,76 @@ fn public_operation<'a>(
         .iter()
         .find(|op| op.name == name && op.kind == kind && !artifact.internal_command(name))
         .context("prototype operation must be registered and public with the declared kind")
+}
+
+/// The installed, checked business command owns its input schema. The browser
+/// only needs its scalar wire categories to show the exact proposed JSON.
+pub(crate) fn submission_fields<'a>(
+    artifact: &'a Artifact,
+    name: &str,
+) -> Result<BTreeMap<&'a str, &'static str>> {
+    let operation = public_operation(artifact, name, "command")?;
+    let contract = artifact
+        .app_contract
+        .as_ref()
+        .and_then(|contract| contract.operations.get(name))
+        .context("prototype submission requires checked command")?;
+    validate_submission_effects(&contract.execution, &contract.credential_access)?;
+    let record = artifact
+        .schema
+        .inputs
+        .get(&operation.input_type)
+        .context("prototype submission input")?;
+    ensure!(
+        !record.fields.is_empty(),
+        "prototype submission requires named input fields"
+    );
+    record
+        .fields
+        .iter()
+        .map(|(name, kind)| {
+            let wire = match kind {
+                Kind::Text
+                | Kind::TextDomain { .. }
+                | Kind::StandardText { .. }
+                | Kind::WebUrl
+                | Kind::ModelReference { .. }
+                | Kind::Cursor
+                | Kind::IdCursor => "string",
+                Kind::Integer
+                | Kind::Unsigned(_)
+                | Kind::RowVersion
+                | Kind::PageSize
+                | Kind::Reference { .. } => "integer",
+                Kind::Boolean => "boolean",
+                _ => anyhow::bail!("prototype submission requires flat scalar fields"),
+            };
+            Ok((name.as_str(), wire))
+        })
+        .collect()
+}
+
+fn validate_submission_effects(
+    execution: &crate::app_contract::Execution,
+    credentials: &crate::app_contract::CredentialAccess,
+) -> Result<()> {
+    // Read-only preparation (for example, current directory membership) still
+    // goes through ordinary governed observations. Refuse indirect/external
+    // writes and credential-management operations, including interactive ones.
+    ensure!(
+        !execution.internal
+            && credentials == &crate::app_contract::CredentialAccess::default()
+            && !execution.effects.is_empty()
+            && execution.effects.iter().all(|effect| {
+                effect.command.is_empty()
+                    && matches!(
+                        effect.kind.as_str(),
+                        "create" | "update" | "update_created" | "soft_delete"
+                    )
+            }),
+        "prototype submit must be a local business command without external, child or credential effects"
+    );
+    Ok(())
 }
 
 fn validate_editor(artifact: &Artifact, revision: &str, save: &str) -> Result<()> {
@@ -266,12 +349,15 @@ fn source_archive(page: &Page, html: &str) -> Result<Vec<u8>> {
             .context("publication App.roc required")?,
     )?;
     let namespace = crate::app_inference::namespace(std::str::from_utf8(&app)?)?;
-    let (_, operation) = page
-        .query
-        .split_once('.')
-        .context("qualified prototype query required")?;
+    let qualify = |name: &str| -> Result<String> {
+        let (_, suffix) = name
+            .split_once('.')
+            .context("qualified prototype operation required")?;
+        Ok(format!("{namespace}.{suffix}"))
+    };
     let published = serde_json::to_vec_pretty(&Bindings {
-        query: format!("{namespace}.{operation}"),
+        query: qualify(&page.query)?,
+        submit_command: page.submit_command.as_deref().map(qualify).transpose()?,
         revision_query: None,
         save_command: None,
     })?;
@@ -318,7 +404,7 @@ mod tests {
             ("prototype/index.html", "starter"),
             (
                 "prototype/page.json",
-                r#"{"query":"editor.history","revision_query":"editor.revision","save_command":"editor.save"}"#,
+                r#"{"query":"editor.history","submit_command":"editor.submit_request","revision_query":"editor.revision","save_command":"editor.save"}"#,
             ),
         ] {
             fs::write(temp.path().join(name), bytes)?;
@@ -345,6 +431,7 @@ mod tests {
             bindings,
             Bindings {
                 query: "published.history".into(),
+                submit_command: Some("published.submit_request".into()),
                 revision_query: None,
                 save_command: None
             }
@@ -354,6 +441,45 @@ mod tests {
             "changed after capture",
         )?;
         assert!(capture(temp.path(), &hashes).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn submission_admission_excludes_external_indirect_and_credential_writes() -> Result<()> {
+        use crate::app_contract::{CredentialAccess, Effect, Execution};
+        let effect = |kind: &str, command: &str| Effect {
+            kind: kind.into(),
+            model: "Request".into(),
+            command: command.into(),
+            fields: vec![],
+        };
+        let mut execution = Execution {
+            effects: vec![effect("create", "")],
+            ..Default::default()
+        };
+        validate_submission_effects(&execution, &CredentialAccess::default())?;
+        assert!(
+            validate_submission_effects(
+                &execution,
+                &CredentialAccess {
+                    enabled: true,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        for denied in [
+            effect("external", "slack.post.v1"),
+            effect("request", "app.issue"),
+            effect("unknown", ""),
+            effect("create", "app.issue"),
+        ] {
+            execution.effects.push(denied);
+            assert!(validate_submission_effects(&execution, &CredentialAccess::default()).is_err());
+            execution.effects.pop();
+        }
+        execution.internal = true;
+        assert!(validate_submission_effects(&execution, &CredentialAccess::default()).is_err());
         Ok(())
     }
 

@@ -1062,6 +1062,7 @@ mod tests {
             any_owner: Vec::new(),
             observations: Vec::new(),
             verification_setup: Vec::new(),
+            verification_actors: Vec::new(),
             verification_delegation: Vec::new(),
         };
         let mut command_intent = intent;
@@ -1081,6 +1082,7 @@ mod tests {
             any_owner: Vec::new(),
             observations: Vec::new(),
             verification_setup: Vec::new(),
+            verification_actors: Vec::new(),
             verification_delegation: Vec::new(),
         };
         let error = crate::app_contract::Failure {

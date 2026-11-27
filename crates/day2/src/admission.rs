@@ -99,6 +99,11 @@ const SEALED: &[(&str, &str, &str)] = &[
         "198ee562a477efee5d456d72a95fbf2d83674d8c59a0f8cfb512530150fbaec8",
     ),
     (
+        "Ramp.roc",
+        "",
+        "d16c1f51fa93b557097dc9a377f35f21a41c02b88ae09390a5acf1fd9cc7cac2",
+    ),
+    (
         "Slack.roc",
         "",
         "bddae0f023114db9f74806a5e9dcae905b490dcc012a409060ed33641ef1ccaf",
@@ -191,7 +196,7 @@ const SEALED: &[(&str, &str, &str)] = &[
     (
         "Api.roc",
         "",
-        "ea0510504bf2b25105bb74d32c4214ca1d8524a59d6d0bed57a397b82403abca",
+        "460eb0ee59968979a74e4768964aa7e09425437e2ee8049d6db7867ddf7690b5",
     ),
     (
         "Effects.roc",

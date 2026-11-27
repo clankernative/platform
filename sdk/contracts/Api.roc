@@ -96,6 +96,7 @@ Api :: [].{
 		any_owner : List(Str),
 		observations : List(Str),
 		verification_setup : List(Str),
+		verification_actors : List(Str),
 		verification_delegation : List({ actor : Str, application : Str }),
 	}
 
@@ -327,6 +328,7 @@ Api :: [].{
 		audience : [Public(Audience), Internal],
 		credential_access : CredentialAccess,
 		verification_setup : List(Str),
+		verification_actors : List(Str),
 		verification_delegation : [None, Some({ actor : Str, application : Str })],
 		verification : Verification(input, output),
 		required_all_rows : List(Str),
@@ -476,6 +478,15 @@ Api :: [].{
 			verification_setup: definition.verification_setup.append(setup.name()),
 		}
 
+		# An authenticated direct principal for this operation's disposable positive cases.
+		verify_as_actor :
+			CommandDef(input, output, input_fields, output_fields),
+			Str -> CommandDef(input, output, input_fields, output_fields)
+		verify_as_actor = |definition, actor| { ..definition, verification_actors: [actor] }
+
+		verification_actors : CommandDef(input, output, input_fields, output_fields) -> List(Str)
+		verification_actors = |definition| definition.verification_actors
+
 		verification_setup : CommandDef(input, output, input_fields, output_fields) -> List(Str)
 		verification_setup = |definition| definition.verification_setup
 
@@ -487,8 +498,6 @@ Api :: [].{
 		}
 
 		# Verify positives through a host-installed delegated fixture principal.
-		# Only delegation is carried into campaign metadata, so the combinator
-		# accepts nothing else; a direct actor would silently run as the default.
 		verify_as :
 			CommandDef(input, output, input_fields, output_fields),
 			{ actor : Str, application : Str } ->
@@ -543,6 +552,7 @@ Api :: [].{
 		audience : Audience,
 		credential_access : CredentialAccess,
 		verification_setup : List(Str),
+		verification_actors : List(Str),
 		required_all_rows : List(Str),
 		observations : List(Str),
 		export_version : U64,
@@ -622,6 +632,15 @@ Api :: [].{
 			..definition,
 			verification_setup: definition.verification_setup.append(setup.name()),
 		}
+
+		# An authenticated direct principal for this operation's disposable positive cases.
+		verify_as_actor :
+			QueryDef(input, output, input_fields, output_fields),
+			Str -> QueryDef(input, output, input_fields, output_fields)
+		verify_as_actor = |definition, actor| { ..definition, verification_actors: [actor] }
+
+		verification_actors : QueryDef(input, output, input_fields, output_fields) -> List(Str)
+		verification_actors = |definition| definition.verification_actors
 
 		verification_setup : QueryDef(input, output, input_fields, output_fields) -> List(Str)
 		verification_setup = |definition| definition.verification_setup
@@ -736,6 +755,7 @@ Api :: [].{
 			},
 			verification: definition.verification,
 			verification_setup: [],
+			verification_actors: [],
 			verification_delegation: None,
 			required_all_rows: [],
 			any_owner: [],
@@ -762,6 +782,7 @@ Api :: [].{
 			verification: definition.verification,
 			audience: definition.audience,
 			verification_setup: [],
+			verification_actors: [],
 			credential_access: {
 				enabled: Bool.False,
 				local_reads: [],

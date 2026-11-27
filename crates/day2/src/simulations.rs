@@ -57,6 +57,7 @@ simulated!(OperatorAlerts => SyntheticOperatorAlerts, "operator_alerts.synthetic
 // live lane differ only in the socket.
 simulated!(SlackWebhook => SlackWebhook, "slack_webhook.simulated.sqlite");
 simulated!(Slack => Slack, "slack.simulated.sqlite");
+simulated!(Ramp => Ramp, "ramp.simulated.sqlite");
 simulated!(ObjectStore => ObjectStore, "object_store.simulated.sqlite");
 simulated!(Snowflake => Snowflake, "snowflake.simulated.sqlite");
 simulated!(OpenAi => OpenAi, "openai.simulated.sqlite");
@@ -81,6 +82,7 @@ pub const fn simulation(provider: Provider) -> &'static str {
         Provider::SyntheticOperatorAlerts => OperatorAlerts::WORLD,
         Provider::SlackWebhook => SlackWebhook::WORLD,
         Provider::Slack => Slack::WORLD,
+        Provider::Ramp => Ramp::WORLD,
         Provider::ObjectStore => ObjectStore::WORLD,
         Provider::Snowflake => Snowflake::WORLD,
         Provider::OpenAi => OpenAi::WORLD,
@@ -133,6 +135,7 @@ pub const fn supply(provider: Provider) -> Supply {
         Provider::LocalDelegation
         | Provider::SlackWebhook
         | Provider::Slack
+        | Provider::Ramp
         | Provider::Snowflake
         | Provider::OpenAi
         | Provider::FreetoolExecutor

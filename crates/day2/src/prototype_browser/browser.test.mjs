@@ -40,6 +40,20 @@ addEventListener("message", async event => {
     ]);
     report("ready", {cookieBlocked, parentBlocked, fetchBlocked, denied});
 })();`;
+const submitProbe = `
+const notice = (kind,value) => parent.postMessage({kind,value}, "*");
+let variant = "normal";
+addEventListener("message", event => { if(event.source===parent) variant=event.data; });
+day2.submit("submit_request", {}).then(()=>notice("auto","allowed"), e=>notice("auto",e.message));
+document.getElementById("propose").onclick = async () => {
+    const fields={amount:18446744073709551615n, ok:true, vendor:"<b>vendor A</b>"};
+    if (variant === "malformed") fields.extra = true;
+    try {
+        const result = day2.submit(variant === "wrong" ? "another_command" : "submit_request", fields);
+        fields.vendor = "changed after sending";
+        notice("submitted", await result);
+    } catch(error) { notice("refused",error.message); }
+};`;
 const handshake = `const channel = new MessageChannel();
 parent.postMessage("day2.prototype.connect.v1", "*", [channel.port2]);
 channel.port1.onmessage = event => parent.postMessage({kind:"unexpected", value:event.data}, "*");
@@ -53,16 +67,19 @@ const saves = [];
 const invocation = "api-command-fixture";
 const statusPath = "/api/invocations/" + invocation;
 let settled = false, polls = 0;
+const submissions = [];
 const server = createServer(async (req, res) => {
     requests.push(req.url);
     res.setHeader("Cache-Control", "no-store");
-    if (["/", "/editor", "/frame?pin=one"].includes(req.url)) {
-        const isFrame = req.url === "/frame?pin=one";
+    if (["/", "/editor", "/frame?pin=one", "/submit-demo", "/submit-frame?pin=one"].includes(req.url)) {
+        const isFrame = req.url.includes("frame?pin=one");
         if (isFrame) await firstFrame;
-        const [body, policy] = isFrame ? fixture.frame : (req.url === "/editor" ? fixture.editor : fixture.shell);
+        let [body, policy] = isFrame ? fixture.frame : (req.url === "/editor" ? fixture.editor : fixture.shell);
+        if (req.url === "/submit-demo") [body, policy] = fixture.submitShell;
+        if (req.url === "/submit-frame?pin=one") [body, policy] = fixture.submitFrame;
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         res.setHeader("Content-Security-Policy", policy);
-        res.end(isFrame ? body.replace("/* TEST_PROBE */", () => probe) : body);
+        res.end(isFrame ? body.replace("/* TEST_PROBE */", () => probe).replace("/* SUBMIT_PROBE */", () => submitProbe) : body);
     } else if (req.url === "/query?pin=one") {
         assert.equal(req.headers["x-day2-prototype-query"], "1");
         assert.equal(req.headers["sec-fetch-site"], "same-origin");
@@ -72,6 +89,19 @@ const server = createServer(async (req, res) => {
         if (mode === "delay") await new Promise(resolve => { pendingRead = resolve; });
         res.statusCode = mode === "deny" ? 403 : 200;
         res.end('{"messages":[{"text":"fixture"}],"ids":[42,9007199254740993,18446744073709551615,-9223372036854775808]}');
+    } else if (req.url === "/submit?pin=one") {
+        assert.equal(req.method, "POST");
+        assert.equal(req.headers.origin, origin(server));
+        assert.equal(req.headers["x-day2-prototype-submit"], "1");
+        assert.equal(req.headers["x-csrf-token"], "fixture-token");
+        let body="";
+        for await (const chunk of req) body+=chunk;
+        submissions.push({body, key:req.headers["idempotency-key"]});
+        if (submissions.length === 1) res.end('{"id":'); // An uncertain receipt.
+        else if (submissions.length === 2) {
+            res.writeHead(202, {Location:statusPath});
+            res.end(JSON.stringify({status:"pending", invocation_id:invocation, status_url:statusPath}));
+        } else res.end('{"id":37}');
     } else if (req.url === "/api/session") {
         res.setHeader("Content-Type", "application/json"); res.end('{"csrf_token":"fixture-token"}');
     } else if (req.url === "/api/app.save") {
@@ -139,6 +169,21 @@ const wait = async (check, timeout = 10000) => {
     const deadline = Date.now() + timeout;
     while (!await check()) { assert(Date.now() < deadline, "Timed out: " + check); await pause(20); }
 };
+async function click(selector, inset = false) {
+    const rect = await evaluate(`document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect().toJSON()`);
+    const x = rect.left + (inset ? 30 : rect.width / 2), y = rect.top + (inset ? 20 : rect.height / 2);
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+    if (!inset) {
+        await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
+        await send("Input.dispatchKeyEvent", {type:"keyDown", key:"Enter", code:"Enter", windowsVirtualKeyCode:13,
+            text:"\r", unmodifiedText:"\r"}, sessionId);
+        await send("Input.dispatchKeyEvent", {type:"keyUp", key:"Enter", code:"Enter", windowsVirtualKeyCode:13}, sessionId);
+        return;
+    }
+    for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
+        await send("Input.dispatchMouseEvent", {type, x, y, button:"left", clickCount:1}, sessionId);
+    }
+}
 const readCount = () => requests.filter(path => path === "/query?pin=one").length;
 const report = kind => evaluate("window.reports?.find(e=>e.kind===" + JSON.stringify(kind) + ")");
 const notify = command => evaluate("document.querySelector('iframe').contentWindow.postMessage(" + JSON.stringify(command) + ", '*')");
@@ -146,6 +191,7 @@ try {
     const target = await send("Target.createTarget", {url:"about:blank"});
     ({sessionId} = await send("Target.attachToTarget", {...target, flatten:true}));
     await send("Page.enable", {}, sessionId);
+    await send("Page.bringToFront", {}, sessionId);
     await send("Page.addScriptToEvaluateOnNewDocument", {
         source:`if (window === top) { window.reports=[]; addEventListener("message",e=>{
             if (e.data?.kind) reports.push(e.data);
@@ -232,7 +278,43 @@ try {
     await evaluate('document.querySelector("#save").click()');
     await wait(() => requests.filter(path => path === "/_prototype/revisions/9007199254740993").length === 2);
     assert.equal(saves.length, 4);
-    console.log("Chromium passed frame isolation, exact integer delivery, and pending/synchronous editor retry checks.");
+    await send("Page.navigate", {url:origin(server) + "/submit-demo"}, sessionId);
+    await wait(() => report("auto"));
+    assert.match((await report("auto")).value, /user action/);
+    for (const variant of ["wrong", "malformed"]) {
+        await notify(variant);
+        await click("iframe", true);
+        await wait(() => report("refused"));
+        assert.equal(await evaluate("document.querySelector('dialog').open"), false);
+        await evaluate("reports=[]");
+    }
+    await notify("normal");
+    await click("iframe", true);
+    await wait(() => evaluate("document.querySelector('dialog').open"));
+    const approved = await evaluate("document.querySelector('#submit-input').textContent");
+    assert.match(approved, /18446744073709551615/);
+    assert.match(approved, /<b>vendor A<\/b>/);
+    assert.equal(await evaluate("Boolean(document.querySelector('#submit-input b'))"), false);
+    await evaluate("document.querySelector('#confirm-submit').click()");
+    assert.equal(await evaluate("document.querySelector('dialog').open"), true);
+    await click("#cancel-submit");
+    await wait(() => report("refused"));
+    assert.match((await report("refused")).value, /canceled/);
+    assert.equal(submissions.length, 0);
+    await evaluate("reports=[]");
+    await click("iframe", true);
+    await wait(() => evaluate("document.querySelector('dialog').open"));
+    await click("#confirm-submit");
+    await wait(() => report("refused"));
+    await click("iframe", true);
+    await wait(() => evaluate("document.querySelector('dialog').open"));
+    await click("#confirm-submit");
+    await wait(() => report("submitted"));
+    assert.deepEqual((await report("submitted")).value, {id:37});
+    assert.equal(submissions.length, 3);
+    assert.equal(submissions[0].body, approved);
+    assert(submissions.every(item => item.body === approved && item.key === submissions[0].key));
+    console.log("Chromium passed frame isolation, exact integers, owner editing, and trusted submission/receipt recovery.");
 } finally {
     releaseFrame(); pendingRead?.();
     chrome.kill(); await closed;

@@ -65,6 +65,11 @@ const MODULES: &[Module] = &[
         app_export: true,
     },
     Module {
+        file: "Ramp.roc",
+        source: "contracts/Ramp.roc",
+        app_export: true,
+    },
+    Module {
         file: "Slack.roc",
         source: "contracts/Slack.roc",
         app_export: true,

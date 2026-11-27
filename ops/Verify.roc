@@ -66,6 +66,7 @@ Verify :: [].{
 			"notifications",
 			"chart-live",
 			"slack-dashboard",
+			"vendor-intake",
 		] {
 			_ = Capability.call!("verify-build", Json.to_str({ fixture: fixture }), host!)?
 		}

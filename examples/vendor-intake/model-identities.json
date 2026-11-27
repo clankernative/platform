@@ -1,0 +1,32 @@
+{
+  "format": 1,
+  "models": [
+    {
+      "identity": {
+        "key": "cfb04db2dd6d418dbf2bc53a62368a15",
+        "prefix": "rev"
+      },
+      "table": "revisions",
+      "roc_type": "Models.Revision",
+      "retired": false
+    },
+    {
+      "identity": {
+        "key": "23b08cc7311a4e1f9b6403992c262449",
+        "prefix": "vnd"
+      },
+      "table": "requests",
+      "roc_type": "Models.Request",
+      "retired": false
+    },
+    {
+      "identity": {
+        "key": "b67cbe778bd9413e84da6c5b091a12e5",
+        "prefix": "vst"
+      },
+      "table": "settings",
+      "roc_type": "Models.Setting",
+      "retired": false
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+<main>
+  <a href="{{ routes.review() }}">Review queue</a>
+  {% if proposal.found %}
+  <h1>{{ proposal.vendor }}</h1>
+  <p>Request {{ proposal.id }} · {{ proposal.status }}</p>
+  <dl>
+    <dt>Requester</dt><dd>{{ proposal.requester }}</dd>
+    <dt>Business reason</dt><dd>{{ proposal.business_reason }}</dd>
+    <dt>Department budget</dt><dd>{{ proposal.budget_owner }}</dd>
+    <dt>Proposed Spend allocation</dt><dd>{{ proposal.spend_usd }} USD · {{ proposal.spend_period }} · starting {{ proposal.spend_start }}</dd>
+    <dt>Change to department total</dt><dd>0 USD. The vendor allocation comes from the existing budget.</dd>
+    <dt>Proposed Ramp control</dt><dd>{{ proposal.ramp_usd }} USD · {{ proposal.ramp_cadence }}. Merchant-restricted, virtual-card-only fund. Finance must resolve the Ramp merchant and fund owner before applying these terms.</dd>
+    <dt>Contract</dt>
+    {% if proposal.has_contract %}
+    <dd><a href="{{ proposal.contract_url }}">Open contract file</a></dd>
+    <dt>Required Drive folder</dt><dd><a href="{{ proposal.contract_folder }}">Open required Drive folder</a></dd>
+    {% else %}<dd>No contract reported.</dd>{% endif %}
+  </dl>
+  {% if proposal.status == "pending" %}
+  <form id="decide-request" data-command="vendorintake.triage">
+    <input type="hidden" name="id" value="{{ proposal.id }}">
+    <label for="decision">Decision</label>
+    <select id="decision" name="decision" required><option value="">Choose a decision</option><option value="approved">Approve</option><option value="returned">Return for revision</option></select>
+    <label for="review-note">Reason shared with the requester</label>
+    <textarea id="review-note" name="review_note" rows="3" required maxlength="1000"></textarea>
+    <label for="checked-folder"><input type="checkbox" id="checked-folder" name="checked_folder" value="true">I opened the linked contract and checked its location in the required Drive folder. Check only when approving a request with a contract.</label>
+    <p>This action records the decision. Spend and Ramp still need separate application.</p>
+    <button type="submit">Record decision</button>
+  </form>
+  {% else %}<p>Reviewer note: {{ proposal.review_note }}</p>{% endif %}
+  {% else %}<h1>Request unavailable</h1>{% endif %}
+</main>

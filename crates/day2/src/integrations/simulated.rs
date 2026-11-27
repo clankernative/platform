@@ -51,6 +51,41 @@ pub fn slack_webhook_digest() -> String {
         .into()
 }
 
+pub const RAMP_WORLD: &str = world_of(Provider::Ramp);
+pub const RAMP_BUSINESS: &str = "11111111-0000-4000-8000-000000000001";
+pub const RAMP_OWNER: &str = "11111111-0000-4000-8000-000000000002";
+pub const RAMP_MERCHANT: &str = "11111111-0000-4000-8000-000000000003";
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RampWorld {
+    pub business_id: String,
+    pub owners: BTreeSet<String>,
+    pub merchants: BTreeSet<String>,
+    /// Unique request key to the exact body and fund returned during this scenario.
+    pub funds: BTreeMap<String, RampFund>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RampFund {
+    pub id: String,
+    pub owner_id: String,
+    pub merchant_id: String,
+    pub amount_cents: u64,
+    pub interval: String,
+    pub request_digest: String,
+}
+
+pub fn ramp_fixture() -> RampWorld {
+    RampWorld {
+        business_id: RAMP_BUSINESS.into(),
+        owners: BTreeSet::from([RAMP_OWNER.into()]),
+        merchants: BTreeSet::from([RAMP_MERCHANT.into()]),
+        funds: BTreeMap::new(),
+    }
+}
+
 pub const SLACK_WORLD: &str = world_of(Provider::Slack);
 pub const SNOWFLAKE_WORLD: &str = world_of(Provider::Snowflake);
 pub const OPENAI_WORLD: &str = world_of(Provider::OpenAi);
@@ -93,7 +128,7 @@ pub enum SimulatedFault {
     /// artifacts, or a Directory user deleted since Home last read them.
     Gone,
     /// The request is served and lands, and its reply is dropped: a write
-    /// takes effect and its caller cannot know it. Google Workspace only;
+    /// takes effect and its caller cannot know it. Google Workspace and Ramp funds;
     /// elsewhere it is a lost connection.
     ReplyLost,
     /// HTTP 409. In Google Workspace the request is served first and then
@@ -739,6 +774,8 @@ pub fn slack_webhook_fixture() -> SlackWebhookWorld {
 #[serde(deny_unknown_fields)]
 pub struct SimulatedFixture {
     #[serde(default)]
+    pub ramp: RampWorld,
+    #[serde(default)]
     pub slack_webhook: SlackWebhookWorld,
     pub delegation: DelegationWorld,
     pub github_actions: GitHubActionsWorld,
@@ -784,6 +821,8 @@ impl DelegationWorld {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Endpoint {
+    RampBusiness,
+    RampCreateFund,
     SlackWebhook,
     SlackIdentity,
     SlackHistory,
@@ -804,6 +843,8 @@ impl Endpoint {
     fn classify(url: &str) -> Option<Self> {
         let path = url.split_once('?').map_or(url, |(base, _)| base);
         Some(match path {
+            super::ramp::BUSINESS => Self::RampBusiness,
+            super::ramp::FUNDS => Self::RampCreateFund,
             SLACK_WEBHOOK_URL => Self::SlackWebhook,
             _ if path == slack::IDENTITY => Self::SlackIdentity,
             _ if path == slack::HISTORY => Self::SlackHistory,
@@ -836,6 +877,7 @@ impl Endpoint {
 
     fn world(self) -> &'static str {
         match self {
+            Self::RampBusiness | Self::RampCreateFund => RAMP_WORLD,
             Self::SlackWebhook => SLACK_WEBHOOK_WORLD,
             Self::SlackIdentity | Self::SlackHistory | Self::SlackPost => SLACK_WORLD,
             Self::SnowflakeStatement => SNOWFLAKE_WORLD,
@@ -849,6 +891,8 @@ impl Endpoint {
 
     fn name(self) -> &'static str {
         match self {
+            Self::RampBusiness => "business",
+            Self::RampCreateFund => "funds.create",
             Self::SlackWebhook => "incoming-webhook",
             Self::SlackIdentity => "auth.test",
             Self::SlackHistory => "conversations.history",
@@ -942,6 +986,7 @@ pub fn seed(database: &Path, scope: &str, fixture: &SimulatedFixture) -> Result<
             && fixture.openai.max_input_tokens > 0,
         "simulated_fixture_incomplete"
     );
+    seed_ramp(database, scope, &fixture.ramp)?;
     seed_world(database, scope, OBJECT_STORE_WORLD, &fixture.object_store)?;
     seed_world(database, scope, LINEAR_WORK_WORLD, &fixture.linear_work)?;
     seed_world(
@@ -1117,6 +1162,18 @@ pub fn update_object_store<T>(
     act: impl FnOnce(&mut World<ObjectStoreWorld>) -> Result<T>,
 ) -> Result<T> {
     with_world(&database.with_file_name(OBJECT_STORE_WORLD), scope, act)
+}
+
+pub(crate) fn seed_ramp(database: &Path, scope: &str, world: &RampWorld) -> Result<()> {
+    seed_world(database, scope, RAMP_WORLD, world)
+}
+
+pub fn update_ramp<T>(
+    database: &Path,
+    scope: &str,
+    act: impl FnOnce(&mut World<RampWorld>) -> Result<T>,
+) -> Result<T> {
+    with_world(&database.with_file_name(RAMP_WORLD), scope, act)
 }
 
 pub fn update_slack<T>(
@@ -1606,6 +1663,10 @@ pub fn google_workspace_development_fixture() -> GoogleWorkspaceWorld {
             .map(address)
             .collect(),
         groups: BTreeMap::from([
+            (
+                address("product-owners"),
+                group("group-product-owners", "Product owners", &[address("ada")]),
+            ),
             (
                 address("engineering"),
                 group(
@@ -3301,6 +3362,11 @@ impl Transport for SimulatedTransport {
         };
         let path = self.path(endpoint.world());
         let result = match endpoint {
+            Endpoint::RampBusiness | Endpoint::RampCreateFund => {
+                with_world::<RampWorld, _, _>(&path, &self.scope, |state| {
+                    serve_ramp(state, endpoint, request, authorization, max_response_bytes)
+                })
+            }
             Endpoint::SlackWebhook => {
                 with_world::<SlackWebhookWorld, _, _>(&path, &self.scope, |state| {
                     serve_slack_webhook(state, request, max_response_bytes)
@@ -3685,6 +3751,105 @@ fn decode_key(encoded: &str) -> String {
         at += 1;
     }
     String::from_utf8(out).unwrap_or_default()
+}
+
+fn serve_ramp(
+    state: &mut World<RampWorld>,
+    endpoint: Endpoint,
+    request: &WireRequest,
+    authorization: super::Authorization<'_>,
+    limit: u64,
+) -> Result<Served> {
+    ensure!(state.calls.len() < MAX_MESSAGES, "simulated_call_budget");
+    state.calls.push(endpoint.name().into());
+    let status = |code| {
+        let mut reply = json_response(&json!({"error":"simulated"}));
+        reply.status = code;
+        Ok(Ok(reply))
+    };
+    if !matches!(authorization, super::Authorization::Bearer(_))
+        || state.world.business_id.is_empty()
+    {
+        return status(403);
+    }
+    let fault = take_fault(state, endpoint);
+    if let Some(response) = fault
+        .filter(|f| *f != SimulatedFault::ReplyLost || endpoint != Endpoint::RampCreateFund)
+        .and_then(|f| fault_response(f, limit))
+    {
+        return Ok(response);
+    }
+    if fault == Some(SimulatedFault::Rejected) {
+        return status(403);
+    }
+    if endpoint == Endpoint::RampBusiness
+        && request.method == Method::Get
+        && request.body.is_empty()
+    {
+        return Ok(Ok(json_response(&json!({"id":state.world.business_id}))));
+    }
+    if endpoint != Endpoint::RampCreateFund || request.method != Method::Post {
+        return status(400);
+    }
+    let Some((_, key)) = request
+        .headers
+        .iter()
+        .find(|(name, _)| *name == "x-idempotency-key")
+    else {
+        return status(400);
+    };
+    let body: Value = serde_json::from_slice(&request.body)?;
+    let owner = body["user_id"].as_str().unwrap_or_default();
+    let restrictions = &body["spending_restrictions"];
+    let merchant = restrictions["allowed_vendor_ids"][0]
+        .as_str()
+        .unwrap_or_default();
+    let amount = restrictions["limit"]["amount"].as_u64().unwrap_or(0);
+    let interval = restrictions["interval"].as_str().unwrap_or_default();
+    if !state.world.owners.contains(owner)
+        || !state.world.merchants.contains(merchant)
+        || restrictions["allowed_vendor_ids"] != json!([merchant])
+        || amount == 0
+        || restrictions["limit"]["currency_code"] != "USD"
+        || !matches!(interval, "MONTHLY" | "TOTAL")
+        || body["is_shareable"] != false
+        || body["is_exempt_from_policy_agent"] != false
+        || body["permitted_spend_types"]
+            != json!({"physical_card":false,"reimbursements":false,"virtual_card":true})
+    {
+        return status(400);
+    }
+    let digest = crate::digest(&request.body);
+    let next = state.world.funds.len() + 1;
+    ensure!(next <= MAX_MESSAGES, "simulated_ramp_fund_budget");
+    let fund = state
+        .world
+        .funds
+        .entry(key.clone())
+        .or_insert_with(|| RampFund {
+            id: format!("22222222-0000-4000-8000-{next:012x}"),
+            owner_id: owner.into(),
+            merchant_id: merchant.into(),
+            amount_cents: amount,
+            interval: interval.into(),
+            request_digest: digest.clone(),
+        });
+    if digest != fund.request_digest {
+        return status(409);
+    }
+    if fault == Some(SimulatedFault::ReplyLost) {
+        return Ok(Err(unreachable_provider()));
+    }
+    let mut response = json_response(&json!({
+        "id":fund.id,"state":"ACTIVE","suspension":null,"spend_program_id":null,
+        "is_shareable":false,"is_exempt_from_policy_agent":false,
+        "members":[{"user_id":fund.owner_id,"suspension":null}],
+        "permitted_spend_types":{"physical_card_enabled":false,"reimbursements_enabled":false,"virtual_card_enabled":true},
+        "spending_restrictions":{"allowed_vendor_ids":[fund.merchant_id],"interval":fund.interval,
+            "temporary_limit":null,"limit":{"amount":fund.amount_cents,"currency_code":"USD"}}
+    }));
+    response.status = 201;
+    Ok(Ok(response))
 }
 
 fn serve_slack_webhook(

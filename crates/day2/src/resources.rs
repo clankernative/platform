@@ -770,6 +770,9 @@ pub(crate) fn reserve_in(
         Some(day2_capabilities::integrations::LiveConnection::SlackWebhook { .. }) => {
             "slack_webhook".into()
         }
+        Some(day2_capabilities::integrations::LiveConnection::Ramp { business_id, .. }) => {
+            format!("ramp/{business_id}")
+        }
         Some(day2_capabilities::integrations::LiveConnection::Slack { workspace_id, .. }) => {
             format!("slack/{workspace_id}")
         }

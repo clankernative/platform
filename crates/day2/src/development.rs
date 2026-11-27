@@ -927,16 +927,14 @@ fn verification_membership(
     if let Some(definition) = definition {
         let operation_fixtures = definition.operations.iter().flat_map(|(name, contract)| {
             contract
-                .verification_delegation
-                .iter()
-                .map(move |fixture| (name.as_str(), fixture.actor.as_str()))
+                .campaign_actor()
+                .map(|actor| (name.as_str(), actor))
         });
         let setup_fixtures = definition.operations.values().flat_map(|contract| {
             contract.verification_setup.iter().flat_map(|setup| {
                 contract
-                    .verification_delegation
-                    .iter()
-                    .map(move |fixture| (setup.as_str(), fixture.actor.as_str()))
+                    .campaign_actor()
+                    .map(|actor| (setup.as_str(), actor))
             })
         });
         let failure_fixtures = definition.errors.values().flat_map(|failure| {
@@ -980,6 +978,16 @@ fn verification_membership(
         }
     }
     (readers, writers)
+}
+
+fn operation_campaign_actor<'a>(artifact: &'a LoadedArtifact, operation: &str) -> Option<&'a str> {
+    artifact
+        .contract()
+        .app_contract
+        .as_ref()?
+        .operations
+        .get(operation)?
+        .campaign_actor()
 }
 
 fn operation_verification_delegation<'a>(
@@ -1147,20 +1155,19 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                     .map(Into::into)
                     .collect(),
                 effects: if operation.kind == "command" {
-                    // The Google Workspace share, like its reads, needs a
-                    // declaration: its fixture grant charges a serial budget,
-                    // so an undeclared one would serialize every command.
+                    // Workspace and Ramp writes have serial budgets. Attach
+                    // those grants only when the operation declares the effect.
                     crate::capabilities::WRITES
                         .iter()
                         .copied()
-                        .filter(|name| !google_workspace_capability(name))
+                        .filter(|name| !requires_declared_local_effect(name))
                         .map(Into::into)
                         .chain(
                             effects
                                 .iter()
                                 .filter(|effect| {
                                     effect.kind == "external"
-                                        && google_workspace_capability(&effect.command)
+                                        && requires_declared_local_effect(&effect.command)
                                 })
                                 .map(|effect| effect.command.clone()),
                         )
@@ -1193,15 +1200,13 @@ pub fn local_policy_for(artifact: &LoadedArtifact, actor: &str) -> Result<Policy
                             .operations
                             .get(&operation.name)
                             .into_iter()
-                            .flat_map(|contract| &contract.verification_delegation)
-                            .map(|fixture| fixture.actor.as_str());
+                            .filter_map(|contract| contract.campaign_actor());
                         let setup_actors = definition.operations.values().flat_map(|contract| {
                             contract
                                 .verification_setup
                                 .iter()
                                 .filter(|setup| **setup == operation.name)
-                                .flat_map(|_| &contract.verification_delegation)
-                                .map(|fixture| fixture.actor.as_str())
+                                .filter_map(|_| contract.campaign_actor())
                         });
                         let error_actors = definition.errors.values().flat_map(|failure| {
                             failure
@@ -1390,11 +1395,15 @@ pub fn create(artifact_path: &Path, directory: &Path, policy: Option<Policy>) ->
     create_for(artifact_path, directory, policy, ACTOR)
 }
 
-fn google_workspace_capability(name: &str) -> bool {
+fn requires_declared_local_effect(name: &str) -> bool {
     day2_capabilities::resources::Action::ALL
         .iter()
         .any(|action| {
-            action.provider() == day2_capabilities::resources::Provider::GoogleWorkspace
+            matches!(
+                action.provider(),
+                day2_capabilities::resources::Provider::GoogleWorkspace
+                    | day2_capabilities::resources::Provider::Ramp
+            ) && action.is_write()
                 && action.capability() == name
         })
 }
@@ -1902,6 +1911,19 @@ fn provider_resource_fixture(
             ],
         ),
         (
+            "ramp_fund_policy",
+            Provider::Ramp,
+            ResourceTarget::RampFundPolicy {
+                profile: day2_capabilities::integrations::RampFundPolicy {
+                    owner_id: crate::integrations::simulated::RAMP_OWNER.into(),
+                    merchant_id: crate::integrations::simulated::RAMP_MERCHANT.into(),
+                    max_amount_cents: 100_000,
+                    interval: day2_capabilities::integrations::RampInterval::Total,
+                },
+            },
+            vec![Action::RampCreateFund],
+        ),
+        (
             "google_workspace",
             Provider::GoogleWorkspace,
             crate::integrations::simulated::google_workspace_development_target(),
@@ -1965,9 +1987,16 @@ fn provider_resource_fixture(
             // Drive applies only the last of concurrent permission changes, so
             // a slot that grants the share charges a serial budget on the
             // connection, as an installation's must.
-            let budgets = if actions.contains(&Action::GoogleWorkspaceShareArtifact) {
+            let serial_budget = if actions.contains(&Action::GoogleWorkspaceShareArtifact) {
+                Some("google_workspace_shares")
+            } else if actions.contains(&Action::RampCreateFund) {
+                Some("ramp_fund_creations")
+            } else {
+                None
+            };
+            let budgets = if let Some(id) = serial_budget {
                 let budget = VersionRef {
-                    id: "google_workspace_shares".into(),
+                    id: id.into(),
                     revision: 1,
                 };
                 catalog.budgets.insert(
@@ -1990,6 +2019,10 @@ fn provider_resource_fixture(
                 (*name).into(),
                 ConnectionDefinition {
                     live: match provider {
+                        Provider::Ramp => Some(day2_capabilities::integrations::LiveConnection::Ramp {
+                            credential_ref: VersionRef { id: "simulated_ramp_bearer".into(), revision: 1 },
+                            business_id: crate::integrations::simulated::RAMP_BUSINESS.into(),
+                        }),
                         Provider::WorkspaceDirectory => Some(
                             day2_capabilities::integrations::LiveConnection::WorkspaceDirectory {
                                 service_account: "directory-reader@company.iam.gserviceaccount.com".into(),
@@ -2212,7 +2245,11 @@ fn resource_fixture_for_artifact_with_imports(
         catalog.budgets.extend(work.budgets);
         attachments.extend(work_attachments);
     }
-    for provider in [Provider::WorkspaceDirectory, Provider::GoogleWorkspace] {
+    for provider in [
+        Provider::WorkspaceDirectory,
+        Provider::GoogleWorkspace,
+        Provider::Ramp,
+    ] {
         if uses_provider(policy, provider) {
             let (directory, directory_attachments) =
                 provider_resource_fixture(app, policy, &[provider])?;
@@ -3002,6 +3039,7 @@ mod people_resource_tests {
         assert!(!uses_google_workspace(&base));
         let undeclared = local_policy_for(&base, "developer")?;
         assert!(!uses_provider(&undeclared, Provider::GoogleWorkspace));
+        assert!(!uses_provider(&undeclared, Provider::Ramp));
         Ok(())
     }
 
@@ -3033,6 +3071,7 @@ mod people_resource_tests {
                     max_input_tokens: 1,
                     ..Default::default()
                 },
+                ramp: crate::integrations::simulated::ramp_fixture(),
                 google_workspace: google_workspace_development_fixture(),
                 ..Default::default()
             },
@@ -3921,6 +3960,7 @@ fn disposable_provider_worlds(actor: &str) -> crate::integrations::simulated::Si
         },
         // Disposable campaigns read the explicitly seeded synthetic Carta store.
         carta: None,
+        ramp: crate::integrations::simulated::ramp_fixture(),
         google_workspace: crate::integrations::simulated::google_workspace_development_fixture(),
     }
 }
@@ -4519,11 +4559,11 @@ impl Campaign {
                         &json!({}),
                         &Value::Null,
                         VerificationInvocation {
-                            actor: operation_verification_delegation(
+                            actor: operation_campaign_actor(
                                 self.runtime.artifact(),
                                 &sample.operation,
                             )
-                            .map_or(self.actor.as_str(), |principal| principal.actor.as_str()),
+                            .unwrap_or(&self.actor),
                             input: "",
                             seed: sample.seed.parse()?,
                         },
@@ -4618,13 +4658,22 @@ impl Campaign {
                     self.provider_clock + index as i64
                 };
                 let input: Value = serde_json::from_str(&input_text)?;
-                let delegated = if kind == CaseKind::Positive {
-                    operation_verification_delegation(self.runtime.artifact(), &operation_name)
-                        .cloned()
+                let delegated = (kind == CaseKind::Positive)
+                    .then(|| {
+                        operation_verification_delegation(self.runtime.artifact(), &operation_name)
+                    })
+                    .flatten()
+                    .cloned();
+                let selected_actor = if kind == CaseKind::Positive {
+                    operation_campaign_actor(self.runtime.artifact(), &operation_name)
+                } else if setup_step {
+                    self.obligations.front().and_then(|sample| {
+                        operation_campaign_actor(self.runtime.artifact(), &sample.operation)
+                    })
                 } else {
                     None
                 };
-                if delegated.is_some() {
+                if selected_actor.is_some() {
                     ensure!(
                         self.runtime.integrations().is_simulated()
                             && self
@@ -4634,24 +4683,10 @@ impl Campaign {
                                 .credential_manifest
                                 .is_empty()
                             && !interactive,
-                        "delegated verification requires a credential-free simulated campaign"
+                        "verification principal requires a credential-free simulated campaign"
                     );
                 }
-                let campaign_actor = if let Some(principal) = &delegated {
-                    principal.actor.as_str()
-                } else if kind == CaseKind::Setup {
-                    self.queue
-                        .front()
-                        .and_then(|sample| {
-                            operation_verification_delegation(
-                                self.runtime.artifact(),
-                                &sample.operation,
-                            )
-                        })
-                        .map_or(self.actor.as_str(), |principal| principal.actor.as_str())
-                } else {
-                    self.actor.as_str()
-                };
+                let campaign_actor = selected_actor.unwrap_or(&self.actor);
                 if interactive {
                     crate::managed_credentials::verification::confirm(
                         &self.runtime,

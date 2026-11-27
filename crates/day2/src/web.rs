@@ -1184,7 +1184,7 @@ async fn handle_timed(
         return handle_app_call(host, request).await;
     }
     let json = crate::web_api::is_json(request.uri().path())
-        || prototype::is_query(request.uri().path())
+        || prototype::is_api(request.uri().path())
         || request.uri().path() == crate::cli_login::PATH;
     let live_request = request.method() == Method::GET
         && request.uri().path() == "/_live"

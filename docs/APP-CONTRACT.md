@@ -241,12 +241,18 @@ state, trace replay and duplicate delivery. Shared wording never substitutes for
 an executable case. Platform capacity and authority failures stay on the sealed
 host path; they do not need fabricated business-error examples.
 
+For a command or query whose successful case requires a particular identity, use
+`.verify_as_actor("reviewer@synthetic.example")` on its definition. A direct
+fixture actor is available in credential-free, simulated campaigns. Its
+operation and declared setup steps run in its own authority context. Use
+synthetic identities for these fixtures and configure live users separately.
+
 Business authorization failures can require a different synthetic actor from the
 campaign's successful commands. Use `Api.failed_command_as` or
 `Api.failed_query_as` with `Api.verification_principal("denied-synthetic")` as the
 second argument; the generator retains the operation's actual input type. The
 principal must be nonempty, at most 128 ASCII bytes, using letters, digits or
-`._:-`. An explicit empty principal is invalid, not a default-actor request.
+`@._:+-`. Admission rejects empty fixture principals.
 The ordinary `failed_command` and `failed_query` helpers use the campaign actor.
 
 The artifact binds each override to its declared failure target. Disposable

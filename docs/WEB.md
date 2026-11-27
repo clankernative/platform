@@ -16,7 +16,34 @@ The app provides `prototype/index.html` and `prototype/page.json`. The latter na
 
 An editable app also declares an owner-only save command with input `{html: Str}` and output `{id: U64}`, a local revision query with input `{id: U64}` and output `{html: Str}`, and a separate publication entry point in `prototype/App.roc`. Revisions must be immutable. The pilot stores each save as a fresh row and exposes no update or deletion operation. The maximum HTML size is 16 KiB. The publishable app source has a 512 KiB budget.
 
-The owner's source download substitutes the selected HTML and publication entry point into the captured source and binds the query to the published namespace. The result is an ordinary app source tree for review, CI, an independent resource grant and deployment. After admission its root serves the packaged page when the app has no other pages. The preview and published app use the same frame renderer.
+The owner's source download substitutes the selected HTML and publication entry point into the captured source and binds the declared business operations to the published namespace. The result is an ordinary app source tree for review, CI, an independent resource grant and deployment. After admission its root serves the packaged page when the app has no other pages. The preview and published app use the same frame renderer.
+
+### Confirmed submissions
+
+A prototype can declare one public business command in its admitted
+`prototype/page.json` alongside its query, for example
+`"submit_command": "vendorintake.submit_request"`. The compiled command owns its
+input schema, audience and local storage effects. Flat text, boolean and integer
+fields are supported. Read-only preparation can check current membership and its
+resource grants. External effects, child-command requests and credential operations
+are rejected at admission. Publication carries the same command suffix into the
+new app's namespace. Its installation activates its own authority.
+
+From a button click handler in the HTML, call
+`await day2.submit("submit_request", fields)` with exactly the command's fields.
+For a form, use a `type="button"` control and call `form.reportValidity()`
+before invoking the bridge. The sandbox disables native form submission.
+Use a JavaScript `bigint` for integers outside the safe `Number` range. The trusted
+Day2 shell shows the installed operation name and the exact values. The viewer
+can cancel or confirm with a second action outside the sandbox. The approved
+body goes to the pinned revision's fixed command endpoint. It uses the viewer's
+current session, CSRF token, and ordinary typed command, policy, idempotency and
+audited invocation handling. The promise returns the typed business result.
+If the outcome is uncertain, retry the same values on the open page to recover
+the same receipt. A completed, confirmed submission can be made again deliberately.
+
+Trusted review and provider effects such as spend-program creation run through
+separately authorized operations. A query-only prototype exposes `day2.call`.
 
 ## Experimental request-time presentations
 

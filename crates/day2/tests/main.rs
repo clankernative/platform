@@ -65,6 +65,7 @@ mod schedule_sweep;
 mod schema;
 mod template_routes;
 mod templates;
+mod vendor_intake_prototype;
 mod verification_setup;
 mod web;
 mod web_resources;

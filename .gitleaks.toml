@@ -7,7 +7,7 @@ useDefault = true
 description = "Public schema identity keys, not authentication credentials"
 targetRules = ["generic-api-key"]
 condition = "AND"
-paths = ['''(^|/)(fixtures/[^/]+|examples/reports|examples/notifications|examples/slack-dashboard)/model-identities\.json$''']
+paths = ['''(^|/)(fixtures/[^/]+|examples/reports|examples/notifications|examples/slack-dashboard|examples/vendor-intake)/model-identities\.json$''']
 regexTarget = "line"
 regexes = [
   '''^\s*"key": "[a-f0-9]{32}",?$''',

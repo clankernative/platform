@@ -81,6 +81,7 @@ fn simulated_fixture() -> crate::integrations::simulated::SimulatedFixture {
         OpenAiWorld, SimulatedFixture, SlackWorld, SnowflakeWorld,
     };
     SimulatedFixture {
+        ramp: crate::integrations::simulated::ramp_fixture(),
         slack_webhook: crate::integrations::simulated::slack_webhook_fixture(),
         delegation: Default::default(),
         gitea_actions: Default::default(),

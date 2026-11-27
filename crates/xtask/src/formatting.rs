@@ -144,6 +144,7 @@ fn sources(root: &Path) -> Result<Vec<PathBuf>> {
         root.join("examples/notifications"),
         root.join("examples/chart-live"),
         root.join("examples/slack-dashboard"),
+        root.join("examples/vendor-intake"),
     ];
     for source in roots {
         collect(&source, 0, &mut entries, &mut files)
@@ -284,6 +285,7 @@ mod tests {
             "platform/examples/notifications",
             "platform/examples/chart-live",
             "platform/examples/slack-dashboard",
+            "platform/examples/vendor-intake",
         ] {
             fs::create_dir_all(directory.path().join(path))?;
         }
@@ -332,6 +334,7 @@ mod tests {
             "platform/examples/reports/commands/analyze/AnalyzeReport.roc",
             "platform/examples/reports/storage/Models.roc",
             "platform/examples/slack-dashboard/queries/history/SlackHistory.roc",
+            "platform/examples/vendor-intake/App.roc",
             "platform/fixtures/command-target-adversaries/commands/submit/SubmitReport.roc",
             "platform/fixtures/row-authority-web-conformance/pages/Routes.roc",
             "platform/sdk/data/pagination/Cursor.roc",

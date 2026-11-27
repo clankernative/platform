@@ -1,0 +1,11 @@
+<main>
+  <h1>Vendor review queue</h1>
+  <ul>
+  {% for entry in review.requests.items %}
+    <li><a href="{{ routes.proposal(id=entry.id) }}">Request {{ entry.id }} · {{ entry.vendor }}</a></li>
+  {% else %}
+    <li>No pending requests are visible to you.</li>
+  {% endfor %}
+  </ul>
+  {% if review.requests.has_more %}<a href="{{ routes.review(after=review.requests.next_after) }}">Next page</a>{% endif %}
+</main>
