@@ -26,7 +26,7 @@ ReadRevision :: [].{
 		)
 
 	contract = {
-		title: "Read a dashboard revision",
+		title: "Read a vendor intake page revision",
 		usage: {
 			purpose: "Retrieve the exact saved source selected by a pinned preview.",
 			use_when: ["Opening a revision or loading its source for editing."],
@@ -37,7 +37,7 @@ ReadRevision :: [].{
 		},
 		inputs: { id: "The positive revision number returned by saving." },
 		outputs: { html: "The exact HTML stored in that revision." },
-		example: |_| Ok({ input: { id: 1 }, output: { html: "<h1>Channel activity</h1>" } }),
+		example: |_| Ok({ input: { id: 1 }, output: { html: "<h1>Vendor intake</h1>" } }),
 		input_sources: |_| [],
 		follow_ups: [],
 		deprecated: Bool.False,

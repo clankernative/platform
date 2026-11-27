@@ -154,7 +154,10 @@ fn signed_in_members_submit_exact_inputs_on_pinned_pages() -> Result<()> {
     )?;
     let starter = page(&member, "/_prototype/published")?;
     assert_eq!(
-        member.acting_get(&starter.query, NONMEMBER).send()?.status(),
+        member
+            .acting_get(&starter.query, NONMEMBER)
+            .send()?
+            .status(),
         StatusCode::BAD_REQUEST
     );
     let published = starter.submit;

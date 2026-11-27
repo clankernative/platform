@@ -31,10 +31,10 @@ SaveRevision :: [].{
 	}
 
 	contract = {
-		title: "Save a dashboard revision",
+		title: "Save a vendor intake page revision",
 		usage: {
 			purpose: "Record the supplied HTML as a new immutable revision.",
-			use_when: ["Saving a draft or sharing an exact version of the dashboard."],
+			use_when: ["Saving a draft or sharing an exact version of the vendor intake page."],
 			avoid_when: [],
 			preconditions: ["The caller is an app owner and supplies nonblank HTML without NUL characters."],
 			effects: ["Appends one revision with the authenticated author."],
@@ -42,7 +42,7 @@ SaveRevision :: [].{
 		},
 		inputs: { html: "Standalone HTML, up to 16,384 UTF-8 bytes." },
 		outputs: { id: "The immutable revision number in this app." },
-		example: |_| Ok({ input: { html: "<h1>Channel activity</h1>" }, output: { id: 1 } }),
+		example: |_| Ok({ input: { html: "<h1>Vendor intake</h1>" }, output: { id: 1 } }),
 		input_sources: |_| [],
 		follow_ups: [],
 		deprecated: Bool.False,
