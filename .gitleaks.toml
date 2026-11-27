@@ -4,6 +4,12 @@ title = "Platform public source secret scanning"
 useDefault = true
 
 [[allowlists]]
+description = "Public model identifiers in the Vendor Intake example, confirmed non-secret"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^examples/vendor-intake/model-identities\.json$''']
+
+[[allowlists]]
 description = "Public schema identity keys, not authentication credentials"
 targetRules = ["generic-api-key"]
 condition = "AND"
