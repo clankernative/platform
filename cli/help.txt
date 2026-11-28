@@ -26,6 +26,12 @@ USAGE
   day2 instance deploy <directory> <platform> <app> <candidate>
                        <new directory> [--deadline <unix seconds>] [--agent]
   day2 instance selection <directory> <app> [--agent]
+  day2 instance extension verify|policy|fleet <directory> <app> <app directory>
+                       [--agent]
+  day2 instance extension pack <directory> <app> <app directory>
+                       <signing key> [--agent]
+  day2 instance extension local <directory> <app> <app directory>
+                       <new directory> [--agent]
   day2 instance ci-workflow <directory> [--agent]
   day2 ci check [--reuse <reuse directory>] <head> [<base>] <cases>
                 <new directory> [--agent]
@@ -158,6 +164,21 @@ COMMANDS
   instance selection
                   Read a single-replica app's saved release generation and
                   whether its exact activating candidate is blocked.
+  instance extension
+                  One app's self-hosted Chrome extension, against the
+                  extension <directory>/day2.json pins for <app>, whose
+                  <app directory> holds .chrome-extension/ and
+                  public-downloads/. verify checks the committed release,
+                  or that an app without a pin publishes none. pack signs
+                  the sources with <signing key> (keep it off disk with
+                  process substitution), injecting the manifest's key and
+                  update_url, writes the release to public-downloads/ and
+                  verifies it. local writes an unpacked build to <new
+                  directory>. policy prints the Google Admin settings and
+                  ExtensionSettings policy. fleet reads the last day of the
+                  instance project's edge request logs for the release's
+                  uptake with the operator's gcloud credentials. Prints the
+                  host's JSON receipt.
   instance ci-workflow
                   Validate <directory>/day2.json and print app CI's
                   org-scoped workflow for <org>/day2-ci,
@@ -189,8 +210,11 @@ COMMANDS
                   regular .roc file with the SDK's reviewed formatter, then
                   runs platform check app 42 <cases> (4 to 100), whose
                   build also runs the top-level expects of every .roc
-                  module it captures. Extension alone runs platform
-                  extension verify. app.tar.gz and receipt.json go to
+                  module it captures. Native or extension verifies the
+                  extension release against the pin DAY2_CI_EXTENSION
+                  names (day2.json's, rendered into the workflow: null
+                  or its ID, CRX filename and update URL), as instance
+                  extension verify does. app.tar.gz and receipt.json go to
                   <new directory> only when every lane ran and the tooling
                   is a qualified SDK's (its precompiled distribution names
                   it); the report says why otherwise. A push run may name

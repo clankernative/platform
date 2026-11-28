@@ -172,10 +172,13 @@ fn unwrap_base64(lines: &str) -> Vec<u8> {
         .expect("fixture base64")
 }
 
-fn config() -> Config {
-    Config {
+const UPDATE_URL: &str = "https://reminders.example.com/downloads/updates.xml";
+
+fn binding() -> Binding {
+    Binding {
         id: TEST_ID.into(),
-        package: "reminders.crx".into(),
+        crx: "reminders.crx".into(),
+        update_url: UPDATE_URL.into(),
     }
 }
 
@@ -184,8 +187,6 @@ fn manifest_with(version: &str, extra: Value) -> Vec<u8> {
         "manifest_version": 3,
         "name": "Reminders",
         "version": version,
-        "key": TEST_PUBLIC_KEY.split_whitespace().collect::<String>(),
-        "update_url": "https://reminders.example.com/downloads/updates.xml",
         "background": { "service_worker": "src/background.js", "type": "module" },
     });
     for (name, value) in extra.as_object().expect("extra object") {
@@ -215,7 +216,7 @@ fn source(version: &str) -> Files {
 
 fn pack_with(key: &str, source: &Files, downloads: &Files) -> Result<Package> {
     pack(
-        &config(),
+        &binding(),
         source,
         downloads,
         key.as_bytes(),
@@ -270,7 +271,7 @@ fn packing_is_deterministic_and_verifies_against_source() -> Result<()> {
         package.crx, again.crx,
         "PKCS#8 and PKCS#1 encodings sign identically"
     );
-    let release = verify(&config(), &source, &downloads(&package))?;
+    let release = verify(&binding(), &source, &downloads(&package))?;
     assert_eq!(release, package.release);
     assert_eq!(release.extension_id, TEST_ID);
     assert_eq!(release.version, "1.2.0");
@@ -292,7 +293,20 @@ fn packing_is_deterministic_and_verifies_against_source() -> Result<()> {
     );
     let (public_key, archive) = open(&package.crx)?;
     assert_eq!(extension_id(public_key), TEST_ID);
-    assert_eq!(archive, zip(&source)?);
+    let released = released(&binding(), &source, &manifest(&source)?, public_key)?;
+    assert_eq!(archive, zip(&released)?);
+    assert_eq!(
+        released.keys().collect::<Vec<_>>(),
+        source.keys().collect::<Vec<_>>()
+    );
+    let packed: Value = serde_json::from_slice(&released["manifest.json"])?;
+    assert_eq!(
+        packed["key"],
+        TEST_PUBLIC_KEY.split_whitespace().collect::<String>(),
+        "the release names its signing key's public key"
+    );
+    assert_eq!(packed["update_url"], UPDATE_URL);
+    assert_eq!(packed["name"], "Reminders");
     Ok(())
 }
 
@@ -345,15 +359,31 @@ fn minimum_chrome_version_is_published() -> Result<()> {
 }
 
 #[test]
-fn only_the_declared_signing_key_can_release() {
+fn only_the_pinned_signing_key_can_release() -> Result<()> {
     let message = error(pack_with(OTHER_KEY, &source("1"), &Files::new()));
     assert!(
-        message.contains("chrome_extension_signing_key"),
+        message.contains("chrome_extension_signing_key") && message.contains("day2.json pins"),
         "{message}"
+    );
+    let other = Binding {
+        id: OTHER_ID.into(),
+        ..binding()
+    };
+    let foreign = pack(
+        &other,
+        &source("1"),
+        &Files::new(),
+        OTHER_KEY.as_bytes(),
+        &SystemRandom::new(),
+    )?;
+    assert!(
+        error(verify(&binding(), &source("1"), &downloads(&foreign)))
+            .contains("chrome_extension_identity"),
+        "another extension's release never verifies against this pin"
     );
     assert!(
         error(pack(
-            &config(),
+            &binding(),
             &source("1"),
             &Files::new(),
             b"-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n",
@@ -361,6 +391,7 @@ fn only_the_declared_signing_key_can_release() {
         ))
         .contains("unencrypted RSA private key")
     );
+    Ok(())
 }
 
 #[test]
@@ -373,14 +404,14 @@ fn verification_rejects_stale_tampered_and_incomplete_releases() -> Result<()> {
         b"export const ready = false;\n".to_vec(),
     );
     assert!(
-        error(verify(&config(), &edited, &downloads(&package))).contains("chrome_extension_stale")
+        error(verify(&binding(), &edited, &downloads(&package))).contains("chrome_extension_stale")
     );
 
     let mut tampered = downloads(&package);
     let crx = tampered.get_mut("reminders.crx").expect("crx");
     let index = crx.len() - 40;
     crx[index] ^= 0x20;
-    assert!(error(verify(&config(), &original, &tampered)).contains("invalid signature"));
+    assert!(error(verify(&binding(), &original, &tampered)).contains("invalid signature"));
 
     let mut wrong_xml = downloads(&package);
     wrong_xml.insert(
@@ -390,36 +421,29 @@ fn verification_rejects_stale_tampered_and_incomplete_releases() -> Result<()> {
             .into_bytes(),
     );
     assert!(
-        error(verify(&config(), &original, &wrong_xml))
+        error(verify(&binding(), &original, &wrong_xml))
             .contains("chrome_extension_update_manifest")
     );
 
     let mut extra = downloads(&package);
     extra.insert("other.crx".into(), package.crx.clone());
-    assert!(error(verify(&config(), &original, &extra)).contains("chrome_extension_downloads"));
+    assert!(error(verify(&binding(), &original, &extra)).contains("chrome_extension_downloads"));
     let mut missing = downloads(&package);
     missing.remove(UPDATE_MANIFEST);
-    assert!(error(verify(&config(), &original, &missing)).contains("chrome_extension_downloads"));
+    assert!(error(verify(&binding(), &original, &missing)).contains("chrome_extension_downloads"));
     Ok(())
 }
 
 #[test]
-fn undeclared_release_files_are_refused() {
-    assert!(verify_undeclared(&Files::new()).is_ok());
-    assert!(
-        error(verify_undeclared(&Files::from([(
-            "tool.crx".into(),
-            vec![1]
-        )])))
-        .contains("chrome_extension_undeclared")
-    );
-    assert!(
-        error(verify_undeclared(&Files::from([(
-            UPDATE_MANIFEST.into(),
-            vec![1]
-        )])))
-        .contains("chrome_extension_undeclared")
-    );
+fn apps_without_a_pin_publish_no_downloads() {
+    assert!(verify_unpinned(&Files::new()).is_ok());
+    for name in ["tool.crx", UPDATE_MANIFEST, "notes.xml"] {
+        assert!(
+            error(verify_unpinned(&Files::from([(name.into(), vec![1])])))
+                .contains("chrome_extension_unpinned"),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -471,31 +495,11 @@ fn manifests_are_validated_before_signing() {
         (json!({ "version": "0.0" }), "invalid Chrome version"),
         (json!({ "version": "65536" }), "invalid Chrome version"),
         (json!({ "name": null }), "`name` must be a string"),
-        (json!({ "key": null }), "`key` must be a string"),
         (
-            json!({ "key": OTHER_PUBLIC_KEY.split_whitespace().collect::<String>() }),
-            "RSA public key of extension",
+            json!({ "key": TEST_PUBLIC_KEY.split_whitespace().collect::<String>() }),
+            "remove `key`",
         ),
-        (
-            json!({ "update_url": null }),
-            "`update_url` must be a string",
-        ),
-        (
-            json!({ "update_url": "http://reminders.example.com/downloads/updates.xml" }),
-            "update_url must be",
-        ),
-        (
-            json!({ "update_url": "https://reminders.example.com/updates.xml" }),
-            "update_url must be",
-        ),
-        (
-            json!({ "update_url": "https://reminders.example.com:8443/downloads/updates.xml" }),
-            "update_url must be",
-        ),
-        (
-            json!({ "update_url": "https://user@reminders.example.com/downloads/updates.xml" }),
-            "update_url must be",
-        ),
+        (json!({ "update_url": UPDATE_URL }), "remove `update_url`"),
         (
             json!({ "minimum_chrome_version": 120 }),
             "minimum_chrome_version must be a string",
@@ -509,7 +513,7 @@ fn manifests_are_validated_before_signing() {
     }
     let mut missing = source("1");
     missing.remove("manifest.json");
-    assert!(error(policy(&config(), &missing)).contains("manifest.json is missing"));
+    assert!(error(policy(&binding(), &missing)).contains("manifest.json is missing"));
 }
 
 #[test]
@@ -525,49 +529,82 @@ fn extension_paths_are_portable_and_unreserved() {
         let mut files = source("1");
         files.insert(path.into(), vec![1]);
         assert!(
-            error(policy(&config(), &files)).contains("chrome_extension_path"),
+            error(policy(&binding(), &files)).contains("chrome_extension_path"),
             "{path}"
         );
     }
     let mut conflict = source("1");
     conflict.insert("src".into(), vec![1]);
-    assert!(error(policy(&config(), &conflict)).contains("share a name"));
+    assert!(error(policy(&binding(), &conflict)).contains("share a name"));
 }
 
 #[test]
-fn declarations_name_an_id_and_a_crx_download() -> Result<()> {
-    assert_eq!(
-        super::config(br#"{"id":"aenkglomgaiikbngepnbfminfpfgmape","package":"reminders.crx"}"#)?,
-        config()
-    );
-    for bytes in [
-        br#"{"id":"AENKGLOMGAIIKBNGEPNBFMINFPFGMAPE","package":"reminders.crx"}"#.as_slice(),
-        br#"{"id":"aenkglomgaiikbngepnbfminfpfgmapq","package":"reminders.crx"}"#,
-        br#"{"id":"aenkglomgaiikbngepnbfminfpfgmape","package":"reminders.zip"}"#,
-        br#"{"id":"aenkglomgaiikbngepnbfminfpfgmape","package":"../reminders.crx"}"#,
-        br#"{"id":"aenkglomgaiikbngepnbfminfpfgmape","package":"reminders.crx","key":"x"}"#,
+fn pins_name_an_id_a_crx_download_and_an_update_manifest_url() {
+    assert!(binding().validate().is_ok());
+    for (id, crx, update_url) in [
+        (
+            "AENKGLOMGAIIKBNGEPNBFMINFPFGMAPE",
+            "reminders.crx",
+            UPDATE_URL,
+        ),
+        (
+            "aenkglomgaiikbngepnbfminfpfgmapq",
+            "reminders.crx",
+            UPDATE_URL,
+        ),
+        (TEST_ID, "reminders.zip", UPDATE_URL),
+        (TEST_ID, "../reminders.crx", UPDATE_URL),
+        (
+            TEST_ID,
+            "reminders.crx",
+            "http://reminders.example.com/downloads/updates.xml",
+        ),
+        (
+            TEST_ID,
+            "reminders.crx",
+            "https://reminders.example.com/updates.xml",
+        ),
+        (
+            TEST_ID,
+            "reminders.crx",
+            "https://reminders.example.com:8443/downloads/updates.xml",
+        ),
+        (
+            TEST_ID,
+            "reminders.crx",
+            "https://user@reminders.example.com/downloads/updates.xml",
+        ),
     ] {
-        assert!(
-            super::config(bytes).is_err(),
-            "{}",
-            String::from_utf8_lossy(bytes)
-        );
+        let pin = Binding {
+            id: id.into(),
+            crx: crx.into(),
+            update_url: update_url.into(),
+        };
+        assert!(pin.validate().is_err(), "{pin:?}");
+        assert!(policy(&pin, &source("1")).is_err(), "{pin:?}");
     }
-    Ok(())
 }
 
 #[test]
 fn local_builds_keep_the_release_identity_only_without_an_overlay() -> Result<()> {
-    let source = source("1");
-    let plain = local(&config(), &source, &Files::new())?;
+    let released = downloads(&pack_with(TEST_KEY, &source("1"), &Files::new())?);
+    // A local build tests sources the release does not hold yet.
+    let source = source("2");
+    let plain = local(&binding(), &source, &released, &Files::new())?;
     let manifest: Value = serde_json::from_slice(&plain["manifest.json"])?;
     assert!(manifest.get("update_url").is_none());
     assert_eq!(manifest["name"], "Reminders");
-    assert!(manifest.get("key").is_some());
+    assert_eq!(
+        manifest["key"],
+        TEST_PUBLIC_KEY.split_whitespace().collect::<String>()
+    );
     assert_eq!(plain["src/background.js"], source["src/background.js"]);
+    assert!(
+        error(local(&binding(), &source, &Files::new(), &Files::new())).contains("pack one first")
+    );
 
     let overlay = Files::from([("src/background.js".into(), b"// observe only\n".to_vec())]);
-    let changed = local(&config(), &source, &overlay)?;
+    let changed = local(&binding(), &source, &Files::new(), &overlay)?;
     let manifest: Value = serde_json::from_slice(&changed["manifest.json"])?;
     assert!(manifest.get("key").is_none() && manifest.get("update_url").is_none());
     assert_eq!(manifest["name"], "Reminders (local)");
@@ -581,8 +618,9 @@ fn local_builds_keep_the_release_identity_only_without_an_overlay() -> Result<()
             json!({ "permissions": ["webRequest", "webRequestBlocking"] }),
         ),
     );
-    let manifest: Value =
-        serde_json::from_slice(&local(&config(), &blocking, &overlay)?["manifest.json"])?;
+    let manifest: Value = serde_json::from_slice(
+        &local(&binding(), &blocking, &Files::new(), &overlay)?["manifest.json"],
+    )?;
     assert_eq!(
         manifest["permissions"],
         json!(["webRequest"]),
@@ -590,14 +628,27 @@ fn local_builds_keep_the_release_identity_only_without_an_overlay() -> Result<()
     );
 
     let replaced = Files::from([("manifest.json".into(), b"{}".to_vec())]);
-    assert!(error(local(&config(), &source, &replaced)).contains("cannot replace manifest.json"));
+    assert!(
+        error(local(&binding(), &source, &released, &replaced))
+            .contains("cannot replace manifest.json")
+    );
+
+    let other = Binding {
+        id: OTHER_ID.into(),
+        ..binding()
+    };
+    assert!(
+        error(local(&other, &source, &released, &Files::new()))
+            .contains("chrome_extension_identity"),
+        "a build never takes another extension's key"
+    );
     Ok(())
 }
 
 #[test]
 fn policy_force_installs_from_the_published_update_manifest() -> Result<()> {
     assert_eq!(
-        policy(&config(), &source("3.1"))?,
+        policy(&binding(), &source("3.1"))?,
         json!({
             "extension_id": TEST_ID,
             "version": "3.1",

@@ -15,6 +15,7 @@ import ops.InstanceSource
 import ops.InstanceCandidate
 import ops.InstanceDeploy
 import ops.InstanceSelection
+import ops.ChromeExtension
 import ops.InstanceCiWorkflow
 import ops.Build
 import ops.Delegation
@@ -101,6 +102,8 @@ run! = |args| match args {
 	["instance-candidate-native-probe-session", request] => InstanceCandidate.native_probe!(request, call!)
 	["instance-deploy-session", request, roots] => InstanceDeploy.run!(request, roots, call!)
 	["instance-selection-session"] => InstanceSelection.read!(call!)
+	# Only the host starts this, for `day2 instance extension`; it has no `platform` entry.
+	["instance-extension-session", mode] => ChromeExtension.run!(mode, call!)
 	["instance-ci-workflow-session", request] => InstanceCiWorkflow.run!(request, call!)
 	# Only the host starts these, for `day2 ci check`, `fetch`, `reuse` and `store`; they have no `platform` entry.
 	["ci-check-session", request] => CiCheck.run!(request, call!)

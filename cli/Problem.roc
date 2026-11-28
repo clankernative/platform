@@ -30,6 +30,7 @@ Problem := [
 	CandidateFailed(Str),
 	DeployFailed(Str),
 	SelectionFailed(Str),
+	ExtensionFailed(Str),
 	DeployUnavailable(Str),
 	DeployFenced(Str),
 	CiCheckFailed(Str),
@@ -68,6 +69,7 @@ Problem := [
 		| CandidateFailed(_)
 		| DeployFailed(_)
 		| SelectionFailed(_)
+		| ExtensionFailed(_)
 		| CiCheckFailed(_)
 		| CiFetchFailed(_)
 		| CiReuseFailed(_)
@@ -109,6 +111,7 @@ Problem := [
 		CandidateFailed(_) => "candidate_failed"
 		DeployFailed(_) => "deploy_failed"
 		SelectionFailed(_) => "selection_failed"
+		ExtensionFailed(_) => "extension_failed"
 		DeployUnavailable(_) => "deploy_unavailable"
 		DeployFenced(_) => "deploy_fenced"
 		CiCheckFailed(_) => "ci_check_failed"
@@ -121,7 +124,7 @@ Problem := [
 
 	message : Problem -> Str
 	message = |problem| match problem {
-		UnknownCommand => "This CLI implements app describe <app>, instance check|render|plan|apply|release|source|candidate|deploy|selection|ci-workflow <directory> and ci check|fetch|store."
+		UnknownCommand => "This CLI implements app describe <app>, instance check|render|plan|apply|release|source|candidate|deploy|selection|extension|ci-workflow <directory> and ci check|fetch|store."
 		MissingCommand => "Describe options require the command app describe <app>."
 		MissingArgument => "A required argument is missing."
 		InvalidArguments(detail) => "Invalid arguments: ${detail}"
@@ -152,6 +155,7 @@ Problem := [
 		| CandidateFailed(detail)
 		| DeployFailed(detail)
 		| SelectionFailed(detail)
+		| ExtensionFailed(detail)
 		| DeployUnavailable(detail)
 		| DeployFenced(detail)
 		| CiCheckFailed(detail)
@@ -200,6 +204,9 @@ Problem := [
 		SelectionFailed(
 			_,
 		) => "Read with gcloud access to the instance's private release state. Check the saved selection and recovery marker before retrying."
+		ExtensionFailed(
+			_,
+		) => "Run against the instance directory and the app's own checkout. Pack with the extension's signing key from the instance's secret store through process substitution, increase the manifest version when the sources changed, and commit src/ and both release files together."
 		DeployUnavailable(_) => "The deploy stopped before changing the app. Retry with enough time to finish."
 		DeployFenced(
 			_,

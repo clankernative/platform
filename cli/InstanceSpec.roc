@@ -79,6 +79,9 @@ InstanceSpec :: {
 	## A self-hosted Chrome extension: every name is derived from the app and its pinned ID.
 	Extension : {
 		id : Str,
+
+		## `<app>.crx`, the CRX filename under the app's `public-downloads/`.
+		crx : Str,
 		update_url : Str,
 
 		## The CRX and update manifest paths, sorted: exactly the app edge's `public_download_paths`.
@@ -275,6 +278,7 @@ derive_app = |org, domain, project, registry, apply_identity, bound| {
 			NoExtension => Err(Null)
 			Pinned(extension_id) => Ok({
 				id: extension_id,
+				crx: "${id}.crx",
 				update_url: "https://${hostname}/downloads/updates.xml",
 				downloads: ["/downloads/${id}.crx", "/downloads/updates.xml"].sort_with(Names.order),
 				signing_secret: "${id}-chrome-extension-signing-key",
@@ -699,6 +703,7 @@ expect match InstanceSpec.from_json(sample) {
 									schedules: "enabled",
 									extension: Ok({
 										id: "jldmikbinomhomcbmeppagennfohakni",
+										crx: "go.crx",
 										update_url: "https://go.apps.example.com/downloads/updates.xml",
 										downloads: ["/downloads/go.crx", "/downloads/updates.xml"],
 										signing_secret: "go-chrome-extension-signing-key",
@@ -740,6 +745,7 @@ expect {
 				bound.extension
 					== Ok({
 						id: "abcdefghijklmnopabcdefghijklmnop",
+						crx: "wiki.crx",
 						update_url: "https://wiki.apps.example.com/downloads/updates.xml",
 						downloads: ["/downloads/updates.xml", "/downloads/wiki.crx"],
 						signing_secret: "wiki-chrome-extension-signing-key",
