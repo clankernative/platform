@@ -235,7 +235,8 @@ INTERNAL_DEPS = [
     "//crates/day2-assets:lib",
     "//crates/day2-contracts:lib",
     "//crates/day2-sandbox:lib",
-    "//crates/day2-capabilities:lib"
+    "//crates/day2-capabilities:lib",
+    "//crates/day2-completion-page:lib"
 ]
 
 DEV_INTERNAL_DEPS = []

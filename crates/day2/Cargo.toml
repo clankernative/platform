@@ -12,6 +12,7 @@ day2-contracts = { path = "../day2-contracts" }
 day2-sandbox = { path = "../day2-sandbox" }
 unicode-segmentation = "=1.13.3"
 day2-capabilities = { path = "../day2-capabilities" }
+day2-completion-page = { path = "../day2-completion-page" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -637,6 +637,7 @@ fn implementation() -> Digest {
         include_str!("../channel/storage.rs"),
         include_str!("../channel/serving.rs"),
         include_str!("../protocol.rs"),
+        include_str!("../protocol/backup_handoff.rs"),
         include_str!("../protocol/create_attestation.rs"),
         include_str!("../../native_enrollment.rs"),
         include_str!("../owner.rs"),

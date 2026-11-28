@@ -456,6 +456,7 @@ dependencies = [
  "cssparser",
  "day2-assets",
  "day2-capabilities",
+ "day2-completion-page",
  "day2-contracts",
  "day2-sandbox",
  "ego-tree",
