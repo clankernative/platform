@@ -56,6 +56,7 @@ COMPILE_INPUTS = [
     "//:ops/Ci.roc",
     "//:ops/CiCheck.roc",
     "//:ops/CiFetch.roc",
+    "//:ops/CiReuse.roc",
     "//:ops/CiStore.roc",
     "//:ops/InstanceCiWorkflow.roc",
     "//:ops/Delegation.roc",

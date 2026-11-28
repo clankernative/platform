@@ -411,6 +411,7 @@ mod tests {
             "fixtures/deploy-receipt.json",
             "fixtures/ci-check-report.json",
             "fixtures/ci-fetch-report.json",
+            "fixtures/ci-reuse-report.json",
             "fixtures/ci-store-report.json",
             "fixtures/ci-workflow-inputs.json",
             "fixtures/ci-workflow.yml",

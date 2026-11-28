@@ -11,8 +11,10 @@ import "fixtures/ci-workflow.yml" as golden_workflow : Str
 ## The workflow is named `day2` with one job, `verification`, so Gitea posts the status context
 ## `day2 / verification (pull_request)` (and `(push)`), which InstanceSpec's required check names. The job runs only in
 ## the repositories of a map rendered inline into each expression: never a repository or org variable, which an app
-## repository could override to redirect its own CI. Its three steps run one `day2` command each; only fetch receives
-## the job token, only store the git-oidc request token, and check, which runs the app's code, neither.
+## repository could override to redirect its own CI. Its four steps run one `day2` command each: fetch, reuse, check and
+## store. Only fetch and reuse, which run before any app code, receive the job token, only reuse and store the git-oidc
+## request token, and check, which runs the app's code, neither. The token reads the app repository's own run records
+## (`actions: read`), which reuse checks an earlier main run's custody against.
 InstanceCiWorkflow :: [].{
 
 	## Where the rendered file lives in <org>/day2-ci.
@@ -109,6 +111,15 @@ InstanceCiWorkflow :: [].{
 		lookup = |field| "${dollar}{{ fromJSON('${map}')[github.repository]${field} }}"
 		cli = "/workspace/platform/cli/day2"
 		run = "/tmp/day2-ci"
+		# The store inputs, each in its step's own `env:`: store's, and reuse's, which reads the same ones.
+		store_inputs = [
+			"          ACTIONS_ID_TOKEN_REQUEST_URL: ${token_request}&repository=${dollar}{{ github.repository }}",
+			"          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${dollar}{{ secrets.GITHUB_TOKEN }}",
+			"          DAY2_CI_BUCKET: ${lookup(".bucket")}",
+			"          DAY2_CI_AUDIENCE: ${lookup(".audience")}",
+			"          DAY2_CI_SDK: ${lookup(".sdk")}",
+			"          DAY2_CI_DISTRIBUTION: ${lookup(".distribution")}",
+		]
 		Ok(
 			Str.join_with(
 				[
@@ -123,6 +134,7 @@ InstanceCiWorkflow :: [].{
 					"",
 					"permissions:",
 					"  contents: read",
+					"  actions: read",
 					"  id-token: write",
 					"",
 					"jobs:",
@@ -142,21 +154,22 @@ InstanceCiWorkflow :: [].{
 					"        env:",
 					"          GITHUB_TOKEN: ${dollar}{{ secrets.GITHUB_TOKEN }}",
 					"        run: ${cli} ci fetch ${run}",
-					"      - name: check",
-					"        run: ${cli} ci check ${run}/head ${dollar}{{ github.event_name == 'pull_request' && '${run}/base' || '' }} ${
-						lookup(".cases")
-					} ${run}/out",
-					"      - name: store",
+					"      - name: reuse",
 					"        env:",
-					"          ACTIONS_ID_TOKEN_REQUEST_URL: ${token_request}&repository=${dollar}{{ github.repository }}",
-					"          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${dollar}{{ secrets.GITHUB_TOKEN }}",
-					"          DAY2_CI_BUCKET: ${lookup(".bucket")}",
-					"          DAY2_CI_AUDIENCE: ${lookup(".audience")}",
-					"          DAY2_CI_SDK: ${lookup(".sdk")}",
-					"          DAY2_CI_DISTRIBUTION: ${lookup(".distribution")}",
-					"        run: ${cli} ci store ${run}",
-					"",
-				],
+					"          GITHUB_TOKEN: ${dollar}{{ secrets.GITHUB_TOKEN }}",
+				]
+					.concat(store_inputs)
+					.concat([
+						"        run: ${cli} ci reuse ${run} ${lookup(".cases")}",
+						"      - name: check",
+						"        run: ${cli} ci check ${run}/head ${dollar}{{ github.event_name == 'pull_request' && '${run}/base' || '--reuse ${run}/reuse' }} ${
+							lookup(".cases")
+						} ${run}/out",
+						"      - name: store",
+						"        env:",
+					])
+					.concat(store_inputs)
+					.concat(["        run: ${cli} ci store ${run}", ""]),
 				"\n",
 			),
 		)

@@ -85,8 +85,12 @@ carries a qualified SDK's precompiled distribution, whose identity the receipt
 records; otherwise its report's `artifact` says why. A push run on the SDK's
 tooling image therefore always produces the artifact. The `--agent` report is
 pinned by `cli/fixtures/ci-check-report.json`. It reads no forge or network:
-in app CI's required workflow, `ci fetch` writes its trees and `ci store` stores
-its artifact (see [app CI](../docs/INSTANCE.md#app-ci)). When a bounded mount
+in app CI's required workflow, `ci fetch` writes its trees, `ci reuse` looks for
+an earlier main run's stored result and `ci store` stores its artifact (see
+[app CI](../docs/INSTANCE.md#app-ci)). A push run passes `--reuse
+DIRECTORY/reuse`: a result `ci reuse` found is verified again and written as the
+artifact (`reused`) instead of building, and a result that fails verification is
+a failure, never a silent rebuild (see [Check](../docs/INSTANCE.md#check)). When a bounded mount
 hides the platform's generated worker ABI, it is initialized from the tooling
 image's reviewed seed, `/usr/local/lib/day2/roc_platform_abi.rs`.
 

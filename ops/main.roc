@@ -16,6 +16,7 @@ package
 		Ci,
 		CiCheck,
 		CiFetch,
+		CiReuse,
 		CiStore,
 		Verify,
 		Linux,

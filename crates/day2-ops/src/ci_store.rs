@@ -37,7 +37,7 @@
 //!   failure included, fails the step and so the required job.
 use crate::{
     ci_check::Receipt,
-    ci_fetch::{Environment, Event, Transient, Waiting, retrying},
+    ci_fetch::{Environment, Event, Transient, Waiting, retrying_within},
     instance_source,
     offsite::{self, Uploader},
 };
@@ -55,7 +55,7 @@ use std::{
 };
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The git-oidc request URL the runner or workflow provides.
 pub const ID_TOKEN_URL: &str = "ACTIONS_ID_TOKEN_REQUEST_URL";
@@ -101,13 +101,23 @@ pub struct Inputs {
 impl Inputs {
     /// Read and validate the variables. A value is never echoed in a refusal.
     pub fn read(variable: impl Fn(&str) -> Option<OsString>, https: bool) -> Result<Self> {
+        Self::read_for(variable, https, "to store the artifact")
+    }
+
+    /// As [`Inputs::read`], for `purpose` (`to store the artifact`, `to reuse
+    /// a stored result`), which a missing variable's refusal names.
+    pub fn read_for(
+        variable: impl Fn(&str) -> Option<OsString>,
+        https: bool,
+        purpose: &str,
+    ) -> Result<Self> {
         let required = |name: &str| -> Result<String> {
             variable(name)
                 .filter(|value| !value.is_empty())
                 .with_context(|| {
                     format!(
-                        "{name} is required to store the artifact: the workflow rendered from \
-                         day2.json with forge.oidc sets it"
+                        "{name} is required {purpose}: the workflow rendered from day2.json with \
+                         forge.oidc sets it"
                     )
                 })?
                 .into_string()
@@ -163,6 +173,21 @@ impl Inputs {
         self.audience.trim_start_matches("https:")
     }
 
+    /// The inputs are the run's: the bucket is its app's and the token
+    /// request names its repository.
+    pub fn for_run(&self, event: &Event) -> Result<()> {
+        ensure!(
+            app_bucket(&self.bucket, event.app()),
+            "{BUCKET} is not the app's CI bucket, <project>-{}-ci",
+            event.app()
+        );
+        ensure!(
+            self.repository().as_deref() == Some(event.repository.as_str()),
+            "{ID_TOKEN_URL} names another repository than the run's"
+        );
+        Ok(())
+    }
+
     /// The repository the token request names.
     fn repository(&self) -> Option<String> {
         reqwest::Url::parse(&self.id_token_url)
@@ -178,15 +203,7 @@ impl Inputs {
 /// checked on the selected release's tooling distribution, and its source
 /// inputs are those of the fetched head's app.
 fn bound(inputs: &Inputs, event: &Event, receipt: &Receipt, directory: &Path) -> Result<()> {
-    ensure!(
-        app_bucket(&inputs.bucket, event.app()),
-        "{BUCKET} is not the app's CI bucket, <project>-{}-ci",
-        event.app()
-    );
-    ensure!(
-        inputs.repository().as_deref() == Some(event.repository.as_str()),
-        "{ID_TOKEN_URL} names another repository than the run's"
-    );
+    inputs.for_run(event)?;
     ensure!(
         receipt.sdk_distribution.digest == inputs.distribution,
         "the artifact was checked on another SDK's tooling than {DISTRIBUTION} names"
@@ -443,101 +460,31 @@ impl Session {
         Ok(value)
     }
 
-    /// git-oidc's token for the audience, as the instance workflows request
-    /// it: network failures, 408, 429 and 5xx are retried within 120 s; any
-    /// other answer fails at once with git-oidc's reason.
+    /// git-oidc's token for the audience ([`mint`]).
     fn mint(&mut self) -> Result<Value> {
         let inputs = self.inputs.as_ref().context("the store inputs")?;
-        // The URL already has its query (checked when the inputs were read).
-        let url = format!(
-            "{}&audience={}",
-            inputs.id_token_url,
-            instance_source::quote(&inputs.audience)
-        );
-        let authorization = header(&format!("bearer {}", inputs.id_token))?;
-        let client = &self.effects.client;
-        let token = retrying(
+        let subject = mint(
+            &self.effects.client,
             self.effects.waiting.as_mut(),
-            "git-oidc's token mint",
-            |left| {
-                let response = client
-                    .get(&url)
-                    .header(reqwest::header::AUTHORIZATION, authorization.clone())
-                    .timeout(left.min(MINT_ATTEMPT))
-                    .send()
-                    .map_err(|_| Transient("git-oidc could not be reached".to_owned()))?;
-                let status = response.status().as_u16();
-                let body = bounded(response)?;
-                match status {
-                    200 => Ok(body),
-                    408 | 429 | 500.. => Err(Transient(format!(
-                        "git-oidc answered HTTP {status}: {}",
-                        excerpt(&body)
-                    ))
-                    .into()),
-                    _ => bail!(
-                        "git-oidc refused the token request with HTTP {status}: {}",
-                        excerpt(&body)
-                    ),
-                }
-            },
+            inputs,
+            None,
         )?;
-        let value: Value =
-            serde_json::from_slice(&token).map_err(|_| anyhow!("git-oidc returned no JSON"))?;
-        let subject = value["value"]
-            .as_str()
-            .filter(|token| jwt(token))
-            .context("git-oidc returned no token")?;
-        self.subject = Some(subject.to_owned());
+        self.subject = Some(subject);
         Ok(json!({"minted": true}))
     }
 
-    /// Google STS: the subject token for a federated access token limited to
-    /// Cloud Storage. A refusal fails at once with STS's error code.
+    /// Google STS's federated access token for reads and writes ([`exchange`]).
     fn exchange(&mut self) -> Result<Value> {
         let subject = self.subject.take().context("the minted token")?;
-        let body = json!({
-            "audience": self.inputs()?.sts_audience(),
-            "grantType": "urn:ietf:params:oauth:grant-type:token-exchange",
-            "requestedTokenType": "urn:ietf:params:oauth:token-type:access_token",
-            "scope": SCOPE,
-            "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
-            "subjectToken": subject,
-        });
-        let response = self
-            .effects
-            .client
-            .post(&self.effects.endpoints.sts)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_string())
-            .timeout(EXCHANGE)
-            .send()
-            .map_err(|_| anyhow!("Google STS could not be reached"))?;
-        let status = response.status().as_u16();
-        let bytes = bounded(response)?;
-        let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        ensure!(
-            status == 200,
-            "Google STS refused the token exchange with HTTP {status}: {}",
-            excerpt(
-                format!(
-                    "{} {}",
-                    value["error"].as_str().unwrap_or_default(),
-                    value["error_description"].as_str().unwrap_or_default()
-                )
-                .as_bytes()
-            )
-        );
-        let access = value["access_token"]
-            .as_str()
-            .filter(|token| !token.is_empty() && token.bytes().all(|b| b.is_ascii_graphic()))
-            .filter(|_| {
-                value["token_type"]
-                    .as_str()
-                    .is_some_and(|kind| kind.eq_ignore_ascii_case("bearer"))
-            })
-            .context("Google STS returned no bearer access token")?;
-        self.access = Some(access.to_owned());
+        let access = exchange(
+            &self.effects.client,
+            &self.effects.endpoints.sts,
+            self.inputs()?,
+            &subject,
+            SCOPE,
+            None,
+        )?;
+        self.access = Some(access);
         Ok(json!({"exchanged": true}))
     }
 
@@ -548,12 +495,13 @@ impl Session {
             .as_ref()
             .context("the checked artifact")?
             .receipt;
-        let hex = |digest: &str| digest.trim_start_matches("sha256:").to_owned();
         Ok(format!(
-            "{}/{}-{}/{}/{}",
-            hex(&self.inputs()?.sdk),
-            hex(&receipt.source_inputs),
-            receipt.verification.cases,
+            "{}{}/{}",
+            instance_source::app_ci::key(
+                &self.inputs()?.sdk,
+                &receipt.source_inputs,
+                receipt.verification.cases
+            ),
             self.event.run,
             self.event.attempt
         ))
@@ -670,6 +618,109 @@ fn checked(output: &Path) -> Result<Checked> {
         "the artifact is not the size its receipt names"
     );
     Ok(Checked { receipt, bytes })
+}
+
+/// git-oidc's token for the inputs' audience, as the instance workflows
+/// request it: network failures, 408, 429 and 5xx are retried within 120 s;
+/// any other answer fails at once with git-oidc's reason. `ci store` and `ci
+/// reuse` mint the same way; given `within`, retries and each attempt end by
+/// then.
+pub fn mint(
+    client: &reqwest::blocking::Client,
+    waiting: &mut dyn Waiting,
+    inputs: &Inputs,
+    within: Option<Duration>,
+) -> Result<String> {
+    // The URL already has its query (checked when the inputs were read).
+    let url = format!(
+        "{}&audience={}",
+        inputs.id_token_url,
+        instance_source::quote(&inputs.audience)
+    );
+    let authorization = header(&format!("bearer {}", inputs.id_token))?;
+    let limit = within.unwrap_or(crate::ci_fetch::DEADLINE);
+    let token = retrying_within(waiting, "git-oidc's token mint", limit, |left| {
+        let response = client
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, authorization.clone())
+            .timeout(left.min(MINT_ATTEMPT))
+            .send()
+            .map_err(|_| Transient("git-oidc could not be reached".to_owned()))?;
+        let status = response.status().as_u16();
+        let body = bounded(response)?;
+        match status {
+            200 => Ok(body),
+            408 | 429 | 500.. => Err(Transient(format!(
+                "git-oidc answered HTTP {status}: {}",
+                excerpt(&body)
+            ))
+            .into()),
+            _ => bail!(
+                "git-oidc refused the token request with HTTP {status}: {}",
+                excerpt(&body)
+            ),
+        }
+    })?;
+    let value: Value =
+        serde_json::from_slice(&token).map_err(|_| anyhow!("git-oidc returned no JSON"))?;
+    let subject = value["value"]
+        .as_str()
+        .filter(|token| jwt(token))
+        .context("git-oidc returned no token")?;
+    Ok(subject.to_owned())
+}
+
+/// Google STS at `sts`: the subject token for a federated access token
+/// limited to `scope`, one Cloud Storage scope, within 60 s or `within` when
+/// sooner. A refusal fails at once with STS's error code.
+pub fn exchange(
+    client: &reqwest::blocking::Client,
+    sts: &str,
+    inputs: &Inputs,
+    subject: &str,
+    scope: &str,
+    within: Option<Duration>,
+) -> Result<String> {
+    let body = json!({
+        "audience": inputs.sts_audience(),
+        "grantType": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "requestedTokenType": "urn:ietf:params:oauth:token-type:access_token",
+        "scope": scope,
+        "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+        "subjectToken": subject,
+    });
+    let response = client
+        .post(sts)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .timeout(within.map_or(EXCHANGE, |within| within.min(EXCHANGE)))
+        .send()
+        .map_err(|_| anyhow!("Google STS could not be reached"))?;
+    let status = response.status().as_u16();
+    let bytes = bounded(response)?;
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    ensure!(
+        status == 200,
+        "Google STS refused the token exchange with HTTP {status}: {}",
+        excerpt(
+            format!(
+                "{} {}",
+                value["error"].as_str().unwrap_or_default(),
+                value["error_description"].as_str().unwrap_or_default()
+            )
+            .as_bytes()
+        )
+    );
+    let access = value["access_token"]
+        .as_str()
+        .filter(|token| !token.is_empty() && token.bytes().all(|b| b.is_ascii_graphic()))
+        .filter(|_| {
+            value["token_type"]
+                .as_str()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("bearer"))
+        })
+        .context("Google STS returned no bearer access token")?;
+    Ok(access.to_owned())
 }
 
 fn header(value: &str) -> Result<reqwest::header::HeaderValue> {

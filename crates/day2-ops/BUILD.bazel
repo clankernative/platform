@@ -10,6 +10,7 @@ COMPILE_INPUTS = [
     "//:cli/fixtures/deploy-receipt.json",
     "//:cli/fixtures/ci-check-report.json",
     "//:cli/fixtures/ci-fetch-report.json",
+    "//:cli/fixtures/ci-reuse-report.json",
     "//:cli/fixtures/ci-store-report.json",
     "//:cli/fixtures/ci-workflow-inputs.json",
     "//:cli/InstanceRender.roc",

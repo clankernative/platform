@@ -448,6 +448,7 @@ fn the_report_shape_is_pinned_for_the_cli() -> Result<()> {
             generated: 40,
             lanes: names(&ALL),
         }),
+        reuse: None,
     };
     assert_eq!(serde_json::to_string_pretty(&report)? + "\n", GOLDEN_REPORT);
     assert_eq!(serde_json::from_str::<Report>(GOLDEN_REPORT)?, report);
@@ -468,6 +469,17 @@ fn session_with(
     work: &Path,
     sdk: Option<day2::sdk_release::BlobIdentity>,
 ) -> Result<Session> {
+    session_reusing(head, base, work, sdk, None)
+}
+
+/// A session that names `reuse` as `ci reuse`'s directory.
+fn session_reusing(
+    head: &Path,
+    base: Option<&Path>,
+    work: &Path,
+    sdk: Option<day2::sdk_release::BlobIdentity>,
+    reuse: Option<&Path>,
+) -> Result<Session> {
     let request = work.join("request.json");
     fs::write(
         &request,
@@ -476,6 +488,7 @@ fn session_with(
             base: base.map(Path::to_path_buf),
             cases: 4,
             output: work.join("out"),
+            reuse: reuse.map(Path::to_path_buf),
         })?,
     )?;
     Session::with_sdk(&request, &work.join("platform"), sdk)
@@ -685,4 +698,325 @@ fn a_bounded_generated_mount_gets_the_tooling_images_reviewed_abi() -> Result<()
     seed_abi(&platform, &seed)?;
     assert_eq!(fs::read(&target)?, b"// reviewed ABI\n");
     Ok(())
+}
+
+/// `ci reuse`'s directory for a hit: its record and the result an earlier
+/// main run stored for `head`'s app, checked with `cases` on `sdk`.
+fn reuse_hit(
+    work: &Path,
+    head: &Path,
+    sdk: &day2::sdk_release::BlobIdentity,
+    cases: u64,
+) -> Result<(PathBuf, Receipt)> {
+    use crate::ci_reuse::{Object, Record, Source};
+    let directory = work.join("reuse");
+    fs::create_dir(&directory)?;
+    let archive = b"an earlier main run's archive".to_vec();
+    let receipt = Receipt {
+        version: 1,
+        source_inputs: source_inputs(&head.join("app"))?,
+        artifact_id: ID.into(),
+        sdk_distribution: sdk.clone(),
+        verification: Verification {
+            version: 1,
+            seed: SEED,
+            cases,
+        },
+        archive: day2::sdk_release::BlobIdentity::of(&archive),
+        examples: 3,
+        generated: 6,
+        lanes: ALL.map(str::to_owned).to_vec(),
+    };
+    fs::write(directory.join("app.tar.gz"), &archive)?;
+    fs::write(directory.join("receipt.json"), receipt.bytes()?)?;
+    let key = format!(
+        "{}/{}-{cases}/40/1",
+        "5d".repeat(32),
+        &receipt.source_inputs["sha256:".len()..]
+    );
+    let object = |file: &str, generation: &str| Object {
+        name: format!("{key}/{file}"),
+        generation: generation.into(),
+        time_created: "2026-11-25T18:15:00.250Z".into(),
+    };
+    let record = Record {
+        format: 1,
+        reused: true,
+        reason: None,
+        source: Some(Source {
+            run: 40,
+            attempt: 1,
+            head: "1".repeat(40),
+            workflow_commit: "3".repeat(40),
+            started_at: "2026-11-25T18:00:00Z".into(),
+            completed_at: "2026-11-25T18:20:00Z".into(),
+            bucket: "exampleco-tools-links-ci".into(),
+            receipt: object("receipt.json", "1700000000000002"),
+            artifact: object("artifact.tar.gz", "1700000000000001"),
+        }),
+    };
+    fs::write(
+        directory.join("reuse.json"),
+        serde_json::to_vec_pretty(&record)?,
+    )?;
+    Ok((directory, receipt))
+}
+
+#[test]
+fn a_reused_result_is_verified_again_and_written_as_a_built_one() -> Result<()> {
+    let sdk = day2::sdk_release::BlobIdentity::of(b"distribution");
+    let head = repository();
+    let work = tempfile::tempdir()?;
+    let (reuse, receipt) = reuse_hit(work.path(), head.path(), &sdk, 4)?;
+    let mut checked = session_reusing(
+        head.path(),
+        None,
+        work.path(),
+        Some(sdk.clone()),
+        Some(&reuse),
+    )?;
+    let route = checked.step("route")?;
+    assert_eq!(
+        (&route["reused"], &route["native"], &route["javascript"]),
+        (&json!(true), &json!(true), &json!(true))
+    );
+    // The native build and its campaign do not run.
+    let app = head.path().join("app");
+    assert!(checked.building(&app, "42", 4, true).is_err());
+    // The cheap lanes do; the recipe ran them before the artifact step.
+    checked.javascript = Some(3);
+    checked.format = Some(2);
+    checked.extension_verified(&app, &json!({ "declared": false }))?;
+    assert_eq!(checked.step("artifact")?["artifact"], "reused");
+    let report: Report = serde_json::from_value(checked.step("result")?)?;
+    assert_eq!(
+        (report.artifact.as_str(), report.output.as_deref()),
+        ("reused", Some(work.path().join("out").as_path()))
+    );
+    assert_eq!(report.receipt.as_ref(), Some(&receipt));
+    assert_eq!(report.lanes, ALL);
+    assert!(report.reuse.as_ref().is_some_and(|record| record.reused));
+    // OUTPUT is exactly what a built artifact's would be: the archive and the
+    // receipt, byte for byte, and nothing else.
+    assert_eq!(
+        fs::read(work.path().join("out/app.tar.gz"))?,
+        fs::read(reuse.join("app.tar.gz"))?
+    );
+    assert_eq!(
+        fs::read(work.path().join("out/receipt.json"))?,
+        fs::read(reuse.join("receipt.json"))?
+    );
+    assert_eq!(fs::read_dir(work.path().join("out"))?.count(), 2);
+    Ok(())
+}
+
+#[test]
+fn a_reused_result_that_fails_verification_is_a_refusal_not_a_rebuild() -> Result<()> {
+    let sdk = day2::sdk_release::BlobIdentity::of(b"distribution");
+    let head = repository();
+    let refused = |change: &dyn Fn(&Path, &Receipt),
+                   sdk: Option<day2::sdk_release::BlobIdentity>| {
+        let work = tempfile::tempdir().unwrap();
+        let (reuse, receipt) = reuse_hit(
+            work.path(),
+            head.path(),
+            &day2::sdk_release::BlobIdentity::of(b"distribution"),
+            4,
+        )
+        .unwrap();
+        change(&reuse, &receipt);
+        let error = session_reusing(head.path(), None, work.path(), sdk, Some(&reuse))
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+        assert!(!work.path().join("out").exists());
+        error
+    };
+    let rewrite = |reuse: &Path, receipt: &Receipt| {
+        fs::write(reuse.join("receipt.json"), receipt.bytes().unwrap()).unwrap();
+    };
+    // The control: unchanged, it is accepted.
+    assert_eq!(refused(&|_, _| {}, Some(sdk.clone())), "");
+    for (change, expected) in [
+        (
+            Box::new(|reuse: &Path, receipt: &Receipt| {
+                let mut receipt = receipt.clone();
+                receipt.source_inputs = format!("sha256:{}", "ab".repeat(32));
+                rewrite(reuse, &receipt);
+            }) as Box<dyn Fn(&Path, &Receipt)>,
+            "other source inputs",
+        ),
+        (
+            Box::new(|reuse: &Path, receipt: &Receipt| {
+                let mut receipt = receipt.clone();
+                receipt.verification.cases = 6;
+                rewrite(reuse, &receipt);
+            }),
+            "another case count",
+        ),
+        (
+            Box::new(|reuse: &Path, receipt: &Receipt| {
+                let mut receipt = receipt.clone();
+                receipt.verification.seed = 43;
+                rewrite(reuse, &receipt);
+            }),
+            "invalid ci check receipt",
+        ),
+        (
+            Box::new(|reuse: &Path, receipt: &Receipt| {
+                let mut receipt = receipt.clone();
+                receipt.sdk_distribution = day2::sdk_release::BlobIdentity::of(b"another");
+                rewrite(reuse, &receipt);
+            }),
+            "another SDK's tooling distribution",
+        ),
+        (
+            Box::new(|reuse: &Path, receipt: &Receipt| {
+                let mut receipt = receipt.clone();
+                receipt.lanes.pop();
+                rewrite(reuse, &receipt);
+            }),
+            "invalid ci check receipt",
+        ),
+        (
+            Box::new(|reuse: &Path, _: &Receipt| {
+                fs::write(reuse.join("app.tar.gz"), b"other bytes").unwrap();
+            }),
+            "not the archive its receipt names",
+        ),
+        (
+            Box::new(|reuse: &Path, receipt: &Receipt| {
+                fs::write(
+                    reuse.join("receipt.json"),
+                    serde_json::to_vec_pretty(receipt).unwrap(),
+                )
+                .unwrap();
+            }),
+            "not as ci check writes one",
+        ),
+        (
+            Box::new(|reuse: &Path, _: &Receipt| {
+                fs::write(reuse.join("extra"), b"x").unwrap();
+            }),
+            "must hold exactly",
+        ),
+        (
+            Box::new(|reuse: &Path, _: &Receipt| {
+                fs::remove_file(reuse.join("app.tar.gz")).unwrap();
+            }),
+            "must hold exactly",
+        ),
+        (
+            Box::new(|reuse: &Path, _: &Receipt| {
+                let path = reuse.join("reuse.json");
+                let text = fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("-4/40/1/", "-6/40/1/");
+                fs::write(path, text).unwrap();
+            }),
+            "objects of another key",
+        ),
+    ] {
+        let error = refused(&*change, Some(sdk.clone()));
+        assert!(
+            error.starts_with("the reused result fails verification") && error.contains(expected),
+            "{expected}: {error}"
+        );
+    }
+    // Only the SDK's precompiled tooling, whose identity the receipt names,
+    // verifies a reused result.
+    assert!(refused(&|_, _| {}, None).contains("no SDK identity"));
+    // A pull request routes against its base and never reuses.
+    let work = tempfile::tempdir()?;
+    let (reuse, _) = reuse_hit(work.path(), head.path(), &sdk, 4)?;
+    let base = repository();
+    let error = session_reusing(
+        head.path(),
+        Some(base.path()),
+        work.path(),
+        Some(sdk),
+        Some(&reuse),
+    )
+    .err()
+    .context("a routed run with a reuse directory")?;
+    assert!(error.to_string().contains("only a push run"), "{error:#}");
+    Ok(())
+}
+
+#[test]
+fn a_reuse_miss_builds_as_always_and_reports_why() -> Result<()> {
+    let sdk = day2::sdk_release::BlobIdentity::of(b"distribution");
+    let head = repository();
+    let work = tempfile::tempdir()?;
+    let reuse = work.path().join("reuse");
+    fs::create_dir(&reuse)?;
+    let record = crate::ci_reuse::Record {
+        format: 1,
+        reused: false,
+        reason: Some(crate::ci_reuse::ABSENT.into()),
+        source: None,
+    };
+    fs::write(reuse.join("reuse.json"), serde_json::to_vec(&record)?)?;
+    let artifact = selected_artifact(&work.path().join("platform"));
+    let mut checked = session_reusing(
+        head.path(),
+        None,
+        work.path(),
+        Some(sdk.clone()),
+        Some(&reuse),
+    )?;
+    assert_eq!(checked.step("route")?["reused"], false);
+    let app = head.path().join("app");
+    checked.building(&app, "42", 4, true)?;
+    checked.built(day2::development::BuildReceipt {
+        artifact: artifact.clone(),
+        verification: day2::development::BuildVerification {
+            artifact: format!("sha256:{ID}"),
+            seed: "42".into(),
+            examples: 0,
+            generated: 1,
+            checks: CHECKS.iter().map(|check| (*check).to_owned()).collect(),
+            evidence: artifact.join("verification.json"),
+        },
+    });
+    checked.javascript = Some(3);
+    checked.format = Some(2);
+    checked.extension_verified(&app, &json!({ "declared": false }))?;
+    assert_eq!(checked.step("artifact")?["artifact"], "written");
+    let report: Report = serde_json::from_value(checked.step("result")?)?;
+    assert_eq!(report.artifact, "written");
+    assert_eq!(report.reuse, Some(record));
+    // A miss record beside a result is not a miss.
+    let work = tempfile::tempdir()?;
+    let reuse = work.path().join("reuse");
+    fs::create_dir(&reuse)?;
+    fs::write(
+        reuse.join("reuse.json"),
+        serde_json::to_vec(&crate::ci_reuse::Record {
+            format: 1,
+            reused: false,
+            reason: Some("absent".into()),
+            source: None,
+        })?,
+    )?;
+    fs::write(reuse.join("app.tar.gz"), b"x")?;
+    assert!(session_reusing(head.path(), None, work.path(), Some(sdk), Some(&reuse)).is_err());
+    Ok(())
+}
+
+/// A session for `request` on `sdk`'s tooling, routed, with the lanes the
+/// recipe runs before the artifact step: for a reused result, which the
+/// session verified when it started.
+pub(crate) fn reusing(
+    request: &Path,
+    platform: &Path,
+    sdk: day2::sdk_release::BlobIdentity,
+) -> Result<Session> {
+    let mut checked = Session::with_sdk(request, platform, Some(sdk))?;
+    ensure!(checked.step("route")?["reused"] == true, "nothing reused");
+    checked.javascript = Some(1);
+    checked.format = Some(1);
+    let app = checked.app();
+    checked.extension_verified(&app, &json!({ "declared": false }))?;
+    Ok(checked)
 }

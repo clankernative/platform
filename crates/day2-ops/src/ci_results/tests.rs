@@ -79,7 +79,7 @@ fn an_object_is_its_exact_projection_read_with_the_apply_identitys_token() {
         }
     });
     let mut storage = gcs(&base);
-    let stored = storage.object(BUCKET, NAME).unwrap().unwrap();
+    let stored = storage.object(BUCKET, NAME, None).unwrap().unwrap();
     assert_eq!(
         stored,
         Stored {
@@ -93,7 +93,9 @@ fn an_object_is_its_exact_projection_read_with_the_apply_identitys_token() {
         }
     );
     assert_eq!(
-        storage.media(BUCKET, NAME, "1700000000000001", 7).unwrap(),
+        storage
+            .media(BUCKET, NAME, "1700000000000001", 7, None)
+            .unwrap(),
         b"receipt"
     );
     let seen = seen.lock().unwrap();
@@ -116,7 +118,7 @@ fn an_object_is_its_exact_projection_read_with_the_apply_identitys_token() {
 #[test]
 fn absence_is_absence_and_every_other_answer_is_closed() {
     let (base, _) = serve(|_| (404, b"{\"error\":\"not-a-secret\"}".to_vec()));
-    assert_eq!(gcs(&base).object(BUCKET, NAME).unwrap(), None);
+    assert_eq!(gcs(&base).object(BUCKET, NAME, None).unwrap(), None);
     for (status, body, retryable) in [
         (503_u16, b"not-a-secret".to_vec(), true),
         (429, Vec::new(), true),
@@ -160,7 +162,7 @@ fn absence_is_absence_and_every_other_answer_is_closed() {
                 let _ = stream.write_all(&reply);
             }
         });
-        let error = gcs(&base).object(BUCKET, NAME).unwrap_err();
+        let error = gcs(&base).object(BUCKET, NAME, None).unwrap_err();
         let shown = format!("{error:#} {error:?}");
         assert!(!shown.contains("not-a-secret"), "{shown}");
         assert!(!shown.contains(TOKEN), "{shown}");
@@ -175,13 +177,16 @@ fn absence_is_absence_and_every_other_answer_is_closed() {
 #[test]
 fn a_download_is_exactly_the_size_asked_for() {
     let (base, _) = serve(|_| (200, b"receipt".to_vec()));
-    let error = gcs(&base).media(BUCKET, NAME, "1", 6).unwrap_err();
+    let error = gcs(&base).media(BUCKET, NAME, "1", 6, None).unwrap_err();
     assert_eq!(format!("{error:#}"), "app_ci_results_reply_too_large");
-    let error = gcs(&base).media(BUCKET, NAME, "1", 8).unwrap_err();
+    let error = gcs(&base).media(BUCKET, NAME, "1", 8, None).unwrap_err();
     assert!(error.downcast_ref::<Retryable>().is_some());
     let (base, _) = serve(|_| (404, Vec::new()));
     assert_eq!(
-        format!("{:#}", gcs(&base).media(BUCKET, NAME, "1", 7).unwrap_err()),
+        format!(
+            "{:#}",
+            gcs(&base).media(BUCKET, NAME, "1", 7, None).unwrap_err()
+        ),
         "app_ci_results_http_404"
     );
 }
@@ -191,7 +196,7 @@ fn a_refused_connection_is_retryable_and_names_nothing() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
-    let error = gcs(&base).object(BUCKET, NAME).unwrap_err();
+    let error = gcs(&base).object(BUCKET, NAME, None).unwrap_err();
     assert!(error.downcast_ref::<Retryable>().is_some());
     assert!(!format!("{error:#}").contains("127.0.0.1"));
 }
@@ -238,7 +243,7 @@ fn each_read_has_one_total_deadline_that_body_reads_cannot_renew() {
     let (base, server) = dribble(projected(NAME));
     let mut storage = gcs(&base);
     storage.describe = Duration::from_millis(500);
-    let error = storage.object(BUCKET, NAME).unwrap_err();
+    let error = storage.object(BUCKET, NAME, None).unwrap_err();
     assert!(error.downcast_ref::<Retryable>().is_some(), "{error:#}");
     assert!(
         server.join().unwrap(),
@@ -249,7 +254,7 @@ fn each_read_has_one_total_deadline_that_body_reads_cannot_renew() {
     storage.download = Duration::from_millis(500);
     assert!(
         storage
-            .media(BUCKET, NAME, "1", 320)
+            .media(BUCKET, NAME, "1", 320, None)
             .unwrap_err()
             .downcast_ref::<Retryable>()
             .is_some()
@@ -271,4 +276,129 @@ fn decimals_are_gcs_integers() {
     for value in ["", "01", "-1", "+1", "1.0", " 1", "18446744073709551616"] {
         assert_eq!(decimal(value), None, "{value}");
     }
+}
+
+#[test]
+fn a_listing_is_one_bounded_page_of_names_under_the_prefix() {
+    let (base, seen) = serve(|target| {
+        if target.contains("pageToken=") {
+            (
+                200,
+                br#"{"items":[{"name":"aa/bb-4/9/1/receipt.json"}]}"#.to_vec(),
+            )
+        } else {
+            (
+                200,
+                br#"{"items":[{"name":"aa/bb-4/41/2/artifact.tar.gz"},{"name":"aa/bb-4/41/2/receipt.json"}],"nextPageToken":"Cg0next"}"#
+                    .to_vec(),
+            )
+        }
+    });
+    let mut storage = gcs(&base);
+    let first = storage.list(BUCKET, "aa/bb-4/", None, None).unwrap();
+    assert_eq!(
+        first,
+        Listing {
+            names: vec![
+                "aa/bb-4/41/2/artifact.tar.gz".into(),
+                "aa/bb-4/41/2/receipt.json".into()
+            ],
+            next: Some("Cg0next".into()),
+        }
+    );
+    let second = storage
+        .list(BUCKET, "aa/bb-4/", Some("Cg0next"), None)
+        .unwrap();
+    assert_eq!(second.names, ["aa/bb-4/9/1/receipt.json"]);
+    assert_eq!(second.next, None);
+    let seen = seen.lock().unwrap();
+    // Only the names and the next token are selected, a page at a time.
+    assert_eq!(
+        seen[0].0,
+        "/b/exampleco-tools-links-ci/o?prefix=aa%2Fbb-4%2F&fields=items%28name%29%2CnextPageToken&maxResults=1000"
+    );
+    assert_eq!(
+        seen[1].0,
+        "/b/exampleco-tools-links-ci/o?prefix=aa%2Fbb-4%2F&fields=items%28name%29%2CnextPageToken&maxResults=1000&pageToken=Cg0next"
+    );
+    assert!(
+        seen.iter()
+            .all(|(_, authorization)| authorization == &format!("Bearer {TOKEN}"))
+    );
+    // An empty key is a listing with no names.
+    let (base, _) = serve(|_| (200, b"{}".to_vec()));
+    assert_eq!(
+        gcs(&base).list(BUCKET, "aa/bb-4/", None, None).unwrap(),
+        Listing {
+            names: vec![],
+            next: None
+        }
+    );
+}
+
+#[test]
+fn a_listing_reply_outside_its_shape_is_refused() {
+    for (status, body, retryable) in [
+        (503_u16, b"not-a-secret".to_vec(), true),
+        (403, b"not-a-secret".to_vec(), false),
+        // A name outside the prefix, another field, a token that is not one.
+        (
+            200,
+            br#"{"items":[{"name":"other/41/2/receipt.json"}]}"#.to_vec(),
+            false,
+        ),
+        (
+            200,
+            br#"{"items":[{"name":"aa/bb-4/41/2/receipt.json","size":"7"}]}"#.to_vec(),
+            false,
+        ),
+        (
+            200,
+            br#"{"items":[],"nextPageToken":"a b"}"#.to_vec(),
+            false,
+        ),
+        (
+            200,
+            br#"{"items":[],"kind":"storage#objects"}"#.to_vec(),
+            false,
+        ),
+        (200, vec![b' '; 524_289], false),
+    ] {
+        let reply = body.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    reply.len()
+                );
+                let _ = stream.write_all(&reply);
+            }
+        });
+        let error = gcs(&base).list(BUCKET, "aa/bb-4/", None, None).unwrap_err();
+        let shown = format!("{error:#} {error:?}");
+        assert!(!shown.contains("not-a-secret"), "{shown}");
+        assert_eq!(
+            error.downcast_ref::<Retryable>().is_some(),
+            retryable,
+            "{status}: {shown}"
+        );
+    }
+    // A caller's own page token is checked before anything is sent.
+    let (base, seen) = serve(|_| (200, b"{}".to_vec()));
+    assert!(gcs(&base).list(BUCKET, "aa/bb-4/", Some(""), None).is_err());
+    assert!(gcs(&base).list(BUCKET, "", None, None).is_err());
+    assert!(seen.lock().unwrap().is_empty());
+    // With a token in hand, gcloud is never needed.
+    let held = Gcs::with_token("synthetic".into()).unwrap();
+    assert!(held.client.is_none() && held.token.is_some());
 }

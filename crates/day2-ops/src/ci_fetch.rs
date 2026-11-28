@@ -34,7 +34,7 @@ use std::{
 };
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The one variable the job token is read from.
 pub const TOKEN: &str = "GITHUB_TOKEN";
@@ -335,9 +335,22 @@ impl Waiting for System {
 pub fn retrying<T>(
     waiting: &mut dyn Waiting,
     what: &str,
+    attempt: impl FnMut(Duration) -> Result<T>,
+) -> Result<T> {
+    retrying_within(waiting, what, DEADLINE, attempt)
+}
+
+/// [`retrying`], with the deadline `limit` from now when that is sooner than
+/// 120 s: a caller's own deadline ends the retries, and `attempt` gets only
+/// the time left before it.
+pub fn retrying_within<T>(
+    waiting: &mut dyn Waiting,
+    what: &str,
+    limit: Duration,
     mut attempt: impl FnMut(Duration) -> Result<T>,
 ) -> Result<T> {
-    let deadline = waiting.now() + DEADLINE;
+    let limit = limit.min(DEADLINE);
+    let deadline = waiting.now() + limit;
     let mut delay = 2;
     let mut tries = 1;
     loop {
@@ -351,7 +364,7 @@ pub fn retrying<T>(
         if waiting.now() + Duration::from_secs(pause + 5) > deadline {
             return Err(error.context(format!(
                 "{what} did not succeed within {}s",
-                DEADLINE.as_secs()
+                limit.as_secs()
             )));
         }
         waiting.announce(&format!(

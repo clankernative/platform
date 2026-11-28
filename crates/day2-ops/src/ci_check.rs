@@ -17,6 +17,17 @@
 //! Identical trees run every lane, as an empty diff did. Without the SDK's
 //! precompiled tooling distribution there is no SDK identity to record, so
 //! every check still runs but no artifact or receipt is written.
+//!
+//! A push run may name `ci reuse`'s directory (`--reuse`). When it reused an
+//! earlier main run's result, that result is verified again before any step:
+//! its receipt is a complete run's, written as this command writes one, for
+//! the head app's source inputs (recomputed), the request's cases, seed 42 and
+//! this tooling's own SDK distribution, and the archive is the receipt's. Then
+//! the JavaScript, format and extension checks run, the native build and its
+//! campaign do not, and the reused archive and receipt are written to the
+//! output directory exactly as a built artifact's would be (`reused`). A
+//! reused result that fails is a refusal, never a silent rebuild: only a bad
+//! reuse record can produce one. A record of a miss changes nothing.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -32,7 +43,7 @@ use std::{
 mod artifact;
 mod route;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use artifact::{File, files, pack, source_inputs};
 pub use route::{Entry, Lanes, Reason, Route, Tree, read_tree, route};
@@ -63,6 +74,8 @@ pub struct Request {
     pub base: Option<PathBuf>,
     pub cases: u64,
     pub output: PathBuf,
+    /// `ci reuse`'s directory, `DIRECTORY/reuse`, for a push run.
+    pub reuse: Option<PathBuf>,
 }
 
 impl Request {
@@ -98,11 +111,22 @@ impl Request {
             "the new output directory's parent must exist: {}",
             output.display()
         );
+        let reuse = match &request.reuse {
+            Some(reuse) => {
+                ensure!(
+                    base.is_none(),
+                    "only a push run, which has no base tree, reuses an earlier main run's result"
+                );
+                Some(real_directory(reuse, "the reuse directory")?)
+            }
+            None => None,
+        };
         Ok(Self {
             head,
             base,
             cases: request.cases,
             output,
+            reuse,
         })
     }
 }
@@ -143,6 +167,9 @@ enum Artifact {
     NoSdkIdentity,
     /// `app.tar.gz` and `receipt.json` are in the output directory.
     Written,
+    /// An earlier main run's result, verified again, is in the output
+    /// directory as `app.tar.gz` and `receipt.json`; nothing was built.
+    Reused,
 }
 
 impl Artifact {
@@ -152,8 +179,112 @@ impl Artifact {
             Self::Routed => "routed",
             Self::NoSdkIdentity => "no_sdk_identity",
             Self::Written => "written",
+            Self::Reused => "reused",
         }
     }
+}
+
+/// What `--reuse` named: `ci reuse`'s record and, when it reused a result,
+/// that result once verified again.
+struct Reuse {
+    record: crate::ci_reuse::Record,
+    result: Option<Reused>,
+}
+
+/// A reused result: its receipt and archive bytes.
+struct Reused {
+    receipt: Receipt,
+    archive: Vec<u8>,
+}
+
+/// `ci reuse`'s directory: exactly its record, and on a hit the reused
+/// `app.tar.gz` and `receipt.json`, verified again against the head app, the
+/// request's cases and this tooling's SDK identity.
+fn reuse_directory(
+    directory: &Path,
+    app: &Path,
+    cases: u64,
+    sdk: Option<&day2::sdk_release::BlobIdentity>,
+) -> Result<Reuse> {
+    use crate::ci_reuse::{ARCHIVE, RECEIPT, RECORD};
+    let record = crate::ci_reuse::Record::read(directory)?;
+    let mut names = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        ensure!(
+            entry.file_type()?.is_file(),
+            "ci reuse's directory holds only regular files"
+        );
+        names.push(entry.file_name().into_string().unwrap_or_default());
+    }
+    names.sort();
+    let Some(source) = &record.source else {
+        ensure!(
+            names == [RECORD],
+            "ci reuse's directory holds only its record when it reused nothing"
+        );
+        return Ok(Reuse {
+            record,
+            result: None,
+        });
+    };
+    let checked = (|| -> Result<Reused> {
+        ensure!(
+            names == [ARCHIVE, RECEIPT, RECORD],
+            "ci reuse's directory must hold exactly app.tar.gz, receipt.json and reuse.json"
+        );
+        let bytes = day2_assets::read_regular(&directory.join(RECEIPT), RECEIPT_LIMIT)?;
+        let receipt: Receipt = day2::json::decode(&bytes).context("invalid reused receipt")?;
+        receipt.check()?;
+        ensure!(
+            receipt.bytes()? == bytes,
+            "the reused receipt is not as ci check writes one"
+        );
+        ensure!(
+            receipt.source_inputs == source_inputs(app)?,
+            "the reused result was checked for other source inputs than the head tree's app"
+        );
+        ensure!(
+            receipt.verification.cases == cases,
+            "the reused result was checked with another case count than the request's"
+        );
+        let sdk = sdk.context(
+            "this tooling has no SDK identity to verify a reused result with: only the SDK's \
+             precompiled tooling reuses",
+        )?;
+        ensure!(
+            receipt.sdk_distribution == *sdk,
+            "the reused result was checked on another SDK's tooling distribution than this \
+             image's"
+        );
+        let inputs = receipt.source_inputs.trim_start_matches("sha256:");
+        for (object, file) in [
+            (&source.receipt, crate::instance_source::app_ci::RECEIPT),
+            (&source.artifact, crate::instance_source::app_ci::ARTIFACT),
+        ] {
+            ensure!(
+                object.name.ends_with(&format!(
+                    "/{inputs}-{cases}/{}/{}/{file}",
+                    source.run, source.attempt
+                )),
+                "the reuse record names objects of another key"
+            );
+        }
+        let archive = day2_assets::read_regular(
+            &directory.join(ARCHIVE),
+            crate::instance_source::ARTIFACT_LIMIT,
+        )?;
+        ensure!(
+            day2::sdk_release::BlobIdentity::of(&archive) == receipt.archive,
+            "the reused artifact is not the archive its receipt names"
+        );
+        Ok(Reused { receipt, archive })
+    })()
+    .context("the reused result fails verification")?;
+    Ok(Reuse {
+        record,
+        result: Some(checked),
+    })
 }
 
 pub struct Session {
@@ -170,6 +301,8 @@ pub struct Session {
     built: Option<Built>,
     packed: Option<Packed>,
     artifact: Artifact,
+    /// What `--reuse` named, verified when the session starts.
+    reuse: Option<Reuse>,
 }
 
 impl Session {
@@ -187,6 +320,15 @@ impl Session {
     ) -> Result<Self> {
         let request = Request::read(path)?;
         let head = read_tree(&request.head)?;
+        let reuse = match &request.reuse {
+            Some(directory) => Some(reuse_directory(
+                directory,
+                &request.head.join(day2::app_capture::ROOT),
+                request.cases,
+                sdk.as_ref(),
+            )?),
+            None => None,
+        };
         Ok(Self {
             request,
             platform: platform.to_path_buf(),
@@ -200,6 +342,7 @@ impl Session {
             built: None,
             packed: None,
             artifact: Artifact::NotBuilt,
+            reuse,
         })
     }
 
@@ -210,6 +353,11 @@ impl Session {
 
     fn lanes(&self) -> Result<Lanes> {
         Ok(self.route.as_ref().context("route the change first")?.lanes)
+    }
+
+    /// The reused result, verified when the session started.
+    fn reused(&self) -> Option<&Reused> {
+        self.reuse.as_ref().and_then(|reuse| reuse.result.as_ref())
     }
 
     pub fn step(&mut self, name: &str) -> Result<Value> {
@@ -249,6 +397,7 @@ impl Session {
             "native": lanes.native,
             "extension": lanes.extension,
             "javascript": lanes.javascript,
+            "reused": self.reused().is_some(),
         }))
     }
 
@@ -403,6 +552,10 @@ impl Session {
     /// tested, with the fixed seed and the request's cases.
     pub fn building(&self, source: &Path, seed: &str, cases: u64, tests: bool) -> Result<()> {
         ensure!(self.lanes()?.native, "the change selects no native build");
+        ensure!(
+            self.reused().is_none(),
+            "a reused result is verified again, not built again"
+        );
         ensure!(self.built.is_none(), "CI builds the app once");
         ensure!(
             std::path::absolute(source)? == self.app()
@@ -423,10 +576,26 @@ impl Session {
     }
 
     /// Bind the build's selected artifact, then pack it as publish_artifact.pack
-    /// did, but only when every lane ran and the tooling has an SDK identity.
+    /// did, but only when every lane ran and the tooling has an SDK identity. A
+    /// reused result's verified archive is written instead, as a packed one is.
     fn artifact(&mut self) -> Result<Value> {
         let lanes = self.lanes()?;
         ensure!(lanes.native, "the change selects no native build");
+        if let Some(reused) = self.reused() {
+            ensure!(
+                lanes == Lanes::ALL && self.built.is_none(),
+                "a reused result replaces a push run's build"
+            );
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&self.request.output)?;
+            crate::instance_source::write_new(
+                &self.request.output.join("app.tar.gz"),
+                &reused.archive,
+            )?;
+            self.artifact = Artifact::Reused;
+            return Ok(json!({ "artifact": self.artifact.name() }));
+        }
         let built = self.built.as_ref().context("build the app first")?;
         let verification = &built.receipt.verification;
         let current: Value =
@@ -467,7 +636,8 @@ impl Session {
         Ok(json!({ "artifact": self.artifact.name() }))
     }
 
-    /// Every selected lane ran; write the receipt when an artifact was packed.
+    /// Every selected lane ran; write the receipt when an artifact was packed or
+    /// reused.
     fn result(&mut self) -> Result<Value> {
         let route = self.route.as_ref().context("route the change first")?;
         let lanes = route.lanes;
@@ -500,6 +670,15 @@ impl Session {
                 receipt.write(&self.request.output)?;
                 Some(receipt)
             }
+            _ if self.artifact == Artifact::Reused => {
+                let receipt = self.reused().context("the reused result")?.receipt.clone();
+                ensure!(
+                    receipt.source_inputs == source_inputs && receipt.lanes == names,
+                    "the reused result no longer binds the head tree's app"
+                );
+                receipt.write(&self.request.output)?;
+                Some(receipt)
+            }
             _ => None,
         };
         let report = Report {
@@ -515,6 +694,7 @@ impl Session {
             artifact: self.artifact.name().to_owned(),
             output: receipt.as_ref().map(|_| self.request.output.clone()),
             receipt,
+            reuse: self.reuse.as_ref().map(|reuse| reuse.record.clone()),
         };
         Ok(serde_json::to_value(report)?)
     }
@@ -522,9 +702,10 @@ impl Session {
 
 /// What `day2 ci check` prints: the lanes the change selected and why, what
 /// each lane checked, the app's source inputs, what became of the artifact
-/// (`not_built`, `routed`, `no_sdk_identity` or `written`) and, once written,
-/// the output directory and its receipt. cli/fixtures/ci-check-report.json
-/// pins the shape for the host and the CLI.
+/// (`not_built`, `routed`, `no_sdk_identity`, `written` or `reused`) and, once
+/// written or reused, the output directory and its receipt, and `ci reuse`'s
+/// record when `--reuse` named one. cli/fixtures/ci-check-report.json pins
+/// the shape for the host and the CLI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Report {
@@ -540,6 +721,7 @@ pub struct Report {
     pub artifact: String,
     pub output: Option<PathBuf>,
     pub receipt: Option<Receipt>,
+    pub reuse: Option<crate::ci_reuse::Record>,
 }
 
 /// `receipt.json` beside `app.tar.gz`: what the deploy side binds a checked
@@ -599,13 +781,19 @@ impl Receipt {
     }
 
     /// Key-sorted, as `json.dumps(receipt, sort_keys=True)` wrote it, and a newline.
-    fn write(&self, output: &Path) -> Result<()> {
-        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    pub fn bytes(&self) -> Result<Vec<u8>> {
         let mut bytes = day2::python_json::dumps(
             &serde_json::to_value(self)?,
             day2::python_json::Layout::Default,
         )?;
         bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    /// `receipt.json` in `output`, as [`Receipt::bytes`].
+    fn write(&self, output: &Path) -> Result<()> {
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let bytes = self.bytes()?;
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
