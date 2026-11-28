@@ -47,6 +47,8 @@ pub(super) use protected_restore::{
     attach_protected_restore_guard, check_protected_restore_installed_original,
     require_protected_restore_guard,
 };
+#[cfg(any(target_os = "linux", test))]
+pub(super) use request_frame::BackupSubmitOriginal;
 use request_frame::{EnrolledRequestFrame, EnrolledStageFrame};
 pub(in crate::security_epoch) use restore_receiver::ReceiverDurability;
 

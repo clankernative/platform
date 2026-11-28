@@ -1,6 +1,59 @@
 use super::*;
 use crate::security_epoch::scheduled_backup::{Destination, Requester, Slot, Source, Transport};
 
+#[test]
+fn submit_wire_is_one_canonical_purpose_and_preserves_the_complete_intent() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let intent = serde_json::to_vec(&fixture.intent)?;
+    require_submit_original_data(&intent, &fixture.intent.transport.original)?;
+    assert!(require_submit_original_data(&intent, &digest("a-later-original")).is_err());
+    let encoded = encode_submit_data(&intent)?;
+    assert_eq!(decode_submit_data(&encoded)?, intent);
+    let overhead = b"{\"type\":\"submit_backup_v1\",\"intent\":}".len();
+    assert_eq!(encoded.len(), intent.len() + overhead);
+    assert_eq!(MAX_SUBMIT_BYTES, super::super::MAX_PAYLOAD + overhead);
+    assert!(decode_submit_data(&intent).is_err());
+    let good: Value = serde_json::from_slice(&encoded)?;
+    for malformed in [
+        json!({"type":"submit_backup_v2", "intent":good["intent"]}),
+        json!({"type":"submit_backup_v1", "intent":good["intent"], "extra":true}),
+        json!({"type":"submit_backup_v1"}),
+        json!({"type":"submit_backup_v1", "intent":null}),
+        json!([good.clone()]),
+        Value::Null,
+    ] {
+        assert!(decode_submit_data(&serde_json::to_vec(&malformed)?).is_err());
+    }
+    let text = String::from_utf8(encoded.clone())?;
+    let duplicate_type = text.replacen(
+        "\"type\":\"submit_backup_v1\"",
+        "\"type\":\"submit_backup_v1\",\"type\":\"submit_backup_v1\"",
+        1,
+    );
+    assert!(decode_submit_data(duplicate_type.as_bytes()).is_err());
+    let nested_duplicate = text.replacen(
+        "\"policy_generation\":",
+        "\"policy_generation\":null,\"policy_generation\":",
+        1,
+    );
+    assert_ne!(nested_duplicate, text);
+    assert!(decode_submit_data(nested_duplicate.as_bytes()).is_err());
+    let mut trailing = encoded.clone();
+    trailing.push(b'\n');
+    assert!(decode_submit_data(&trailing).is_err());
+    assert!(decode_submit_data(&vec![b' '; MAX_SUBMIT_BYTES + 1]).is_err());
+    assert!(encode_submit_data(&vec![b' '; super::super::MAX_PAYLOAD + 1]).is_err());
+    let mut changed = fixture.intent;
+    changed.operation = digest("another-operation");
+    let changed_wire = encode_submit_data(&serde_json::to_vec(&changed)?)?;
+    let changed_intent = decode_submit_data(&changed_wire)?;
+    assert_ne!(
+        intent_digest_data(&changed_intent)?,
+        intent_digest_data(&intent)?
+    );
+    Ok(())
+}
+
 fn uid(n: u32) -> String {
     format!("00000000-0000-0000-0000-{n:012}")
 }

@@ -985,7 +985,10 @@ fn require_listener_profile(socket: &File) -> Result<()> {
 
 /// Metadata on this retained socket dentry only. The actual bind factory owns
 /// the enrolled stage; this helper cannot return a listener, peer or authority.
-fn set_private_socket_mode(name: &File, acquisition: &mut NativeAcquisition) -> Result<()> {
+pub(super) fn set_private_socket_mode(
+    name: &File,
+    acquisition: &mut NativeAcquisition,
+) -> Result<()> {
     let requested: Result<()> = (|| {
         acquisition.remaining()?;
         let before = name.metadata()?;

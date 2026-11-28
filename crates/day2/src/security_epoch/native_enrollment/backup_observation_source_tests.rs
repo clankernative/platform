@@ -2,6 +2,383 @@
 //! is fabricated here; real kernel/resource conformance is Linux-only.
 use quote::ToTokens;
 
+#[test]
+fn actual_submit_clock_join_rejects_a_renewed_request_on_the_same_connection() {
+    use super::owner::BackupSubmitOriginal;
+    use crate::security_epoch::native_clock::{NativeAcquisition, fixture_observe_at};
+    use day2_capabilities::Digest;
+    use std::time::Duration;
+    let fixture = |name: &[u8], at: u64| {
+        NativeAcquisition::fixture(
+            Digest::new(name),
+            std::process::id(),
+            Duration::from_secs(at),
+            Duration::from_secs(5),
+        )
+    };
+    let admission = fixture(b"connection", 100);
+    let mut connection = admission.into_connection_clock().unwrap();
+    let mut first = connection
+        .bind_captured_current(fixture(b"first", 102))
+        .unwrap();
+    let mut captured = BackupSubmitOriginal::capture(&mut first).unwrap();
+    captured.check(&mut first).unwrap();
+    let connection_identity = first.identity_domain().unwrap();
+    let mut second = connection
+        .bind_captured_current(fixture(b"second", 103))
+        .unwrap();
+    assert_eq!(connection_identity, second.identity_domain().unwrap());
+    assert_ne!(
+        first.historical_interval_observation().0,
+        second.historical_interval_observation().0
+    );
+    assert!(captured.check(&mut second).is_err());
+    assert!(first.remaining().is_err());
+    assert!(second.remaining().is_err());
+    fixture_observe_at(&mut first, Duration::from_secs(103));
+    assert!(captured.check(&mut first).is_err());
+
+    for cut in 0..4 {
+        let mut original = fixture(b"original", 100);
+        let mut captured = BackupSubmitOriginal::capture(&mut original).unwrap();
+        captured.check(&mut original).unwrap();
+        match cut {
+            0 => fixture_observe_at(&mut original, Duration::from_secs(99)),
+            1 => fixture_observe_at(&mut original, Duration::from_secs(105)),
+            2 => fixture_observe_at(&mut original, Duration::from_secs(106)),
+            _ => original.refuse(),
+        }
+        assert!(captured.check(&mut original).is_err());
+        fixture_observe_at(&mut original, Duration::from_secs(101));
+        assert!(captured.check(&mut original).is_err());
+    }
+    let mut first = fixture(b"equal", 100);
+    let mut copy = fixture(b"equal", 100);
+    let mut captured = BackupSubmitOriginal::capture(&mut first).unwrap();
+    assert!(captured.check(&mut copy).is_err());
+}
+
+#[test]
+fn actual_submit_clock_guard_keeps_narrower_ceiling_and_refuses_retirement() {
+    use super::owner::BackupSubmitOriginal;
+    use crate::security_epoch::native_clock::{NativeAcquisition, fixture_observe_at};
+    use day2_capabilities::Digest;
+    use std::time::Duration;
+    let fixture = || {
+        NativeAcquisition::fixture(
+            Digest::new(b"request"),
+            std::process::id(),
+            Duration::from_secs(100),
+            Duration::from_secs(5),
+        )
+    };
+    for cut in [100, 102] {
+        let mut root = fixture();
+        let mut short = root.narrow(1, Duration::from_secs(105)).unwrap();
+        let mut captured = BackupSubmitOriginal::capture(&mut short).unwrap();
+        captured.check(&mut short).unwrap();
+        fixture_observe_at(&mut root, Duration::from_secs(cut));
+        assert!(captured.check(&mut root).is_err());
+        fixture_observe_at(&mut short, Duration::from_secs(100));
+        assert!(captured.check(&mut short).is_err());
+    }
+    // A legitimate narrowing may proceed, but no later wider view can undo it.
+    let mut root = fixture();
+    let mut captured = BackupSubmitOriginal::capture(&mut root).unwrap();
+    let mut short = root.narrow(1, Duration::from_secs(105)).unwrap();
+    captured.check(&mut short).unwrap();
+    assert!(captured.check(&mut root).is_err());
+    let admission = NativeAcquisition::fixture(
+        Digest::new(b"retire-connection"),
+        std::process::id(),
+        Duration::from_secs(100),
+        Duration::from_secs(5),
+    );
+    let mut connection = admission.into_connection_clock().unwrap();
+    let mut request = connection.bind_captured_current(fixture()).unwrap();
+    let mut request_guard = BackupSubmitOriginal::capture(&mut request).unwrap();
+    connection.retire_checked(&mut request).unwrap();
+    assert!(request_guard.check(&mut request).is_err());
+}
+
+fn socket_resource_contract(socket: &str, directory: &str, birth: &str) -> bool {
+    [
+        "const PATH: &str = \"/run/day2-native-enrollment/scheduled-backup/request.sock\";",
+        "stage.storage()?.scheduled_backup_root_selection()?;",
+        "ScheduledBackupSocketDirectory::observe(&root)?",
+        "net::bind(&socket, &net::SocketAddrUnix::new(PATH)?)?;",
+        "net::accept_with(&self.socket, SocketFlags::CLOEXEC | SocketFlags::NONBLOCK)?",
+        "let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { stage.check_serving_acquisition(original) }));",
+        "stage.refuse_serving(); original.refuse();",
+        "finish_checked(requested, checked)",
+        "self.directory.check(&self.root)?;",
+        "let held = self.name.metadata()?; require_socket_name(&held)?;",
+        "(held.dev(), held.ino()) == self.identity",
+        "let named = std::fs::symlink_metadata(PATH)?; require_socket_name(&named)?;",
+        "(named.dev(), named.ino()) == self.identity",
+        "metadata.uid() == 10001 && metadata.gid() == 10001 && metadata.mode() & 0o7777 == 0o600",
+        "!self.refused.get() && self.process == std::process::id() && self.thread == std::thread::current().id()",
+        "net::sockopt::socket_passcred(&self.socket)? && net::sockopt::socket_passpidfd(&self.socket)?",
+    ].iter().enumerate().all(|(index, required)| {
+        let found = socket.contains(&fragment(required));
+        if !found { eprintln!("socket required index {index}"); }
+        found
+    })
+        && socket.matches(&fragment("finish_checked(requested, checked)")).count() == 3
+        && socket.matches(&fragment("stage.storage()?.scheduled_backup_root_selection()?;")).count() == 3
+        && socket.matches(&fragment("stage.refuse_serving(); original.refuse();")).count() == 3
+        && socket.matches(&fragment("let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { stage.check_serving_acquisition(original) })); ")).count() == 3
+        && !["remove_file", "unlink", "receive_issuer", "ProtectedRestoreAdmission", "SignedStage"].iter().any(|forbidden| socket.contains(forbidden))
+        && !socket.contains(&fragment("NativeAcquisition::begin"))
+        && [
+            "Self::Storage => CHILD",
+            "Self::ScheduledBackup => \"scheduled-backup\"",
+            "Self::observe_selected(root, Child::Storage)",
+            "Self::prepare_selected(root, Child::Storage)",
+            "StorageSocketDirectory::observe_selected(root, Child::ScheduledBackup)?",
+            "StorageSocketDirectory::prepare_selected(root, Child::ScheduledBackup)?",
+            "fn observe_selected(root: &File, selected: Child) -> Result<Self>",
+            "fn prepare_selected(root: &File, child: Child) -> Result<Self>",
+            "child_identity(&open_child(reference, self.child)?)? == self.identity",
+            "child_identity(&open_mounted_child(root, self.child)?)? == self.identity",
+            "ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_XDEV",
+        ].iter().enumerate().all(|(index, required)| {
+            let found = directory.contains(&fragment(required));
+            if !found { eprintln!("directory required index {index}"); }
+            found
+        })
+        && birth.contains(&fragment("let scheduled_backup = if policy.scheduled_backup.is_some() { Some(ScheduledBackupSocketDirectory::prepare(&directory)?) } else { None };"))
+        && birth.contains(&fragment("if let Some(directory) = &self.birth.scheduled_backup { directory.check(&self.directory)?; }"))
+}
+
+#[test]
+fn dedicated_socket_keeps_fixed_child_actual_name_original_posts_and_no_permission_factory() {
+    let socket = canonical(
+        syn::parse_file(include_str!("channel/scheduled_backup.rs"))
+            .unwrap()
+            .to_token_stream(),
+    )
+    .to_string();
+    let directory = canonical(
+        syn::parse_file(include_str!("storage_socket_directory.rs"))
+            .unwrap()
+            .to_token_stream(),
+    )
+    .to_string();
+    let birth = canonical(
+        syn::parse_file(include_str!("birth.rs"))
+            .unwrap()
+            .to_token_stream(),
+    )
+    .to_string();
+    assert!(socket_resource_contract(&socket, &directory, &birth));
+    for (from, to) in [
+        (
+            "\"/run/day2-native-enrollment/scheduled-backup/request.sock\"",
+            "\"/run/day2-native-enrollment/storage/request.sock\"",
+        ),
+        ("ScheduledBackupSocketDirectory::observe(&root)?", "Ok(())?"),
+        ("self.directory.check(&self.root)?;", ""),
+        ("(held.dev(), held.ino()) == self.identity", "true"),
+        ("(named.dev(), named.ino()) == self.identity", "true"),
+        ("metadata.mode() & 0o7777 == 0o600", "true"),
+        ("stage.refuse_serving();", ""),
+        (
+            "finish_checked(requested, checked)",
+            "finish_checked(requested, Ok(Ok(())))",
+        ),
+    ] {
+        let from = fragment(from);
+        let to = fragment(to);
+        assert!(socket.contains(&from), "mutation target");
+        assert!(!socket_resource_contract(
+            &socket.replacen(&from, &to, 1),
+            &directory,
+            &birth
+        ));
+    }
+    for (from, to) in [
+        (
+            "Self::ScheduledBackup => \"scheduled-backup\"",
+            "Self::ScheduledBackup => CHILD",
+        ),
+        (
+            "open_child(reference, self.child)",
+            "open_child(reference, Child::Storage)",
+        ),
+        ("| ResolveFlags::NO_XDEV", ""),
+    ] {
+        let from = fragment(from);
+        let to = fragment(to);
+        assert_eq!(directory.matches(&from).count(), 1, "mutation target");
+        assert!(!socket_resource_contract(
+            &socket,
+            &directory.replacen(&from, &to, 1),
+            &birth
+        ));
+    }
+    let from = fragment("if policy.scheduled_backup.is_some()");
+    assert_eq!(birth.matches(&from).count(), 1);
+    assert!(!socket_resource_contract(
+        &socket,
+        &directory,
+        &birth.replacen(&from, &fragment("if true"), 1)
+    ));
+}
+
+fn selected_method(source: &str, owner: &str, name: &str) -> String {
+    let file = syn::parse_file(source).unwrap();
+    let mut matches = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) if item.self_ty.to_token_stream().to_string() == owner => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(item) if item.sig.ident == name => Some(item),
+            _ => None,
+        });
+    let found = canonical(matches.next().unwrap().to_token_stream()).to_string();
+    assert!(matches.next().is_none());
+    found
+}
+
+fn submit_contract(receive: &str, check: &str, sender_receive: &str, sender_check: &str) -> bool {
+    let mut next = 0;
+    for required in [
+        "self, stage: &mut EnrolledRoleStage<'_>, original: &mut NativeAcquisition",
+        "let captured = BackupSubmitOriginal::capture(original)?;",
+        "let selected = stage.storage()?.scheduled_backup_root_selection()?;",
+        "stage.check_serving_acquisition(original)?;",
+        "self.check_resources()?;",
+        "original.remaining()?;",
+        "net::recv_pidfd_packet(&self.socket, &mut [IoSliceMut::new(&mut bytes)])",
+        "ScheduledJobSender::receive(received, Rc::clone(&self.socket), &selected.executable, original)?",
+        "crate::security_epoch::scheduled_backup::requester::decode_submit_data(&bytes[..count])?",
+        "CapturedScheduledBackupSubmit { connection: self, sender, intent, original: captured, refused: false }",
+        "submit.check(original)?;",
+        "let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { stage.check_serving_acquisition(original) }));",
+        "stage.refuse_serving(); original.refuse();",
+        "finish_checked(requested, checked)",
+    ] {
+        let required = fragment(required);
+        let Some(position) = receive[next..].find(&required) else {
+            eprintln!("submit required before position {next}");
+            return false;
+        };
+        next += position + required.len();
+    }
+    [
+        "self.original.check(original)?;",
+        "self.connection.check_resources()?; self.sender.check(original)?;",
+        "self.original.check_intent(original, &self.intent)?;",
+        "self.refused = true; self.original.refuse(); self.sender.refuse(); self.connection.refused.set(true); original.refuse();",
+    ].iter().all(|needle| check.contains(&fragment(needle)))
+        && [
+            "MessageProcess::receive(received, expected_code, original, &costs)?",
+            "let proc = require_proc_view(original)?;",
+            "pid.get() == process.data.process && credentials.uid() == 10001 && credentials.gid() == 10001",
+            "require_pidfd(&proc, &process.pidfd, pid, original)?;",
+            "require_pidfd(&proc, &connector_fd, pid, original)?;",
+            "connector.pidfd = connector_fd;",
+            "MessageProcess::check_same_actor(&mut [&mut process, &mut connector], original, &costs)?;",
+            "sender.check(original)?;",
+        ].iter().all(|needle| sender_receive.contains(&fragment(needle)))
+        && [
+            "require_process_views(&self.proc, &self.process, &self.connector, original)?;",
+            "require_pidfd(&self.proc, &self.process.pidfd, pid, original)?;",
+            "require_pidfd(&self.proc, &self.connector.pidfd, pid, original)?;",
+            "rustix::net::sockopt::socket_cookie(&self.socket)? == self.cookie",
+            "MessageProcess::check_same_actor(&mut [&mut self.process, &mut self.connector], original, &HashCosts::disabled())?;",
+            "self.refused = true; original.refuse();",
+        ].iter().all(|needle| sender_check.contains(&fragment(needle)))
+        && !receive.contains(&fragment("NativeAcquisition::begin"))
+        && !receive.contains("recv_pidfd_rights_packet")
+}
+
+#[test]
+fn actual_submit_consumes_connection_and_keeps_same_original_and_kernel_sender() {
+    let socket = include_str!("channel/scheduled_backup.rs");
+    let sender = include_str!("process/backup_anchor.rs");
+    let receive = selected_method(socket, "ScheduledBackupConnection", "receive_submit");
+    let check = selected_method(socket, "CapturedScheduledBackupSubmit", "check");
+    let sender_receive = selected_method(sender, "ScheduledJobSender", "receive");
+    let sender_check = selected_method(sender, "ScheduledJobSender", "check");
+    assert!(submit_contract(
+        &receive,
+        &check,
+        &sender_receive,
+        &sender_check
+    ));
+    for (from, to) in [
+        (
+            "let captured = BackupSubmitOriginal::capture(original)?;",
+            "let captured = untrusted_original();",
+        ),
+        (
+            "ScheduledJobSender::receive(received, Rc::clone(&self.socket), &selected.executable, original)?",
+            "untrusted_sender_data()?",
+        ),
+        ("original: captured", "original: untrusted_original()"),
+    ] {
+        let from = fragment(from);
+        let to = fragment(to);
+        assert_eq!(receive.matches(&from).count(), 1, "mutation target");
+        assert!(!submit_contract(
+            &receive.replacen(&from, &to, 1),
+            &check,
+            &sender_receive,
+            &sender_check
+        ));
+    }
+    for (from, to) in [
+        ("self.original.check(original)?;", ""),
+        ("self.sender.check(original)?;", ""),
+        ("self.sender.refuse();", ""),
+        ("self.original.check_intent(original, &self.intent)?;", ""),
+    ] {
+        let from = fragment(from);
+        let to = fragment(to);
+        assert_eq!(check.matches(&from).count(), 1, "mutation target");
+        assert!(!submit_contract(
+            &receive,
+            &check.replacen(&from, &to, 1),
+            &sender_receive,
+            &sender_check
+        ));
+    }
+    for (from, to) in [
+        (
+            "MessageProcess::receive(received, expected_code, original, &costs)?",
+            "process_from_numeric_pid()?",
+        ),
+        ("require_pidfd(&proc, &connector_fd, pid, original)?;", ""),
+        ("pid.get() == process.data.process", "true"),
+    ] {
+        let from = fragment(from);
+        let to = fragment(to);
+        assert_eq!(sender_receive.matches(&from).count(), 1, "mutation target");
+        assert!(!submit_contract(
+            &receive,
+            &check,
+            &sender_receive.replacen(&from, &to, 1),
+            &sender_check
+        ));
+    }
+    let from = fragment("require_pidfd(&self.proc, &self.process.pidfd, pid, original)?;");
+    assert_eq!(sender_check.matches(&from).count(), 1);
+    assert!(!submit_contract(
+        &receive,
+        &check,
+        &sender_receive,
+        &sender_check.replacen(&from, "", 1)
+    ));
+}
+
 fn canonical(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     stream
         .into_iter()
@@ -15,6 +392,9 @@ fn canonical(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
             }
             proc_macro2::TokenTree::Group(g) => Some(proc_macro2::TokenTree::Group(
                 proc_macro2::Group::new(g.delimiter(), canonical(g.stream())),
+            )),
+            proc_macro2::TokenTree::Punct(p) => Some(proc_macro2::TokenTree::Punct(
+                proc_macro2::Punct::new(p.as_char(), proc_macro2::Spacing::Alone),
             )),
             other => Some(other),
         })
@@ -80,7 +460,7 @@ fn observing_contract(source: &str) -> bool {
         };
         tail = &tail[position + needle.len()..];
     }
-    !actual.contains("NativeAcquisition :: begin") && !actual.contains("SignedStage")
+    !actual.contains(&fragment("NativeAcquisition::begin")) && !actual.contains("SignedStage")
 }
 
 #[test]
@@ -148,7 +528,7 @@ fn rights_receiver_is_fixed_to_bind_and_two_anchors_with_no_general_mode() {
     ] {
         assert!(body.contains(&fragment(needle)));
     }
-    assert!(!body.contains("NativeAcquisition :: begin"));
+    assert!(!body.contains(&fragment("NativeAcquisition::begin")));
     let ordinary = file
         .items
         .iter()
@@ -164,7 +544,7 @@ fn rights_receiver_is_fixed_to_bind_and_two_anchors_with_no_general_mode() {
             _ => None,
         })
         .unwrap();
-    assert!(ordinary.contains("net :: recv_pidfd_packet"));
+    assert!(ordinary.contains(&fragment("net::recv_pidfd_packet")));
     assert!(!ordinary.contains("recv_pidfd_rights_packet"));
 }
 

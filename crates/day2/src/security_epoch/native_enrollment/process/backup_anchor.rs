@@ -23,7 +23,123 @@ use rustix::{
         SocketType,
     },
 };
-use std::{fs::File, num::NonZeroU32};
+use std::{fs::File, num::NonZeroU32, rc::Rc};
+
+/// The ORIGINAL message sender and actual accepted connection, not a peer
+/// reconstructed from SO_PEERCRED, a PID or a signed observation. No handle
+/// getter, process role or request/source permission is exposed.
+pub(in crate::security_epoch::native_enrollment) struct ScheduledJobSender {
+    process: MessageProcess,
+    connector: MessageProcess,
+    socket: Rc<File>,
+    proc: File,
+    cookie: u64,
+    refused: bool,
+}
+
+impl ScheduledJobSender {
+    pub(in crate::security_epoch::native_enrollment) fn receive(
+        received: rustix::net::ReceivedPidfdPacket,
+        socket: Rc<File>,
+        expected_code: &Digest,
+        original: &mut NativeAcquisition,
+    ) -> Result<Self> {
+        let requested = (|| {
+            ensure!(
+                received.credentials.user == 10001 && received.credentials.group == 10001,
+                "backup_submit_sender_user"
+            );
+            socket_profile(&socket, original)?;
+            let proc = require_proc_view(original)?;
+            let costs = HashCosts::disabled();
+            // This consumes THIS packet's actual SCM_PIDFD. NotVisible is
+            // refused by MessageProcess; there is no host-PID translation.
+            let mut process = MessageProcess::receive(received, expected_code, original, &costs)?;
+            let credentials =
+                nix::sys::socket::getsockopt(&socket, nix::sys::socket::sockopt::PeerCredentials)?;
+            let pid = NonZeroU32::new(u32::try_from(credentials.pid())?)
+                .context("backup_submit_connector_not_visible")?;
+            ensure!(
+                pid.get() == process.data.process
+                    && credentials.uid() == 10001
+                    && credentials.gid() == 10001,
+                "backup_submit_connector_changed"
+            );
+            let connector_fd = File::from(nix::sys::socket::getsockopt(
+                &socket,
+                nix::sys::socket::sockopt::PeerPidfd,
+            )?);
+            require_pidfd(&proc, &process.pidfd, pid, original)?;
+            require_pidfd(&proc, &connector_fd, pid, original)?;
+            let mut connector = process.retain_message_anchor(original, &costs)?;
+            connector.pidfd = connector_fd;
+            MessageProcess::check_same_actor(
+                &mut [&mut process, &mut connector],
+                original,
+                &costs,
+            )?;
+            let cookie = rustix::net::sockopt::socket_cookie(&socket)?;
+            ensure!(cookie != 0, "backup_submit_socket_cookie");
+            let mut sender = Self {
+                process,
+                connector,
+                socket,
+                proc,
+                cookie,
+                refused: false,
+            };
+            sender.check(original)?;
+            Ok(sender)
+        })();
+        if requested.is_err() {
+            original.refuse();
+        }
+        requested
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn check(
+        &mut self,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = (|| {
+            ensure!(!self.refused, "backup_submit_sender_refused");
+            socket_profile(&self.socket, original)?;
+            require_process_views(&self.proc, &self.process, &self.connector, original)?;
+            let credentials = nix::sys::socket::getsockopt(
+                &self.socket,
+                nix::sys::socket::sockopt::PeerCredentials,
+            )?;
+            let pid = NonZeroU32::new(u32::try_from(credentials.pid())?)
+                .context("backup_submit_connector_not_visible")?;
+            ensure!(
+                pid.get() == self.process.data.process
+                    && credentials.uid() == 10001
+                    && credentials.gid() == 10001
+                    && rustix::net::sockopt::socket_cookie(&self.socket)? == self.cookie,
+                "backup_submit_connector_changed"
+            );
+            require_pidfd(&self.proc, &self.process.pidfd, pid, original)?;
+            require_pidfd(&self.proc, &self.connector.pidfd, pid, original)?;
+            MessageProcess::check_same_actor(
+                &mut [&mut self.process, &mut self.connector],
+                original,
+                &HashCosts::disabled(),
+            )?;
+            require_process_views(&self.proc, &self.process, &self.connector, original)?;
+            original.remaining()?;
+            Ok(())
+        })();
+        if requested.is_err() {
+            self.refused = true;
+            original.refuse();
+        }
+        requested
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn refuse(&mut self) {
+        self.refused = true;
+    }
+}
 
 /// Both handles are actual received/connected resources. No DATA constructor,
 /// descriptor getter, role, source grant or signing capability is exposed.
@@ -48,6 +164,7 @@ const _: () = {
             impl<T: ?Sized> Ambiguous<()> for T {}
             impl<T: ?Sized + $bound> Ambiguous<u8> for T {}
             let _ = <ForwardedJobAnchors as Ambiguous<_>>::check;
+            let _ = <ScheduledJobSender as Ambiguous<_>>::check;
         }};
     }
     assert_not_impl!(Clone);

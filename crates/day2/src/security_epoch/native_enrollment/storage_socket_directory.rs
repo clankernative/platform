@@ -9,6 +9,22 @@ const CHILD: &str = "storage";
 const CONTROLLER: u32 = 10001;
 const REFERENCE: &str = "/run/day2-native-enrollment-reference";
 
+// Closed resource selections, never a caller-provided path or permission.
+#[derive(Clone, Copy)]
+enum Child {
+    Storage,
+    ScheduledBackup,
+}
+
+impl Child {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Storage => CHILD,
+            Self::ScheduledBackup => "scheduled-backup",
+        }
+    }
+}
+
 enum Placement {
     Provisioner,
     Controller { root: File, child: File },
@@ -19,6 +35,31 @@ pub(super) struct StorageSocketDirectory {
     identity: (u64, u64),
     root_identity: (u64, u64),
     placement: Placement,
+    child: Child,
+}
+
+/// A separate resource directory. It cannot name or expose the storage child,
+/// grant native authority, or create an admitted scheduled requester.
+pub(super) struct ScheduledBackupSocketDirectory {
+    directory: StorageSocketDirectory,
+}
+
+impl ScheduledBackupSocketDirectory {
+    pub(super) fn prepare(root: &File) -> Result<Self> {
+        Ok(Self {
+            directory: StorageSocketDirectory::prepare_selected(root, Child::ScheduledBackup)?,
+        })
+    }
+
+    pub(super) fn observe(root: &File) -> Result<Self> {
+        Ok(Self {
+            directory: StorageSocketDirectory::observe_selected(root, Child::ScheduledBackup)?,
+        })
+    }
+
+    pub(super) fn check(&self, root: &File) -> Result<()> {
+        self.directory.check(root)
+    }
 }
 
 impl StorageSocketDirectory {
@@ -27,6 +68,10 @@ impl StorageSocketDirectory {
     /// view of the SAME parent, then join the writable view to that descriptor.
     /// Missing or foreign references refuse; there is no unrestricted fallback.
     pub(super) fn observe(root: &File) -> Result<Self> {
+        Self::observe_selected(root, Child::Storage)
+    }
+
+    fn observe_selected(root: &File, selected: Child) -> Result<Self> {
         let root_identity = root_identity(root)?;
         require_read_only(root)?;
         let reference = File::from(rustix::fs::open(
@@ -40,9 +85,9 @@ impl StorageSocketDirectory {
         );
         require_read_only(&reference)?;
         // NO_XDEV still forbids every crossing in the unoverlaid reference.
-        let child = open_child(&reference)?;
+        let child = open_child(&reference, selected)?;
         let identity = child_identity(&child)?;
-        let directory = open_mounted_child(root)?;
+        let directory = open_mounted_child(root, selected)?;
         ensure!(
             child_identity(&directory)? == identity,
             "native_enrollment_storage_child_changed"
@@ -55,14 +100,19 @@ impl StorageSocketDirectory {
                 root: reference,
                 child,
             },
+            child: selected,
         };
         owner.check(root)?;
         Ok(owner)
     }
 
     pub(super) fn prepare(root: &File) -> Result<Self> {
+        Self::prepare_selected(root, Child::Storage)
+    }
+
+    fn prepare_selected(root: &File, child: Child) -> Result<Self> {
         let root_identity = root_identity(root)?;
-        let created = match rustix::fs::mkdirat(root, CHILD, Mode::RWXU) {
+        let created = match rustix::fs::mkdirat(root, child.name(), Mode::RWXU) {
             Ok(()) => true,
             Err(rustix::io::Errno::EXIST) => false,
             Err(error) => return Err(error.into()),
@@ -70,7 +120,7 @@ impl StorageSocketDirectory {
         if created {
             // This read-capable descriptor is acquired while UID0 still owns
             // the new inode, then closed after the ownership transfer.
-            let directory = open_initial_child(root)?;
+            let directory = open_initial_child(root, child)?;
             // Set the exact mode while the provisioner still owns the inode.
             // Transferring ownership needs CHOWN, not an additional FOWNER grant.
             rustix::fs::fchmod(&directory, Mode::RWXU)?;
@@ -80,13 +130,14 @@ impl StorageSocketDirectory {
                 Some(rustix::process::Gid::from_raw_unchecked(CONTROLLER)),
             )?;
         }
-        let directory = open_child(root)?;
+        let directory = open_child(root, child)?;
         let identity = child_identity(&directory)?;
         let owner = Self {
             directory,
             identity,
             root_identity,
             placement: Placement::Provisioner,
+            child,
         };
         owner.check(root)?;
         Ok(owner)
@@ -100,7 +151,7 @@ impl StorageSocketDirectory {
         );
         match &self.placement {
             Placement::Provisioner => ensure!(
-                child_identity(&open_child(root)?)? == self.identity,
+                child_identity(&open_child(root, self.child)?)? == self.identity,
                 "native_enrollment_storage_socket_directory_changed"
             ),
             Placement::Controller {
@@ -113,8 +164,8 @@ impl StorageSocketDirectory {
                 ensure!(
                     root_identity(reference)? == self.root_identity
                         && child_identity(child)? == self.identity
-                        && child_identity(&open_child(reference)?)? == self.identity
-                        && child_identity(&open_mounted_child(root)?)? == self.identity,
+                        && child_identity(&open_child(reference, self.child)?)? == self.identity
+                        && child_identity(&open_mounted_child(root, self.child)?)? == self.identity,
                     "native_enrollment_storage_socket_directory_changed"
                 );
             }
@@ -132,12 +183,12 @@ fn root_identity(root: &File) -> Result<(u64, u64)> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
-fn open_child(root: &File) -> Result<File> {
-    open_with(root, OFlags::PATH)
+fn open_child(root: &File, child: Child) -> Result<File> {
+    open_with(root, child, OFlags::PATH)
 }
 
-fn open_initial_child(root: &File) -> Result<File> {
-    open_with(root, OFlags::RDONLY)
+fn open_initial_child(root: &File, child: Child) -> Result<File> {
+    open_with(root, child, OFlags::RDONLY)
 }
 
 fn require_read_only(file: &File) -> Result<()> {
@@ -164,10 +215,10 @@ fn read_only(file: &File) -> Result<bool> {
 
 /// Only the fixed child component may cross its explicitly joined bind mount.
 /// Callers must join its native identity to the strict reference before use.
-fn open_mounted_child(root: &File) -> Result<File> {
+fn open_mounted_child(root: &File, child: Child) -> Result<File> {
     let directory = File::from(rustix::fs::openat2(
         root,
-        CHILD,
+        child.name(),
         OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
@@ -176,12 +227,12 @@ fn open_mounted_child(root: &File) -> Result<File> {
     Ok(directory)
 }
 
-fn open_with(root: &File, access: OFlags) -> Result<File> {
+fn open_with(root: &File, child: Child, access: OFlags) -> Result<File> {
     // After chown, UID0 without DAC_OVERRIDE cannot open this 0700 directory
     // for reading. Identity checks need only O_PATH, never directory contents.
     Ok(File::from(rustix::fs::openat2(
         root,
-        CHILD,
+        child.name(),
         access | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
         ResolveFlags::BENEATH
@@ -207,6 +258,44 @@ fn child_identity(directory: &File) -> Result<(u64, u64)> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    #[ignore = "requires isolated Linux UID0 with CHOWN; no native admission fixture"]
+    fn scheduled_child_is_distinct_and_cannot_adopt_storage_or_a_replacement() {
+        assert_eq!(rustix::process::geteuid().as_raw(), 0);
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let root = File::open(parent.path()).unwrap();
+        let storage = StorageSocketDirectory::prepare(&root).unwrap();
+        let scheduled = ScheduledBackupSocketDirectory::prepare(&root).unwrap();
+        storage.check(&root).unwrap();
+        scheduled.check(&root).unwrap();
+        let actual = std::fs::metadata(parent.path().join("scheduled-backup")).unwrap();
+        let old = std::fs::metadata(parent.path().join(CHILD)).unwrap();
+        assert_ne!((actual.dev(), actual.ino()), (old.dev(), old.ino()));
+        assert_eq!(
+            (actual.uid(), actual.gid(), actual.mode() & 0o7777),
+            (10001, 10001, 0o700)
+        );
+        std::fs::rename(
+            parent.path().join("scheduled-backup"),
+            parent.path().join("old-backup"),
+        )
+        .unwrap();
+        symlink(
+            parent.path().join(CHILD),
+            parent.path().join("scheduled-backup"),
+        )
+        .unwrap();
+        assert!(scheduled.check(&root).is_err());
+        assert!(ScheduledBackupSocketDirectory::prepare(&root).is_err());
+        storage.check(&root).unwrap();
+        std::fs::remove_file(parent.path().join("scheduled-backup")).unwrap();
+        let replacement = ScheduledBackupSocketDirectory::prepare(&root).unwrap();
+        replacement.check(&root).unwrap();
+        assert!(scheduled.check(&root).is_err());
+        storage.check(&root).unwrap();
+    }
 
     fn controller_root() -> File {
         assert_eq!(rustix::process::geteuid().as_raw(), CONTROLLER);
