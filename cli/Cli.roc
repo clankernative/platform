@@ -24,6 +24,7 @@ Cli :: [].{
 		Selection(Selection),
 		CiCheck(CiCheckRequest),
 		CiFetch(CiRun),
+		CiReuse(CiReuseRequest),
 		CiStore(CiRun),
 		CiWorkflow(Instance),
 	]
@@ -51,6 +52,7 @@ Cli :: [].{
 		InstanceSelection,
 		CiCheck,
 		CiFetch,
+		CiReuse,
 		CiStore,
 		InstanceCiWorkflow,
 	].{
@@ -77,6 +79,7 @@ Cli :: [].{
 			InstanceSelection => "instance.selection"
 			CiCheck => "ci.check"
 			CiFetch => "ci.fetch"
+			CiReuse => "ci.reuse"
 			CiStore => "ci.store"
 			InstanceCiWorkflow => "instance.ci-workflow"
 		}
@@ -342,14 +345,16 @@ Cli :: [].{
 		}
 	}
 
-	## day2 ci check HEAD [BASE] CASES NEW_DIRECTORY: an app repository's CI over the source tree HEAD. A BASE tree
-	## routes the change between them to its lanes; without one every lane runs. CASES is the instance's verification
-	## case count; NEW_DIRECTORY receives the checked artifact and its receipt when the native lane runs.
+	## day2 ci check [--reuse REUSE] HEAD [BASE] CASES NEW_DIRECTORY: an app repository's CI over the source tree HEAD. A
+	## BASE tree routes the change between them to its lanes; without one every lane runs. CASES is the instance's
+	## verification case count; NEW_DIRECTORY receives the checked artifact and its receipt when the native lane runs.
+	## REUSE is `ci reuse`'s directory, for a push run only: a result it reused is verified again instead of built.
 	CiCheckRequest :: {
 		head : Names.LocalPath,
 		base : Try(Names.LocalPath, [Null]),
 		cases : U64,
 		output : Names.LocalPath,
+		reuse : Try(Names.LocalPath, [Null]),
 		format : Format,
 	}.{
 		parts :
@@ -359,6 +364,7 @@ Cli :: [].{
 					base : Try(Names.LocalPath, [Null]),
 					cases : U64,
 					output : Names.LocalPath,
+					reuse : Try(Names.LocalPath, [Null]),
 					format : Format,
 				}
 		parts =
@@ -370,6 +376,7 @@ Cli :: [].{
 					base: request.base,
 					cases: request.cases,
 					output: request.output,
+					reuse: request.reuse,
 					format: request.format,
 
 				}
@@ -380,12 +387,27 @@ Cli :: [].{
 		## The command's arguments after `day2 ci check`.
 		positional_arguments : CiCheckRequest -> List(Str)
 		positional_arguments = |request| {
+			reuse = match request.reuse {
+				Ok(path) => ["--reuse", path.to_str()]
+				Err(Null) => []
+			}
 			base = match request.base {
 				Ok(path) => [path.to_str()]
 				Err(Null) => []
 			}
-			[request.head.to_str()].concat(base).concat([request.cases.to_str(), request.output.to_str()])
+			reuse.concat([request.head.to_str()]).concat(base).concat([request.cases.to_str(), request.output.to_str()])
 		}
+	}
+
+	## day2 ci reuse DIRECTORY CASES: the second step of an app's org-scoped CI run. For main's push run it looks for the
+	## result an earlier push run on main stored under the same SDK, source inputs and CASES, and writes what it found, or
+	## why nothing, to DIRECTORY/reuse for `ci check --reuse`.
+	CiReuseRequest :: { directory : Names.LocalPath, cases : U64, format : Format }.{
+		parts : CiReuseRequest -> { directory : Names.LocalPath, cases : U64, format : Format }
+		parts = |request| { directory: request.directory, cases: request.cases, format: request.format }
+
+		with_format : CiReuseRequest, Format -> CiReuseRequest
+		with_format = |request, format| { ..request, format }
 	}
 
 	## day2 ci fetch DIRECTORY and day2 ci store DIRECTORY: the first and last steps of an app's org-scoped CI run. Fetch
@@ -442,10 +464,21 @@ Cli :: [].{
 		raw =
 			scan(
 				args,
-				{ source: Unset, filter: Unset, intent: Run, format: Text, deadline: Err(Null), positionals: [] },
+				{
+					source: Unset,
+					filter: Unset,
+					intent: Run,
+					format: Text,
+					deadline: Err(Null),
+					reuse: Err(Null),
+					positionals: [],
+				},
 			)?
 		if raw.deadline.is_ok() and (raw.intent != Run or requested(raw.positionals).name() != "instance.deploy") {
 			return Err(Problem.ConflictingOptions("--deadline is only for instance deploy."))
+		}
+		if raw.reuse.is_ok() and (raw.intent != Run or requested(raw.positionals).name() != "ci.check") {
+			return Err(Problem.ConflictingOptions("--reuse is only for ci check."))
 		}
 		match raw.intent {
 			Version => {
@@ -685,10 +718,13 @@ Cli :: [].{
 				| ["ci", "check", _]
 				| ["ci", "check", _, _]
 				| ["ci", "fetch"]
+				| ["ci", "reuse"]
+				| ["ci", "reuse", _]
 				| ["ci", "store"] => Err(
 					Problem.MissingArgument,
 				)
 				["ci", "fetch", directory] => Ok(Request.CiFetch(ci_run("fetch", directory, raw)?))
+				["ci", "reuse", directory, cases] => Ok(Request.CiReuse(ci_reuse(directory, cases, raw)?))
 				["ci", "store", directory] => Ok(Request.CiStore(ci_run("store", directory, raw)?))
 				["ci", "check", head, cases, output] => Ok(
 					Request.CiCheck(ci_check(head, Err(Null), cases, output, raw)?),
@@ -725,6 +761,7 @@ Cli :: [].{
 		| ["--deadline", _, .. as rest] => requested(rest)
 		["instance", .. as rest] => instance_command(rest)
 		["ci", "fetch", ..] => CiFetch
+		["ci", "reuse", ..] => CiReuse
 		["ci", "store", ..] => CiStore
 		["ci", ..] => CiCheck
 		[arg, .. as rest] if arg.starts_with("-") => requested(rest)
@@ -747,6 +784,7 @@ Cli :: [].{
 		Request.Selection(value) => value.format
 		Request.CiCheck(value) => value.parts().format
 		Request.CiFetch(value) => value.parts().format
+		Request.CiReuse(value) => value.parts().format
 		Request.CiStore(value) => value.parts().format
 		Request.CiWorkflow(value) => value.format
 	}
@@ -822,6 +860,13 @@ Cli :: [].{
 			Request.Selection(value) => ["day2", "instance", "selection", value.directory.to_str(), value.app_id]
 			Request.CiCheck(value) => ["day2", "ci", "check"].concat(value.positional_arguments())
 			Request.CiFetch(value) => ["day2", "ci", "fetch", value.parts().directory.to_str()]
+			Request.CiReuse(value) => [
+				"day2",
+				"ci",
+				"reuse",
+				value.parts().directory.to_str(),
+				value.parts().cases.to_str(),
+			]
 			Request.CiStore(value) => ["day2", "ci", "store", value.parts().directory.to_str()]
 			Request.CiWorkflow(value) => ["day2", "instance", "ci-workflow", value.directory.to_str()]
 		}
@@ -842,6 +887,7 @@ Raw : {
 	intent : [Run, Help, Version],
 	format : Cli.Format,
 	deadline : Try(U64, [Null]),
+	reuse : Try(Names.LocalPath, [Null]),
 	positionals : List(Str),
 }
 
@@ -873,6 +919,13 @@ ci_check = |head, base, cases, output, raw| {
 	if count < 4 or count > 100 {
 		return Err(Problem.InvalidArguments("ci check requires the verification cases as an integer from 4 to 100"))
 	}
+	if raw.reuse.is_ok() and base.is_ok() {
+		return Err(
+			Problem.ConflictingOptions(
+				"ci check reuses an earlier main run's result only for a push run, without a base tree.",
+			),
+		)
+	}
 	Ok(
 		Cli.CiCheckRequest.{
 			head: path(head, "a head source tree")?,
@@ -882,9 +935,29 @@ ci_check = |head, base, cases, output, raw| {
 			},
 			cases: count,
 			output: path(output, "a new output directory")?,
+			reuse: raw.reuse,
 			format: raw.format,
 		},
 	)
+}
+
+## day2 ci reuse: the run's directory is a path and the case count the instance's verification, 4 to 100; everything
+## else comes from the CI run's environment.
+ci_reuse : Str, Str, Raw -> Try(Cli.CiReuseRequest, Problem)
+ci_reuse = |directory, cases, raw| {
+	if has_options(raw) {
+		return Err(Problem.ConflictingOptions("ci reuse accepts only --agent or --json."))
+	}
+	path =
+		Names.LocalPath.from_str(directory)
+			.map_err(|_| Problem.InvalidArguments("ci reuse requires a directory of at most 4096 bytes"))?
+	count = match U64.from_str(cases) {
+		Ok(value) if value >= 4 and value <= 100 => value
+		_ => return Err(
+			Problem.InvalidArguments("ci reuse requires the verification cases as an integer from 4 to 100"),
+		)
+	}
+	Ok(Cli.CiReuseRequest.{ directory: path, cases: count, format: raw.format })
 }
 
 ## day2 ci fetch|store: the run's directory is a path; everything else comes from the CI run's environment.
@@ -1132,14 +1205,17 @@ scan = |args, raw| match args {
 	["--instance", value, .. as rest] => set_option("--instance", value, rest, raw)
 	["--operation", value, .. as rest] => set_option("--operation", value, rest, raw)
 	["--deadline", value, .. as rest] => set_deadline(value, rest, raw)
+	["--reuse", value, .. as rest] => set_reuse(value, rest, raw)
 	["--instance"] => Err(Problem.MissingOptionValue("--instance"))
 	["--operation"] => Err(Problem.MissingOptionValue("--operation"))
 	["--deadline"] => Err(Problem.MissingOptionValue("--deadline"))
+	["--reuse"] => Err(Problem.MissingOptionValue("--reuse"))
 	[arg, .. as rest] if arg
 		.starts_with("--instance=") => set_option("--instance", arg.drop_prefix("--instance="), rest, raw)
 	[arg, .. as rest] if arg
 		.starts_with("--operation=") => set_option("--operation", arg.drop_prefix("--operation="), rest, raw)
 	[arg, .. as rest] if arg.starts_with("--deadline=") => set_deadline(arg.drop_prefix("--deadline="), rest, raw)
+	[arg, .. as rest] if arg.starts_with("--reuse=") => set_reuse(arg.drop_prefix("--reuse="), rest, raw)
 	[arg, .. as rest] => if
 		arg.starts_with("-")
 		Err(Problem.UnknownOption(arg))
@@ -1159,6 +1235,20 @@ set_deadline = |value, rest, raw| {
 		Ok(seconds) if seconds > 0 and value.to_utf8().all(decimal) => scan(rest, { ..raw, deadline: Ok(seconds) })
 		_ => Err(Problem.InvalidArguments("--deadline requires a positive Unix timestamp in seconds"))
 	}
+}
+
+set_reuse : Str, List(Str), Raw -> Try(Raw, Problem)
+set_reuse = |value, rest, raw| {
+	if raw.reuse.is_ok() {
+		return Err(Problem.DuplicateOption("--reuse"))
+	}
+	if value.is_empty() or value.starts_with("-") {
+		return Err(Problem.MissingOptionValue("--reuse"))
+	}
+	path =
+		Names.LocalPath.from_str(value)
+			.map_err(|_| Problem.InvalidArguments("--reuse requires a directory of at most 4096 bytes"))?
+	scan(rest, { ..raw, reuse: Ok(path) })
 }
 
 set_option : Str, Str, List(Str), Raw -> Try(Raw, Problem)

@@ -898,15 +898,17 @@ recovery behavior still needs live qualification.
 
 App CI is the [required check](#derived-names): one org-scoped workflow in
 `<org>/day2-ci` runs for every app repository, so an app repository can neither
-edit, skip nor impersonate it. Its job runs three `day2` commands and nothing
-else. The YAML holds no logic beyond choosing the check's optional base (see
-[Workflow](#workflow)).
+edit, skip nor impersonate it. Its job runs four `day2` commands and nothing
+else. The YAML holds no logic beyond choosing the check's optional base or, for
+a push run, its reuse directory (see [Workflow](#workflow)).
 
 1. `day2 ci fetch DIRECTORY` reads the run and its trees from the forge.
-2. `day2 ci check DIRECTORY/head [DIRECTORY/base] CASES DIRECTORY/out`
-   checks them, reading only local trees (see the CLI's
-   [README](../cli/README.md)).
-3. `day2 ci store DIRECTORY` stores what the check wrote in the app's CI
+2. `day2 ci reuse DIRECTORY CASES` looks, for main's push run, for the result
+   an earlier push run on main stored under the same key (see [Reuse](#reuse)).
+3. `day2 ci check [--reuse DIRECTORY/reuse] DIRECTORY/head [DIRECTORY/base]
+   CASES DIRECTORY/out` checks them, reading only local trees (see
+   [Check](#check) and the CLI's [README](../cli/README.md)).
+4. `day2 ci store DIRECTORY` stores what the check wrote in the app's CI
    bucket.
 
 The bucket and the federation it trusts are rendered roots' resources (see
@@ -942,21 +944,27 @@ pins the fixture instance's file.
   512 processes and the bounded tmpfs mounts over `/workspace/platform/artifacts`
   and `/workspace/platform/crates/worker/generated`. `ci check` initializes that
   generated mount from the image's reviewed ABI seed, and the build still
-  requires its glue to equal it. `permissions` are `contents: read` and
-  `id-token: write`, as the instance CI workflow has; fetch reads the merge
-  base from the event, so no pull request permission is needed.
-- **Steps.** fetch, check and store, each one `/workspace/platform/cli/day2`
-  command in `/tmp/day2-ci`. Only fetch receives `GITHUB_TOKEN`, and only store
-  `ACTIONS_ID_TOKEN_REQUEST_TOKEN` (both `${{ secrets.GITHUB_TOKEN }}`) and the
-  store inputs. The step `env:` holds every store input, the token request
-  `ACTIONS_ID_TOKEN_REQUEST_URL: <forge.oidc>/token?v=1&repository=${{
+  requires its glue to equal it. `permissions` are `contents: read`,
+  `actions: read` and `id-token: write`: the instance CI workflow's, plus
+  read access to the app repository's own run records, which [reuse](#reuse)
+  checks an earlier main run's custody against. Fetch reads the merge base
+  from the event, so no pull request permission is needed.
+- **Steps.** fetch, reuse, check and store, each one
+  `/workspace/platform/cli/day2` command in `/tmp/day2-ci`. Only fetch and
+  reuse, which run before any app code, receive `GITHUB_TOKEN`, and only reuse
+  and store `ACTIONS_ID_TOKEN_REQUEST_TOKEN` (all `${{ secrets.GITHUB_TOKEN }}`)
+  and the store inputs. Each of those steps' `env:` holds every store input,
+  the token request `ACTIONS_ID_TOKEN_REQUEST_URL: <forge.oidc>/token?v=1&repository=${{
   github.repository }}` included: Gitea mints no OIDC token itself, and a
   value in a step's own `env:` is one an earlier step cannot replace through
-  `$GITHUB_ENV`.
-- **Logic.** The check step passes `/tmp/day2-ci/base` only for
-  `pull_request` (`${{ github.event_name == 'pull_request' && ... || '' }}`),
-  because `ci check` takes its base as an optional positional. That expression
-  is the one choice the YAML makes.
+  `$GITHUB_ENV`. Reuse also gets the `verification` cases, as check does.
+- **Logic.** The check step passes `/tmp/day2-ci/base` for `pull_request` and
+  `--reuse /tmp/day2-ci/reuse` otherwise, that is for the push run
+  (`${{ github.event_name == 'pull_request' && '/tmp/day2-ci/base' || '--reuse
+  /tmp/day2-ci/reuse' }}`), because `ci check` takes its base as an optional
+  positional and a reuse directory only without one. That expression is the
+  one choice the YAML makes; reuse itself decides a pull request reuses
+  nothing.
 - **Trust.** Check runs the app's code (its Roc build and tests, its
   verification campaign) in the same container as the other steps, and the
   platform claims no hostile-code containment. Keeping the tokens out of the
@@ -974,6 +982,9 @@ pins the fixture instance's file.
   push run's record, receipt and inputs for consistency, not for tampering,
   and it ignores proxy variables. Running check as another user, with the
   platform and the run directory read-only except `out/`, is the open fix.
+  Reuse runs before check, so no app code has run when it reads, and a push
+  run that reuses runs no app code at all: check's remaining lanes only read
+  and lint the tree.
 
 ### Fetch
 
@@ -1027,6 +1038,96 @@ store step, that receives the job token.
   `"retryable": true` and `source_temporarily_unavailable`, as
   [`instance source`](#source) does.
 
+### Reuse
+
+`ci reuse DIRECTORY CASES` is the job's second step. About half of main's
+merges leave `app/` unchanged, so their push run's key matches an earlier
+one's. Reuse finds that earlier result, so check can verify it again in well
+under a minute instead of building the app and running its campaign.
+
+- **Only push runs.** A `pull_request` record reuses nothing: the command
+  reports "pull_request runs never reuse" and succeeds. It reads no store
+  input, mints no token, reaches no service and writes nothing. Only main's
+  push run can write to the bucket (the provider admits only `push` on
+  `refs/heads/main`), so a reused entry is one a deploy already trusts.
+  Reusing a pull request's result is not done here.
+- **Run.** `DIRECTORY/event.json` must be this run's record, checked as
+  [store](#store) checks it, and `DIRECTORY/reuse` must not exist yet.
+- **Key.** `<sdk>/<source inputs>-<cases>/` from `DAY2_CI_SDK`, the source
+  inputs of `DIRECTORY/head/app` (recomputed, as check and store compute them)
+  and `CASES`, the app's `verification`.
+- **Inputs.** `GITHUB_TOKEN` for forge reads, and the store inputs
+  (`ACTIONS_ID_TOKEN_REQUEST_URL` and `_TOKEN`, `DAY2_CI_BUCKET`,
+  `DAY2_CI_AUDIENCE`, `DAY2_CI_SDK`, `DAY2_CI_DISTRIBUTION`), validated as
+  store validates them and bound to the run's app and repository.
+- **Steps**, in [CiReuse.roc](../ops/CiReuse.roc)'s order:
+  1. `run`: the forge's record of this run (`GET
+     /repos/<org>/<id>/actions/runs/<run>` with the job token) must be app CI's
+     scoped verification run of this push: its commit, attempt and workflow
+     commit. It names the CI repository's ID; the job token reads only its own
+     repository, so `<org>/day2-ci` itself is not read.
+  2. `mint` and `exchange`: git-oidc and Google STS, exactly as store mints
+     and exchanges, but for `https://www.googleapis.com/auth/devstorage.read_only`.
+     The push identity's `roles/storage.objectViewer` includes listing.
+  3. `list`: every name under the key, one GCS JSON API page of at most 1000
+     names at a time (`fields=items(name),nextPageToken`), at most 10 pages.
+     Each `<run>/<attempt>/receipt.json`, the commit marker store writes last,
+     is a stored attempt. A key with more pages is a miss, never a partial
+     newest-first.
+  4. `candidate`, once per stored attempt, newest run first (then newest
+     attempt), at most 8: the [deploy reader's custody](#deploy-reads), shared
+     code (`instance_source::app_ci`), in its order. The forge's record of that
+     run must be app CI's scoped `verification.yml` run of a push on main, the
+     run asked for, its current attempt the stored one, terminal and
+     successful. Both objects must carry exactly that run's metadata (its head
+     commit as `head`) and have a `timeCreated` inside the attempt's window.
+     The receipt must be a complete run's, decoded exactly, bound to the key's
+     source inputs and cases with seed 42 and `DAY2_CI_DISTRIBUTION`; the
+     archive must be its size and digest. The run, read again, must be the
+     same attempt. This run's own earlier attempt is never reused. The first
+     candidate that passes is reused; one that fails is refused with its
+     reason and the next is tried.
+  5. `result`: `DIRECTORY/reuse/` (0700) with the reused `app.tar.gz` and
+     `receipt.json` (the stored bytes) and, last, `reuse.json`: `format` (1),
+     `reused`, `reason` (why nothing was reused, else null) and `source` (the
+     reused attempt's `run`, `attempt`, `head`, `workflow_commit`, `started_at`,
+     `completed_at`, `bucket`, and its `receipt` and `artifact` objects' `name`,
+     `generation` and `time_created`; else null).
+- **Never fails the run.** Absence under the key, every candidate refused, a
+  failed or transient read (retried with [fetch](#fetch)'s wait), a refused
+  mint or exchange, a missing input, or the lookup passing its 300 s budget:
+  each ends the lookup, is recorded as the reason, and the command succeeds, so
+  check builds as it always does. Only an unusable request, run record or
+  directory fails it (exit 6, `ci_reuse_failed`), because no later step could
+  use them either.
+- **Report** (pinned by `cli/fixtures/ci-reuse-report.json`): the run,
+  `reused` and `reason`, the `bucket` and `key`, the stored attempts `listed`,
+  each attempt `tried` with its verdict, the `source` and the `output`
+  directory. No token is ever printed.
+
+### Check
+
+`ci check [--reuse REUSE] HEAD [BASE] CASES NEW_DIRECTORY` is documented in
+the CLI's [README](../cli/README.md). In app CI the push run passes `--reuse
+DIRECTORY/reuse`; `--reuse` with a base tree is refused.
+
+- **A miss** (`reuse.json` with a reason, alone in the directory) changes
+  nothing: every lane runs and the build writes the artifact. The report's
+  `reuse` is the record.
+- **A reused result** is verified again before any step, against what check
+  itself knows: the directory holds exactly `app.tar.gz`, `receipt.json` and
+  `reuse.json`; the receipt is a complete run's, byte for byte as check writes
+  one; its source inputs are `HEAD/app`'s, recomputed; its cases are `CASES`
+  and its seed 42; its `sdk_distribution` is this tooling image's own
+  precompiled distribution (identity and size); the archive is the receipt's;
+  and the record's objects are under this key. Any failure exits 6 (`the
+  reused result fails verification`): only a bad reuse record can produce one,
+  so it is never a silent rebuild.
+- **Then** the JavaScript, Roc format and extension checks run; the native
+  build and its campaign do not. `NEW_DIRECTORY` gets `app.tar.gz` and then
+  `receipt.json`, exactly as a built artifact's would be, and the report says
+  `artifact: reused`, with the record as `reuse`.
+
 ### Store
 
 `ci store DIRECTORY` is the job's last step. For main's push run it stores the
@@ -1047,12 +1148,19 @@ cases. `<run>` and `<attempt>` are the run's.
   and reaches no service. A push run checks every lane, so a missing artifact
   is a failure. The workload identity provider admits only `push` runs on
   `refs/heads/main`, so git-oidc needs no pull request grant for this audience.
+- **A reused result is stored as this run's own.** When check verified an
+  earlier main run's result instead of building, store stores it unchanged:
+  under this run's `<run>/<attempt>/`, with this run's metadata and nothing
+  more. The object metadata is the same exact map, so a deploy (which may run
+  an older platform than the app's tooling image) reads the entry as any
+  other. Where it came from is in check's and reuse's reports.
 - **Not a goal: reusing a pull request's result on main.** The check step runs
   the pull request's code in the job's container. That code can rewrite
   `DIRECTORY` and set later steps' variables through `$GITHUB_ENV` (see
   [Workflow](#workflow)), so a pull request run's artifact is its author's
-  evidence, not the platform's. Main's push run, of reviewed code, builds
-  and stores its own. Reuse waits until check is isolated from store.
+  evidence, not the platform's. Main's push run, of reviewed code, builds or
+  [reuses](#reuse) an earlier main run's result, and stores its own. Reusing
+  a pull request's result waits until check is isolated from store.
 - **Run.** `DIRECTORY/event.json` must be this run's record: its repository,
   event, head commit, run, attempt and workflow commit are checked against the
   step's own `GITHUB_*` variables.
@@ -1171,7 +1279,9 @@ the same.
 - **Repository.** The binding's repository must be the derived `<org>/<id>`:
   `ci store` keys results by the run's repository name.
 - **Custody** is the forge's run record, never a commit status, which any writer
-  on the app repository can post. `run` reads `<org>/day2-ci` (exactly that
+  on the app repository can post. Its object, receipt, archive and re-read
+  checks are the code [reuse](#reuse) applies to an earlier main run's result.
+  `run` reads `<org>/day2-ci` (exactly that
   name, owned by the org) for its ID, then lists
   `GET /repos/<org>/<id>/actions/workflows/verification.yml/runs` with
   `scoped_workflow_source_repo_id=<that ID>`, `event=push`, `branch=main` and

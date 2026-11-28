@@ -13,6 +13,7 @@ import InstanceSelection
 import InstanceCiWorkflow
 import CiCheck
 import CiFetch
+import CiReuse
 import CiStore
 
 ## Status, error, stream, and exit code are projections of one closed outcome.
@@ -31,6 +32,7 @@ Output :: { outcome : Outcome }.{
 		Selected(Cli.Selection, Names.LocalPath, InstanceSelection.Receipt),
 		CiChecked(Cli.CiCheckRequest, CiCheck.Report),
 		CiFetched(Cli.CiRun, CiFetch.Report),
+		CiReused(Cli.CiReuseRequest, CiReuse.Report),
 		CiStored(Cli.CiRun, CiStore.Report),
 		CiWorkflowRendered(Cli.Instance, Names.LocalPath, InstanceSpec, Str),
 		Failed(Problem, Cli.Format, Cli.Command),
@@ -72,6 +74,7 @@ Output :: { outcome : Outcome }.{
 			Outcome.Selected(_, _, receipt) => selected_text(receipt)
 			Outcome.CiChecked(request, report) => ci_checked_text(request, report)
 			Outcome.CiFetched(request, report) => ci_fetched_text(request, report)
+			Outcome.CiReused(request, report) => ci_reused_text(request, report)
 			Outcome.CiStored(request, report) => ci_stored_text(request, report)
 			# The file itself, so the text output can be committed as it is.
 			Outcome.CiWorkflowRendered(_, _, _, workflow) => workflow.drop_suffix("\n")
@@ -114,6 +117,7 @@ format = |outcome| match outcome {
 	Output.Outcome.Selected(request, _, _) => request.format
 	Output.Outcome.CiChecked(request, _) => request.parts().format
 	Output.Outcome.CiFetched(request, _) => request.parts().format
+	Output.Outcome.CiReused(request, _) => request.parts().format
 	Output.Outcome.CiStored(request, _) => request.parts().format
 	Output.Outcome.CiWorkflowRendered(request, _, _, _) => request.parts().format
 }
@@ -178,6 +182,7 @@ json = |outcome| match outcome {
 	Output.Outcome.Selected(_, path, receipt) => selected_json(path, receipt)
 	Output.Outcome.CiChecked(request, report) => ci_checked_json(request, report)
 	Output.Outcome.CiFetched(request, report) => ci_fetched_json(request, report)
+	Output.Outcome.CiReused(request, report) => ci_reused_json(request, report)
 	Output.Outcome.CiStored(request, report) => ci_stored_json(request, report)
 	Output.Outcome.CiWorkflowRendered(_, path, spec, workflow) => ci_workflow_json(path, spec, workflow)
 	Output.Outcome.Failed(problem, _, command) => error_json(problem, command)
@@ -825,6 +830,13 @@ ci_checked_text = |request, report| {
 		Ok(path) => "${path.to_str()} (${outcome.changed.to_str()} changed paths)"
 		Err(Null) => "none: every lane runs"
 	}
+	reuse = match outcome.reuse {
+		Ok(record) => match record.reason {
+			Ok(reason) => row("Reuse", "nothing reused: ${reason}; built")
+			Err(Null) => row("Reuse", "an earlier main run's result, verified again")
+		}
+		Err(Null) => []
+	}
 	reasons =
 		outcome.reasons.map(
 			|reason| {
@@ -849,8 +861,23 @@ ci_checked_text = |request, report| {
 				Ok(path) => path
 				Err(Null) => ""
 			}
+			reused = match outcome.reuse {
+				Ok(record) => match record.source {
+					Ok(source) => row(
+						"Reused",
+						"run ${
+							source
+								.run
+								.to_str()
+						}, attempt ${source.attempt.to_str()} of ${source.head}, verified again; not built",
+					)
+					Err(Null) => []
+				}
+				Err(Null) => []
+			}
 			["", "ARTIFACT"]
 				.concat(row("Output", output))
+				.concat(reused)
 				.concat(row("Artifact", receipt.artifact_id))
 				.concat(row("Archive", "${receipt.archive.digest} (${receipt.archive.bytes.to_str()} bytes)"))
 				.concat(row("Campaign", campaign))
@@ -873,6 +900,7 @@ ci_checked_text = |request, report| {
 			.concat(row("Head", request.parts().head.to_str()))
 			.concat(row("Base", base))
 			.concat(row("Lanes", listed(outcome.lanes)))
+			.concat(reuse)
 			.concat(reasons)
 			.concat(["", "CHECKS"])
 			.concat(files("JavaScript", outcome.javascript_files))
@@ -934,6 +962,82 @@ ci_fetched_text = |request, report| {
 			.concat(base)
 			.concat(row("Inputs", outcome.source_inputs))
 			.concat(row("Record", "${request.parts().directory.to_str()}/event.json")),
+		"\n",
+	)
+}
+
+ci_reused_json : Cli.CiReuseRequest, CiReuse.Report -> Str
+# As ci_fetched_json, with the host's text verbatim.
+ci_reused_json = |request, report| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	command : Cli.Command
+	command = Cli.Command.CiReuse
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: command.name(),
+		exit_code: 0.I32,
+		context: { directory: request.parts().directory.to_str(), cases: request.parts().cases },
+		result: { report: null },
+		error: null,
+		next_actions: [help_action({}).dto()],
+	})
+		.replace_first("\"report\":null", "\"report\":${report.text}")
+}
+
+ci_reused_text : Cli.CiReuseRequest, CiReuse.Report -> Str
+ci_reused_text = |request, report| {
+	outcome = report.outcome
+	row = |label, value| ["  ${label}${Str.repeat(" ", 11 - label.count_utf8_bytes())}${Output.safe(value)}"]
+	run = "${outcome.repository} ${outcome.event} run ${outcome.run.to_str()}, attempt ${outcome.attempt.to_str()}"
+	key = match (outcome.bucket, outcome.key) {
+		(Ok(bucket), Ok(prefix)) => row("Key", "gs://${bucket}/${prefix} (${outcome.listed.to_str()} stored attempts)")
+		_ => []
+	}
+	tried =
+		outcome.tried.map(
+			|attempt| {
+				verdict = match attempt.reason {
+					Ok(reason) => "refused: ${reason}"
+					Err(Null) => if attempt.accepted "accepted" else "refused"
+				}
+				"  run ${attempt.run.to_str()}, attempt ${attempt.attempt.to_str()}: ${Output.safe(verdict)}"
+			},
+		)
+	result = match outcome.source {
+		Ok(source) => row("Reused", "run ${source.run.to_str()}, attempt ${source.attempt.to_str()} of ${source.head}")
+			.concat(
+				row("Receipt", "gs://${source.bucket}/${source.receipt.name}, generation ${source.receipt.generation}"),
+			)
+			.concat(
+				row(
+					"Artifact",
+					"gs://${source.bucket}/${source.artifact.name}, generation ${source.artifact.generation}",
+				),
+			)
+		Err(Null) => row(
+			"Reused",
+			match outcome.reason {
+				Ok(reason) => "nothing: ${reason}"
+				Err(Null) => "nothing"
+			},
+		)
+	}
+	output = match outcome.output {
+		Ok(path) => row("Output", path)
+		Err(Null) => []
+	}
+	title = if outcome.reused "earlier result reused" else "nothing reused"
+	Str.join_with(
+		["DAY2  /  ci reuse  /  ${title}", "", "RUN"]
+			.concat(row("Run", run))
+			.concat(row("Cases", request.parts().cases.to_str()))
+			.concat(["", "LOOKUP"])
+			.concat(key)
+			.concat(tried)
+			.concat(result)
+			.concat(output),
 		"\n",
 	)
 }

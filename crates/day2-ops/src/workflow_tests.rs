@@ -1,7 +1,7 @@
 //! Exercise the compiled Roc workflows through the real private protocol. Failure
 //! injection verifies that policy cannot proceed to later effects after a failed
 //! native check, while the Reports integration tests exercise the real adapters.
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use day2::automation;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -552,7 +552,7 @@ fn ci_check_runs_each_selected_lane_once_in_order() -> Result<()> {
     let route = |native: bool, extension: bool, javascript: bool| {
         json!({
             "root": "/work/head/app", "seed": 42, "cases": 6,
-            "native": native, "extension": extension, "javascript": javascript,
+            "native": native, "extension": extension, "javascript": javascript, "reused": false,
         })
     };
     assert_eq!(
@@ -580,6 +580,22 @@ fn ci_check_runs_each_selected_lane_once_in_order() -> Result<()> {
     assert_eq!(
         ci_check_effects(route(false, false, false))?,
         ["ci-check-prepare", "route", "result"]
+    );
+    // A reused result, verified when the session started, replaces the build
+    // and its campaign; the cheap lanes and the extension check still run.
+    let mut reused = route(true, true, true);
+    reused["reused"] = json!(true);
+    assert_eq!(
+        ci_check_effects(reused)?,
+        [
+            "ci-check-prepare",
+            "route",
+            "javascript",
+            "format",
+            "chrome-extension-verify",
+            "artifact",
+            "result",
+        ]
     );
     Ok(())
 }
@@ -630,6 +646,111 @@ fn ci_fetch_reads_a_base_tree_only_when_the_event_has_one() -> Result<()> {
     assert_eq!(
         ci_fetch_effects(false)?,
         ["ci-fetch-prepare", "repository", "event", "head", "result"]
+    );
+    Ok(())
+}
+
+/// The steps `day2 ci reuse`'s recipe requests, each answered from `replies`
+/// by name (a candidate's in turn), when the plan has `lookup`.
+fn ci_reuse_effects(lookup: bool, replies: &[(&str, Value)]) -> Result<Vec<String>> {
+    let mut effects = Vec::new();
+    let mut candidates = replies
+        .iter()
+        .filter(|(name, _)| *name == "candidate")
+        .map(|(_, reply)| reply.clone());
+    automation::run(
+        &automation::runner()?,
+        &["ci-reuse-session", "/work/request.json"],
+        |request| {
+            let input = request.decode::<Value>()?;
+            match request.action.as_str() {
+                "ci-reuse-prepare" => {
+                    assert_eq!(input, json!({"request": "/work/request.json"}));
+                    effects.push(request.action.clone());
+                    Ok(json!({"lookup": lookup}))
+                }
+                "ci-reuse-step" => {
+                    let name = input["name"].as_str().unwrap_or_default().to_owned();
+                    effects.push(name.clone());
+                    Ok(match name.as_str() {
+                        "candidate" => candidates.next().context("an unplanned candidate")?,
+                        "result" => json!({}),
+                        _ => replies
+                            .iter()
+                            .find(|(step, _)| *step == name)
+                            .map_or(json!({"missed": false}), |(_, reply)| reply.clone()),
+                    })
+                }
+                action => bail!("unexpected CI reuse capability: {action}"),
+            }
+        },
+    )?;
+    Ok(effects)
+}
+
+#[test]
+fn ci_reuse_tries_stored_attempts_in_order_and_always_writes_its_result() -> Result<()> {
+    let listed = |count: u64| {
+        json!({"missed": false, "candidates": (1..=count)
+            .map(|run| json!({"run": 50 - run, "attempt": 1})).collect::<Vec<_>>()})
+    };
+    let tried = |missed: bool, accepted: bool| json!({"missed": missed, "accepted": accepted});
+    // A pull request run looks for nothing.
+    assert_eq!(
+        ci_reuse_effects(false, &[])?,
+        ["ci-reuse-prepare", "result"]
+    );
+    // Newest first, until one is accepted.
+    assert_eq!(
+        ci_reuse_effects(
+            true,
+            &[
+                ("list", listed(3)),
+                ("candidate", tried(false, false)),
+                ("candidate", tried(false, true)),
+            ]
+        )?,
+        [
+            "ci-reuse-prepare",
+            "run",
+            "mint",
+            "exchange",
+            "list",
+            "candidate",
+            "candidate",
+            "result"
+        ]
+    );
+    // Every lookup step that misses ends the lookup; the result still runs.
+    assert_eq!(
+        ci_reuse_effects(true, &[("mint", json!({"missed": true}))])?,
+        ["ci-reuse-prepare", "run", "mint", "result"]
+    );
+    assert_eq!(
+        ci_reuse_effects(true, &[("list", json!({"missed": true, "candidates": []}))])?,
+        [
+            "ci-reuse-prepare",
+            "run",
+            "mint",
+            "exchange",
+            "list",
+            "result"
+        ]
+    );
+    assert_eq!(
+        ci_reuse_effects(
+            true,
+            &[("list", listed(2)), ("candidate", tried(true, false))]
+        )?,
+        [
+            "ci-reuse-prepare",
+            "run",
+            "mint",
+            "exchange",
+            "list",
+            "candidate",
+            "result"
+        ]
     );
     Ok(())
 }

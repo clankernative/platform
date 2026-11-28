@@ -1,14 +1,15 @@
 //! App CI's results bucket, read side (docs/INSTANCE.md, "App CI"): what a
 //! candidate build reads of `gs://<project>-<id>-ci` with the apply identity,
-//! which holds only object read access there.
+//! which holds only object read access there, and what `ci reuse` reads with
+//! the push run's federated read-only token.
 //!
 //! Each read is one JSON API request under one explicit total deadline, so
 //! repeated blocking reads cannot renew it, and each reply is closed data: an
-//! object's projected fields, bounded and decoded exactly, or exactly the bytes
-//! asked for. No reply or transport text enters an error, and the token is held
-//! in memory only. A failed connection, a timeout, a short or unreadable body,
-//! 408, 429 and 5xx are retryable; absence is reported as absence; any other
-//! answer is a refusal.
+//! object's projected fields or one page of names, bounded and decoded
+//! exactly, or exactly the bytes asked for. No reply or transport text enters
+//! an error, and the token is held in memory only. A failed connection, a
+//! timeout, a short or unreadable body, 408, 429 and 5xx are retryable;
+//! absence is reported as absence; any other answer is a refusal.
 use crate::instance_source::{Retryable, TEMPORARY};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use reqwest::Url;
@@ -29,6 +30,24 @@ const REPLY_LIMIT: u64 = 16_384;
 /// The fields a metadata read selects, and nothing else.
 const FIELDS: &str = "name,bucket,generation,size,timeCreated,metadata";
 
+/// The fields a list read selects: each name and the next page's token.
+const LIST_FIELDS: &str = "items(name),nextPageToken";
+
+/// The most names one list page asks for, and the most its reply may hold.
+pub const PAGE: u64 = 1000;
+const LIST_LIMIT: u64 = 524_288;
+
+/// The longest page token a list reply may hand back.
+const TOKEN_LIMIT: usize = 1024;
+
+/// One page of object names under a prefix, in the bucket's name order, and
+/// the token of the next page when there is one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    pub names: Vec<String>,
+    pub next: Option<String>,
+}
+
 /// One stored object, as its projected metadata describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stored {
@@ -47,12 +66,17 @@ pub trait Storage {
     /// The object's bytes at exactly `generation`, which must be exactly
     /// `size` bytes.
     fn media(&mut self, bucket: &str, name: &str, generation: &str, size: u64) -> Result<Vec<u8>>;
+    /// One page of at most [`PAGE`] names below `prefix`, after the page
+    /// `page` names. Every name starts with `prefix`; the caller bounds the
+    /// pages it reads.
+    fn list(&mut self, bucket: &str, prefix: &str, page: Option<&str>) -> Result<Listing>;
 }
 
 /// The JSON API over rustls, HTTPS only, no redirects, no proxy, with the
-/// apply identity's access token from `gcloud auth print-access-token`. The
-/// client and the token are made once, when the first object is read, so a
-/// session that reads none (any without forge.oidc) makes neither.
+/// apply identity's access token from `gcloud auth print-access-token`, or a
+/// token the caller already holds. The client and the token are made once,
+/// when the first object is read, so a session that reads none (any without
+/// forge.oidc) makes neither.
 pub struct Gcs {
     https_only: bool,
     client: Option<reqwest::blocking::Client>,
@@ -66,6 +90,12 @@ pub struct Gcs {
 impl Gcs {
     pub fn native() -> Result<Self> {
         Self::build(API, true, None)
+    }
+
+    /// The JSON API with an access token the caller holds, such as `ci
+    /// reuse`'s federated read-only token; gcloud is never run.
+    pub fn with_token(token: String) -> Result<Self> {
+        Self::build(API, true, Some(token))
     }
 
     fn build(endpoint: &str, https_only: bool, token: Option<String>) -> Result<Self> {
@@ -144,6 +174,27 @@ impl Gcs {
             Err(_) => Err(Retryable(TEMPORARY).into()),
         }
     }
+}
+
+/// The projection `LIST_FIELDS` selects; either key is absent when empty.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Page {
+    #[serde(default)]
+    items: Vec<Named>,
+    #[serde(default)]
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Named {
+    name: String,
+}
+
+/// A page token as GCS hands it back: bounded, printable, never blank.
+fn page_token(token: &str) -> bool {
+    !token.is_empty() && token.len() <= TOKEN_LIMIT && token.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// The projection `FIELDS` selects; `metadata` is absent when an object has none.
@@ -240,6 +291,45 @@ impl Storage for Gcs {
             bail!(Retryable(TEMPORARY));
         }
         Ok(bytes)
+    }
+
+    fn list(&mut self, bucket: &str, prefix: &str, page: Option<&str>) -> Result<Listing> {
+        ensure!(
+            !prefix.is_empty() && page.is_none_or(page_token),
+            "invalid app CI results listing"
+        );
+        let mut url = self.endpoint.clone();
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("app CI results URL"))?
+            .extend(["b", bucket, "o"]);
+        url.query_pairs_mut()
+            .append_pair("prefix", prefix)
+            .append_pair("fields", LIST_FIELDS)
+            .append_pair("maxResults", &PAGE.to_string());
+        if let Some(page) = page {
+            url.query_pairs_mut().append_pair("pageToken", page);
+        }
+        let response = self.get(url, self.describe)?;
+        match response.status().as_u16() {
+            200 => {}
+            status => return Err(refused(status)),
+        }
+        let raw = body(response, LIST_LIMIT)?;
+        let page: Page = day2::json::decode(&raw)
+            .ok()
+            .and_then(|value: serde_json::Value| serde_json::from_value(value).ok())
+            .context("app_ci_results_reply_invalid")?;
+        let names: Vec<String> = page.items.into_iter().map(|item| item.name).collect();
+        ensure!(
+            names.len() as u64 <= PAGE
+                && names.iter().all(|name| name.starts_with(prefix))
+                && page.next_page_token.as_deref().is_none_or(page_token),
+            "app_ci_results_reply_invalid"
+        );
+        Ok(Listing {
+            names,
+            next: page.next_page_token,
+        })
     }
 }
 

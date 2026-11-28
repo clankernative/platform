@@ -28,6 +28,10 @@ pub(crate) struct World {
     pub(crate) stored: BTreeMap<(String, String), (crate::ci_results::Stored, Vec<u8>)>,
     /// Each results read: bucket, name, and the generation of a download.
     pub(crate) reads: Vec<(String, String, Option<String>)>,
+    /// Each results listing: bucket, prefix and page token.
+    pub(crate) lists: Vec<(String, String, Option<String>)>,
+    /// The names one listing page holds; `ci_results::PAGE` when unset.
+    pub(crate) page: Option<usize>,
     pub(crate) now: Duration,
     pub(crate) sleeps: Vec<Duration>,
     pub(crate) announced: Vec<String>,
@@ -148,6 +152,35 @@ impl crate::ci_results::Storage for Fake {
             "app_ci_results_http_404"
         );
         Ok(bytes.clone())
+    }
+
+    /// The stored names under `prefix` in name order, a page at a time; a
+    /// page token is the next name's index.
+    fn list(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        page: Option<&str>,
+    ) -> Result<crate::ci_results::Listing> {
+        let mut world = self.0.borrow_mut();
+        world.lists.push((
+            bucket.to_owned(),
+            prefix.to_owned(),
+            page.map(str::to_owned),
+        ));
+        let names: Vec<String> = world
+            .stored
+            .keys()
+            .filter(|(stored, name)| stored == bucket && name.starts_with(prefix))
+            .map(|(_, name)| name.clone())
+            .collect();
+        let size = world.page.unwrap_or(crate::ci_results::PAGE as usize);
+        let start: usize = page.map_or(Ok(0), str::parse)?;
+        let end = names.len().min(start + size);
+        Ok(crate::ci_results::Listing {
+            names: names[start.min(end)..end].to_vec(),
+            next: (end < names.len()).then(|| end.to_string()),
+        })
     }
 }
 

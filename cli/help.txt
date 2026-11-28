@@ -27,8 +27,10 @@ USAGE
                        <new directory> [--deadline <unix seconds>] [--agent]
   day2 instance selection <directory> <app> [--agent]
   day2 instance ci-workflow <directory> [--agent]
-  day2 ci check <head> [<base>] <cases> <new directory> [--agent]
+  day2 ci check [--reuse <reuse directory>] <head> [<base>] <cases>
+                <new directory> [--agent]
   day2 ci fetch <new directory> [--agent]
+  day2 ci reuse <directory> <cases> [--agent]
   day2 ci store <directory> [--agent]
   day2 platform --help
 
@@ -163,11 +165,13 @@ COMMANDS
                   job verification, on pull requests and pushes to main, for
                   the app repositories of an inline map (tooling image,
                   cases, CI bucket, provider audience, SDK and its tooling
-                  distribution), running ci fetch, ci check and ci store;
-                  store requests its OIDC token from forge.oidc, without
-                  which it refuses to render. Reads the project's number
-                  with gcloud and each app's tooling image and distribution
-                  from its selected SDK release through the release cache.
+                  distribution), running ci fetch, ci reuse, ci check and
+                  ci store; reuse and store request their OIDC token from
+                  forge.oidc, without which it refuses to render. A push
+                  run's check names ci reuse's directory with --reuse.
+                  Reads the project's number with gcloud and each app's
+                  tooling image and distribution from its selected SDK
+                  release through the release cache.
   ci check        An app repository's CI over the source tree <head>, whose
                   app is in app/. A push run passes no <base>: every lane
                   runs. A pull request may pass its <base> tree as a gate
@@ -189,8 +193,17 @@ COMMANDS
                   extension verify. app.tar.gz and receipt.json go to
                   <new directory> only when every lane ran and the tooling
                   is a qualified SDK's (its precompiled distribution names
-                  it); the report says why otherwise. Reads no network or
-                  git. Exits 6 when a lane fails.
+                  it); the report says why otherwise. A push run may name
+                  ci reuse's directory with --reuse (never with a <base>):
+                  when it reused an earlier main run's result, that result
+                  is verified again first (source inputs recomputed,
+                  <cases>, seed 42, this tooling's SDK distribution, the
+                  archive's bytes), the JavaScript, format and extension
+                  checks still run, and the build and its campaign do not;
+                  the reused archive and receipt are written to <new
+                  directory> as a built one's would be (artifact reused).
+                  A reused result that fails verification exits 6. Reads
+                  no network or git. Exits 6 when a lane fails.
   ci fetch        The first step of an app's org-scoped CI run in Gitea
                   Actions. Read the run from GITHUB_EVENT_NAME,
                   GITHUB_EVENT_PATH, GITHUB_REPOSITORY, GITHUB_SERVER_URL,
@@ -208,9 +221,30 @@ COMMANDS
                   deploy's source inputs. Transient forge failures are
                   retried for up to 120 s, then exit 7. Exits 6 on any
                   refusal.
+  ci reuse        The second step of an app's org-scoped CI run, after ci
+                  fetch <directory>. A pull request run never reuses and
+                  reaches no service. For main's push run, look under
+                  gs://<DAY2_CI_BUCKET>/<sdk>/<source inputs>-<cases>/ (the
+                  fetched head app's source inputs) for a result an earlier
+                  push run on main stored, newest run first, at most 8:
+                  accept the first that passes deploy's custody checks
+                  (the forge's record of that run, read with GITHUB_TOKEN:
+                  a scoped push run of <org>/day2-ci's verification.yml on
+                  main whose current, successful attempt is the stored
+                  one; both objects carrying its metadata and created
+                  during that attempt; a receipt for these inputs, <cases>,
+                  seed 42 and DAY2_CI_DISTRIBUTION; the receipt's archive),
+                  reading with a read-only token from git-oidc and Google
+                  STS, as ci store mints one. Write <directory>/reuse/:
+                  reuse.json, the source or why nothing was reused, and
+                  the reused app.tar.gz and receipt.json. Absence, a
+                  refusal, a failed read or a missing input is reported
+                  and succeeds, so check builds as always; exits 6 only
+                  on an unusable request, run record or directory.
   ci store        The last step of an app's org-scoped CI run, after ci fetch
                   <directory> and ci check <directory>/head [<directory>/base]
-                  <cases> <directory>/out. When ci check wrote an artifact,
+                  <cases> <directory>/out. When ci check wrote an artifact
+                  (built, or reused and verified again: stored as this run's),
                   mint an OIDC token through git-oidc
                   (ACTIONS_ID_TOKEN_REQUEST_URL and _TOKEN; transient answers
                   are retried for up to 120 s), exchange it at Google STS for

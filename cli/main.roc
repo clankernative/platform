@@ -23,6 +23,7 @@ import InstanceSelection
 import InstanceCiWorkflow
 import CiCheck
 import CiFetch
+import CiReuse
 import CiStore
 import Names
 
@@ -84,6 +85,7 @@ main! = |args| {
 		Cli.Request.Selection(selection) => selected!(selection)
 		Cli.Request.CiCheck(check) => ci_checked!(check)
 		Cli.Request.CiFetch(run) => ci_fetched!(run)
+		Cli.Request.CiReuse(reuse) => ci_reused!(reuse)
 		Cli.Request.CiStore(run) => ci_stored!(run)
 		Cli.Request.CiWorkflow(render) => ci_workflow_rendered!(render)
 	}
@@ -346,6 +348,29 @@ ci_fetched! = |run| {
 		}
 		Err(CallbackErr(error)) => failed(CiFetch.problem(error))
 		Err(_) => failed(Problem.CiFetchFailed("cannot use a private temporary directory"))
+	}
+}
+
+## Look for an earlier main push run's stored result under this run's key through the platform host, which reads the CI
+## environment, the job token and the store inputs itself and validates the request again. Finding nothing, or failing
+## to read, is reported and succeeds; only an unusable request or run directory exits 6.
+ci_reused! : Cli.CiReuseRequest => Output.Outcome
+ci_reused! = |reuse| {
+	failed = |problem| Output.Outcome.Failed(problem, reuse.parts().format, Cli.Command.CiReuse)
+	ran = Env.with_temp_dir!(
+		|directory| {
+			file = Path.join(directory, "request.json")
+			Path.write_utf8!(file, CiReuse.request(reuse)).map_err(|_| "cannot write the ci reuse request")?
+			Host.ci!("reuse", Path.to_str(file).map_err(|_| "the temporary directory is not UTF-8")?)
+		},
+	)
+	match ran {
+		Ok(raw) => match CiReuse.report(raw) {
+			Ok(report) => Output.Outcome.CiReused(reuse, report)
+			Err(_) => failed(Problem.CiReuseFailed("the platform host returned an unreadable report"))
+		}
+		Err(CallbackErr(error)) => failed(CiReuse.problem(error))
+		Err(_) => failed(Problem.CiReuseFailed("cannot use a private temporary directory"))
 	}
 }
 

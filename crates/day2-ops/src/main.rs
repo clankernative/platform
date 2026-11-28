@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use day2_ops::{
-    backup, chrome_extension, ci_check, ci_fetch, ci_store, ci_workflow, infra, instance_candidate,
-    instance_deploy, instance_release, instance_roots, instance_selection, instance_source,
-    local_dev, maintenance, process, projection,
+    backup, chrome_extension, ci_check, ci_fetch, ci_reuse, ci_store, ci_workflow, infra,
+    instance_candidate, instance_deploy, instance_release, instance_roots, instance_selection,
+    instance_source, local_dev, maintenance, process, projection,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -52,6 +52,9 @@ struct Operations {
     /// Whether the host action started `day2 ci fetch`, and its session.
     fetch_mode: bool,
     fetch_session: Option<ci_fetch::Session>,
+    /// Whether the host action started `day2 ci reuse`, and its session.
+    reuse_mode: bool,
+    reuse_session: Option<ci_reuse::Session>,
     /// Whether the host action started `day2 ci store`, and its session.
     store_mode: bool,
     store_session: Option<ci_store::Session>,
@@ -920,6 +923,40 @@ impl Operations {
                     .context("CI fetch session required")?
                     .step(&name)
             }
+            "ci-reuse-prepare" => {
+                ensure!(
+                    self.reuse_session.is_none(),
+                    "one CI reuse session per workflow"
+                );
+                ensure!(
+                    self.reuse_mode,
+                    "only day2 ci reuse starts a CI reuse session"
+                );
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    request: PathBuf,
+                }
+                let session = ci_reuse::Session::prepare(
+                    &input::<Input>(&request)?.request,
+                    ci_reuse::Effects::native()?,
+                )?;
+                let plan = session.plan();
+                self.reuse_session = Some(session);
+                Ok(plan)
+            }
+            "ci-reuse-step" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    name: String,
+                }
+                let name = input::<Input>(&request)?.name;
+                self.reuse_session
+                    .as_mut()
+                    .context("CI reuse session required")?
+                    .step(&name)
+            }
             "ci-store-prepare" => {
                 ensure!(
                     self.store_session.is_none(),
@@ -1230,6 +1267,8 @@ fn run(request: Request) -> Result<Value> {
         ci_session: None,
         fetch_mode: false,
         fetch_session: None,
+        reuse_mode: false,
+        reuse_session: None,
         store_mode: false,
         store_session: None,
         workflow_mode: false,
@@ -1249,6 +1288,7 @@ fn run(request: Request) -> Result<Value> {
         "instance-release-fetch",
         "ci-check",
         "ci-fetch",
+        "ci-reuse",
         "ci-store",
         "instance-ci-workflow",
     ]
@@ -1394,6 +1434,23 @@ fn run(request: Request) -> Result<Value> {
                 .request
                 .to_str()
                 .context("CI fetch request path must be UTF-8")?
+                .to_owned(),
+        ]
+    } else if request.action == "ci-reuse" {
+        // `day2 ci reuse` only, as for ci check.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            request: PathBuf,
+        }
+        let input: Input = input(&request)?;
+        operations.reuse_mode = true;
+        vec![
+            "ci-reuse-session".to_owned(),
+            input
+                .request
+                .to_str()
+                .context("CI reuse request path must be UTF-8")?
                 .to_owned(),
         ]
     } else if request.action == "ci-store" {

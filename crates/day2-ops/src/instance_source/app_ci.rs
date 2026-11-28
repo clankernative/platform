@@ -10,6 +10,10 @@
 //! must have been created inside the attempt's start-to-stop window, and the
 //! receipt binds the source inputs, the verification profile and the SDK's
 //! tooling distribution. Without `forge.oidc` none of this runs.
+//!
+//! `ci reuse` (crate::ci_reuse) accepts an earlier main run's stored result
+//! only through these same checks, so a reused result is one a deploy of that
+//! run's commit would have trusted.
 use crate::ci_check::{RECEIPT_LIMIT, Receipt as Checked};
 use crate::ci_results::{Stored, decimal};
 use crate::instance_source::{
@@ -270,15 +274,24 @@ fn canonical(value: &str) -> bool {
     day2::google_workspace_calendar::rfc3339_seconds(value).and_then(utc) == Some(value.to_owned())
 }
 
+/// `<sdk>/<source inputs>-<cases>/`: the key `ci store` writes every result
+/// of one SDK release, source inputs and case count under, one
+/// `<run>/<attempt>/` below it per stored attempt. `ci reuse` lists it.
+pub fn key(sdk: &str, inputs: &str, cases: impl std::fmt::Display) -> String {
+    let hex = |digest: &str| digest.trim_start_matches("sha256:").to_owned();
+    format!("{}/{}-{cases}/", hex(sdk), hex(inputs))
+}
+
 /// `<sdk>/<source inputs>-<cases>/<run>/<attempt>/<file>`: the object `ci
 /// store` wrote for this attempt of the binding's release, profile and inputs.
 pub fn object_name(binding: &Binding, inputs: &str, run: &Run, file: &str) -> String {
-    let hex = |digest: &str| digest.trim_start_matches("sha256:").to_owned();
     format!(
-        "{}/{}-{}/{}/{}/{file}",
-        hex(&binding.qualified_release.digest),
-        hex(inputs),
-        binding.verification["cases"],
+        "{}{}/{}/{file}",
+        key(
+            &binding.qualified_release.digest,
+            inputs,
+            &binding.verification["cases"]
+        ),
         run.id,
         run.attempt
     )
@@ -293,6 +306,87 @@ fn stored_by(stored: &Stored, run: &Run, commit: &str, what: &str) -> Result<()>
     ensure!(
         run.contains(&stored.time_created),
         "app CI's {what} was not created during the run's attempt"
+    );
+    Ok(())
+}
+
+// The custody checks below are the deploy reader's, in its order. `ci reuse`
+// applies exactly these to an earlier main run's stored result, so the two
+// readers trust the same objects.
+
+/// The attempt's receipt object, before its bytes are read: this run's,
+/// created during its attempt, within the receipt budget.
+pub fn receipt_object(stored: &Stored, run: &Run, commit: &str) -> Result<()> {
+    stored_by(stored, run, commit, RECEIPT)?;
+    ensure!(
+        (1..=RECEIPT_LIMIT).contains(&stored.size),
+        "app CI's receipt exceeds its budget"
+    );
+    Ok(())
+}
+
+/// The receipt's bytes, decoded exactly: a complete run's.
+pub fn decoded_receipt(bytes: &[u8]) -> Result<Checked> {
+    let checked: Checked = day2::json::decode(bytes).context("invalid app CI receipt")?;
+    checked.check()?;
+    Ok(checked)
+}
+
+/// The receipt binds exactly these source inputs and this verification
+/// profile (`{"version": 1, "seed": 42, "cases": <cases>}`).
+pub fn binds(checked: &Checked, inputs: &str, verification: &Value) -> Result<()> {
+    ensure!(
+        checked.source_inputs == inputs
+            && serde_json::to_value(&checked.verification)? == *verification,
+        "app CI's checked artifact belongs to another source or profile"
+    );
+    Ok(())
+}
+
+/// The attempt's artifact object: this run's, created during its attempt,
+/// the size its receipt names.
+pub fn artifact_object(
+    stored: &Stored,
+    run: &Run,
+    commit: &str,
+    expected: &BlobIdentity,
+) -> Result<()> {
+    stored_by(stored, run, commit, ARTIFACT)?;
+    ensure!(
+        stored.size == expected.bytes && expected.bytes <= ARTIFACT_LIMIT,
+        "app CI's artifact is not the size its receipt names"
+    );
+    Ok(())
+}
+
+/// The artifact's bytes are the archive its receipt names.
+pub fn archive(data: &[u8], expected: &BlobIdentity) -> Result<()> {
+    ensure!(
+        BlobIdentity::of(data) == *expected,
+        "app CI's artifact is not the archive its receipt names"
+    );
+    Ok(())
+}
+
+/// The run, read again after the artifact was downloaded: still app CI's run
+/// of `commit` (see [`identity`]), the same successful attempt, with the same
+/// window.
+pub fn unchanged(
+    latest: &Value,
+    commit: &str,
+    source_id: u64,
+    source: &str,
+    repository_id: &Value,
+    run: &Run,
+) -> Result<()> {
+    ensure!(
+        latest.get("head_sha") == Some(&json!(commit)),
+        "app CI's run changed its commit"
+    );
+    identity(latest, source_id, source, repository_id)?;
+    ensure!(
+        completed(latest)? == Some(run.clone()),
+        "app CI's attempt changed during the artifact download"
     );
     Ok(())
 }
@@ -531,23 +625,14 @@ impl Session {
         let bucket = self.ci_bucket()?;
         let name = object_name(&binding, &inputs, &run, RECEIPT);
         let stored = self.ci_object(&bucket, &name)?;
-        stored_by(&stored, &run, &commit, RECEIPT)?;
-        ensure!(
-            (1..=RECEIPT_LIMIT).contains(&stored.size),
-            "app CI's receipt exceeds its budget"
-        );
+        receipt_object(&stored, &run, &commit)?;
         let bytes = self
             .effects
             .storage
             .media(&bucket, &name, &stored.generation, stored.size)?;
-        let checked: Checked = day2::json::decode(&bytes).context("invalid app CI receipt")?;
-        checked.check()?;
+        let checked = decoded_receipt(&bytes)?;
         let release = self.release()?;
-        ensure!(
-            checked.source_inputs == inputs
-                && serde_json::to_value(&checked.verification)? == binding.verification,
-            "app CI's checked artifact belongs to another source or profile"
-        );
+        binds(&checked, &inputs, &binding.verification)?;
         ensure!(
             checked.sdk_distribution == release.distribution,
             "app CI checked the artifact on another SDK's tooling distribution"
@@ -575,11 +660,7 @@ impl Session {
         };
         let name = object_name(&binding, &inputs, &run, ARTIFACT);
         let stored = self.ci_object(&bucket, &name)?;
-        stored_by(&stored, &run, &commit, ARTIFACT)?;
-        ensure!(
-            stored.size == expected.bytes && expected.bytes <= ARTIFACT_LIMIT,
-            "app CI's artifact is not the size its receipt names"
-        );
+        artifact_object(&stored, &run, &commit, &expected)?;
         let reported = json!({"artifact": format!("gs://{bucket}/{name}"),
             "generation": stored.generation});
         self.found.as_mut().context("app CI receipt")?.artifact = Some(stored);
@@ -600,10 +681,7 @@ impl Session {
             .effects
             .storage
             .media(&bucket, &name, &stored.generation, stored.size)?;
-        ensure!(
-            BlobIdentity::of(&data) == expected,
-            "app CI's artifact is not the archive its receipt names"
-        );
+        archive(&data, &expected)?;
         self.data = Some(data);
         Ok(json!({"digest": expected.digest, "bytes": expected.bytes}))
     }
@@ -618,20 +696,14 @@ impl Session {
         let names = self.app_ci_names()?;
         let (mut forge, binding) = self.forge()?;
         let latest = forge.json(&format!("{}/actions/runs/{}", forge.prefix, run.id))?;
-        ensure!(
-            latest.get("head_sha") == Some(&json!(commit)),
-            "app CI's run changed its commit"
-        );
-        identity(
+        unchanged(
             &latest,
+            &commit,
             source_id,
             &names.repository,
             &binding.repository_id,
+            &run,
         )?;
-        ensure!(
-            completed(&latest)? == Some(run.clone()),
-            "app CI's attempt changed during the artifact download"
-        );
         let binding = binding.clone();
         let found = self.found.as_ref().context("app CI receipt")?;
         let artifact = found.artifact.as_ref().context("app CI artifact")?;

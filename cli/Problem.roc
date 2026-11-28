@@ -35,6 +35,7 @@ Problem := [
 	CiCheckFailed(Str),
 	CiFetchFailed(Str),
 	CiFetchUnavailable(Str),
+	CiReuseFailed(Str),
 	CiStoreFailed(Str),
 	CiWorkflowFailed(Str),
 ].{
@@ -69,6 +70,7 @@ Problem := [
 		| SelectionFailed(_)
 		| CiCheckFailed(_)
 		| CiFetchFailed(_)
+		| CiReuseFailed(_)
 		| CiStoreFailed(_)
 		| CiWorkflowFailed(_) => 6
 		SourceUnavailable(_) | DeployUnavailable(_) | CiFetchUnavailable(_) => 7
@@ -112,6 +114,7 @@ Problem := [
 		CiCheckFailed(_) => "ci_check_failed"
 		CiFetchFailed(_) => "ci_fetch_failed"
 		CiFetchUnavailable(_) => "ci_fetch_unavailable"
+		CiReuseFailed(_) => "ci_reuse_failed"
 		CiStoreFailed(_) => "ci_store_failed"
 		CiWorkflowFailed(_) => "ci_workflow_failed"
 	}
@@ -154,6 +157,7 @@ Problem := [
 		| CiCheckFailed(detail)
 		| CiFetchFailed(detail)
 		| CiFetchUnavailable(detail)
+		| CiReuseFailed(detail)
 		| CiStoreFailed(detail)
 		| CiWorkflowFailed(detail) => detail
 	}
@@ -209,6 +213,9 @@ Problem := [
 		CiFetchUnavailable(
 			_,
 		) => "A forge read failed transiently for 120 s: a 408, 429 or 5xx, a dropped connection, a short body or a timeout. Nothing was checked; rerun the job."
+		CiReuseFailed(
+			_,
+		) => "Run in the org-scoped app CI workflow after ci fetch, which wrote the run's directory. A lookup that finds nothing, or fails, is not a failure: only an unusable request, run record or directory is."
 		CiStoreFailed(
 			_,
 		) => "Run in the org-scoped app CI workflow after ci fetch and ci check, which sets the git-oidc request token and the app's bucket, audience and SDK for this step. Objects are never replaced: rerun the job as a new attempt."

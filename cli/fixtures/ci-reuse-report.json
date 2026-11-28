@@ -1,0 +1,46 @@
+{
+  "format": 1,
+  "repository": "tools/links",
+  "event": "push",
+  "run": 41,
+  "attempt": 2,
+  "reused": true,
+  "reason": null,
+  "bucket": "exampleco-tools-links-ci",
+  "key": "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d/abababababababababababababababababababababababababababababababab-6/",
+  "listed": 2,
+  "tried": [
+    {
+      "run": 40,
+      "attempt": 2,
+      "accepted": false,
+      "reason": "the stored attempt 2 is not the run's current attempt 3"
+    },
+    {
+      "run": 39,
+      "attempt": 1,
+      "accepted": true,
+      "reason": null
+    }
+  ],
+  "source": {
+    "run": 39,
+    "attempt": 1,
+    "head": "4444444444444444444444444444444444444444",
+    "workflow_commit": "3333333333333333333333333333333333333333",
+    "started_at": "2026-11-25T18:00:00Z",
+    "completed_at": "2026-11-25T18:20:00Z",
+    "bucket": "exampleco-tools-links-ci",
+    "receipt": {
+      "name": "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d/abababababababababababababababababababababababababababababababab-6/39/1/receipt.json",
+      "generation": "1700000000000002",
+      "time_created": "2026-11-25T18:15:00.250Z"
+    },
+    "artifact": {
+      "name": "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d/abababababababababababababababababababababababababababababababab-6/39/1/artifact.tar.gz",
+      "generation": "1700000000000001",
+      "time_created": "2026-11-25T18:15:00.250Z"
+    }
+  },
+  "output": "/tmp/day2-ci/reuse"
+}

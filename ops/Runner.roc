@@ -22,6 +22,7 @@ import ops.Check
 import ops.Ci
 import ops.CiCheck
 import ops.CiFetch
+import ops.CiReuse
 import ops.CiStore
 import ops.Verify
 import ops.Linux
@@ -101,9 +102,10 @@ run! = |args| match args {
 	["instance-deploy-session", request, roots] => InstanceDeploy.run!(request, roots, call!)
 	["instance-selection-session"] => InstanceSelection.read!(call!)
 	["instance-ci-workflow-session", request] => InstanceCiWorkflow.run!(request, call!)
-	# Only the host starts these, for `day2 ci check`, `fetch` and `store`; they have no `platform` entry.
+	# Only the host starts these, for `day2 ci check`, `fetch`, `reuse` and `store`; they have no `platform` entry.
 	["ci-check-session", request] => CiCheck.run!(request, call!)
 	["ci-fetch-session", request] => CiFetch.run!(request, call!)
+	["ci-reuse-session", request] => CiReuse.run!(request, call!)
 	["ci-store-session", request] => CiStore.run!(request, call!)
 	["build-recipe"] => Build.recipe!(call!)
 	["build-tested-recipe"] => Build.tested_recipe!(call!)

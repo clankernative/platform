@@ -7,42 +7,42 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const HEAD: &str = "1111111111111111111111111111111111111111";
+pub(crate) const HEAD: &str = "1111111111111111111111111111111111111111";
 const BASE: &str = "2222222222222222222222222222222222222222";
-const WORKFLOW: &str = "3333333333333333333333333333333333333333";
-const JOB_TOKEN: &str = "synthetic-job-token";
+pub(crate) const WORKFLOW: &str = "3333333333333333333333333333333333333333";
+pub(crate) const JOB_TOKEN: &str = "synthetic-job-token";
 // A synthetic JWT, assembled so secret scanners don't mistake the fixture for a token.
-const SUBJECT: &str = concat!(
+pub(crate) const SUBJECT: &str = concat!(
     "eyJhbGciOiJSUzI1NiJ9",
     ".",
     "eyJzdWIiOiJyZXBvIn0",
     ".",
     "c2lnbmF0dXJl"
 );
-const ACCESS: &str = "ya29.synthetic-access-token";
-const BUCKET_NAME: &str = "exampleco-tools-links-ci";
-const AUDIENCE_URL: &str = "https://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/day2-ci/providers/gitea";
+pub(crate) const ACCESS: &str = "ya29.synthetic-access-token";
+pub(crate) const BUCKET_NAME: &str = "exampleco-tools-links-ci";
+pub(crate) const AUDIENCE_URL: &str = "https://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/day2-ci/providers/gitea";
 const GOLDEN_REPORT: &str = include_str!("../../../../cli/fixtures/ci-store-report.json");
 
-fn sdk() -> String {
+pub(crate) fn sdk() -> String {
     format!("sha256:{}", "5d".repeat(32))
 }
 
 /// One request the fake servers saw.
 #[derive(Clone, Debug)]
-struct Seen {
-    method: String,
-    target: String,
-    headers: BTreeMap<String, String>,
-    body: Vec<u8>,
+pub(crate) struct Seen {
+    pub(crate) method: String,
+    pub(crate) target: String,
+    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) body: Vec<u8>,
 }
 
 impl Seen {
-    fn path(&self) -> &str {
+    pub(crate) fn path(&self) -> &str {
         self.target.split('?').next().unwrap_or_default()
     }
 
-    fn query(&self, key: &str) -> Option<String> {
+    pub(crate) fn query(&self, key: &str) -> Option<String> {
         reqwest::Url::parse(&format!("http://fake{}", self.target))
             .unwrap()
             .query_pairs()
@@ -51,7 +51,7 @@ impl Seen {
     }
 
     /// A multipart upload's resource and bytes.
-    fn parts(&self) -> (Value, Vec<u8>) {
+    pub(crate) fn parts(&self) -> (Value, Vec<u8>) {
         let boundary = self.headers["content-type"]
             .strip_prefix("multipart/related; boundary=")
             .unwrap()
@@ -77,9 +77,9 @@ impl Seen {
 /// Fake git-oidc, Google STS and Cloud Storage: scripted answers; the last
 /// mint answer repeats.
 #[derive(Default)]
-struct Script {
-    mint: VecDeque<(u16, String)>,
-    sts: Option<(u16, String)>,
+pub(crate) struct Script {
+    pub(crate) mint: VecDeque<(u16, String)>,
+    pub(crate) sts: Option<(u16, String)>,
     /// An upload status for object names ending in the given text.
     refuse: Option<(String, u16)>,
     /// A successful upload's reply body for object names ending in the given text.
@@ -87,13 +87,13 @@ struct Script {
     seen: Vec<Seen>,
 }
 
-struct Servers {
-    base: String,
-    script: Arc<Mutex<Script>>,
+pub(crate) struct Servers {
+    pub(crate) base: String,
+    pub(crate) script: Arc<Mutex<Script>>,
 }
 
 impl Servers {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let script = Arc::new(Mutex::new(Script {
@@ -184,7 +184,7 @@ impl Servers {
         Self { base, script }
     }
 
-    fn seen(&self) -> Vec<Seen> {
+    pub(crate) fn seen(&self) -> Vec<Seen> {
         self.script.lock().unwrap().seen.clone()
     }
 }
@@ -209,7 +209,7 @@ fn artifact() -> Vec<u8> {
     (0..4096_u32).map(|value| (value % 251) as u8).collect()
 }
 
-fn distribution() -> String {
+pub(crate) fn distribution() -> String {
     format!("sha256:{}", "ef".repeat(32))
 }
 
