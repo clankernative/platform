@@ -8,16 +8,21 @@ import Capability
 InstanceCandidate :: [].{
 
 	## The candidate for a binding and a commit: the stored candidate record, else the checked-inputs record for the
-	## same app inputs (after the archive's CI controls are verified), else a native build of the commit's checked
-	## main artifact on the build host. The last step writes the candidate record if it is new, and its bytes.
+	## same app inputs, else a native build of the commit's checked main artifact. Repository-local CI requires its
+	## archive controls before reuse. The last step writes the candidate record if it is new, and its bytes.
 	build! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	build! = |request, host!| {
 		prepare!(request, host!)?
-		if found(step!("stored", host!)?)? {
+		stored : { found : Bool, verify_legacy_controls : Bool }
+		stored = Json.parse(step!("stored", host!)?).map_err(|_| "invalid stored candidate lookup result")?
+		if stored.found {
 			return step!("record", host!)
 		}
-		for name in ["archive", "inputs", "controls"] {
+		for name in ["archive", "inputs"] {
 			_ = step!(name, host!)?
+		}
+		if stored.verify_legacy_controls {
+			_ = step!("controls", host!)?
 		}
 		if found(step!("cached", host!)?)? {
 			_ = step!("reuse", host!)?

@@ -117,26 +117,31 @@ fn published() -> Published {
     }
 }
 
-/// The app's source archive: its CI controls (selecting `manifest`) and the
-/// app under `app/`.
-fn source_archive(manifest: &[u8], extra: &[(&[u8], u8, &[u8])]) -> Vec<u8> {
+/// The app under `app/`, with repository-local CI controls when given a manifest.
+fn source_archive(manifest: Option<&[u8]>, extra: &[(&[u8], u8, &[u8])]) -> Vec<u8> {
     let roc = roc_json(PLATFORM);
-    let own: [(&[u8], u8, &[u8]); 9] = [
-        (b"links-app/", b'5', b""),
-        (b"links-app/.ci/roc.json", b'0', &roc),
-        (b"links-app/.ci/platform-release.json", b'0', manifest),
-        (b"links-app/.ci/publish_artifact.py", b'0', b"# synthetic\n"),
-        (b"links-app/.ci/sdk_release.py", b'0', b"# synthetic\n"),
-        (
-            b"links-app/.gitea/workflows/roc.yml",
-            b'0',
-            b"name: synthetic\n",
-        ),
+    let mut entries: Vec<(&[u8], u8, &[u8])> = vec![(b"links-app/", b'5', b"")];
+    if let Some(manifest) = manifest {
+        let controls: [(&[u8], u8, &[u8]); 5] = [
+            (b"links-app/.ci/roc.json", b'0', &roc),
+            (b"links-app/.ci/platform-release.json", b'0', manifest),
+            (b"links-app/.ci/publish_artifact.py", b'0', b"# synthetic\n"),
+            (b"links-app/.ci/sdk_release.py", b'0', b"# synthetic\n"),
+            (
+                b"links-app/.gitea/workflows/roc.yml",
+                b'0',
+                b"name: synthetic\n",
+            ),
+        ];
+        entries.extend(controls);
+    }
+    let app: [(&[u8], u8, &[u8]); 3] = [
         (b"links-app/app/App.roc", b'0', b"app [main!] {}\n"),
         (b"links-app/app/Links.roc", b'0', b"module [links]\n"),
         (b"links-app/README.md", b'0', b"outside the app\n"),
     ];
-    let entries: Vec<(&[u8], u8, &[u8])> = own.into_iter().chain(extra.iter().copied()).collect();
+    entries.extend(app);
+    entries.extend_from_slice(extra);
     tarball(&entries, &comment())
 }
 
@@ -622,7 +627,7 @@ impl World {
     fn with_source(extra: &[(&[u8], u8, &[u8])]) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let published = published();
-        let archive = source_archive(&published.manifest, extra);
+        let archive = source_archive(Some(&published.manifest), extra);
         let inputs = source_inputs(&archive, "app").unwrap();
         let controls = Controls::read(&archive).unwrap().digest();
         let reference = BlobIdentity::of(&published.manifest);
@@ -811,11 +816,15 @@ impl World {
             session.step(name)
         };
         let receipt = (|| -> Result<Value> {
-            if step("stored")?["found"] == true {
+            let stored = step("stored")?;
+            if stored["found"] == true {
                 return step("record");
             }
-            for name in ["archive", "inputs", "controls"] {
+            for name in ["archive", "inputs"] {
                 step(name)?;
+            }
+            if stored["verify_legacy_controls"] == true {
+                step("controls")?;
             }
             if step("cached")?["found"] == true {
                 step("reuse")?;
@@ -1310,7 +1319,7 @@ fn ci_controls_that_are_not_approved_cannot_reuse_a_cached_result() -> Result<()
     let world = World::new();
     world.build(COMMIT, "first.json")?;
     let changed = source_archive(
-        &world.published.manifest,
+        Some(&world.published.manifest),
         &[(b"links-app/.ci/extra.sh", b'0', b"echo changed\n")],
     );
     world.fake.route(
@@ -3084,6 +3093,8 @@ fn write_protect_removes_write_bits_and_refuses_links() -> Result<()> {
 /// checked artifact and its receipt for COMMIT.
 fn app_ci_world() -> World {
     let mut world = World::new();
+    world.archive = source_archive(None, &[]);
+    assert_eq!(source_inputs(&world.archive, "app").unwrap(), world.inputs);
     let prefix = format!("{SERVER}/api/v1/repos/tools/links");
     world.binding["repository"] = json!("tools/links");
     world.binding["source"]["repository"] = json!("tools/links");
@@ -3224,15 +3235,15 @@ pub(crate) fn selected_app_ci_candidate() -> (Value, Vec<u8>) {
 }
 
 #[test]
-fn with_forge_oidc_a_build_promotes_app_ci_s_artifact_and_records_its_provenance() -> Result<()> {
+fn scoped_ci_builds_without_repository_workflow_files() -> Result<()> {
     let world = app_ci_world();
+    assert!(Controls::read(&world.archive).is_err());
     let (receipt, steps) = world.build(COMMIT, "candidate.json")?;
-    // The same steps as before: instance candidate build's interface does not change.
     assert_eq!(
         steps,
         [
-            "stored", "archive", "inputs", "controls", "cached", "run", "job", "artifact",
-            "download", "attempt", "release", "stage", "native", "collect", "record"
+            "stored", "archive", "inputs", "cached", "run", "job", "artifact", "download",
+            "attempt", "release", "stage", "native", "collect", "record"
         ]
     );
     assert_eq!(receipt["outcome"], "built");

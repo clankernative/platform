@@ -1395,6 +1395,7 @@ fn source_sessions_prepare_then_run_each_step_in_order() -> Result<()> {
 fn candidate_session(
     session: &str,
     found: &[&str],
+    verify_legacy_controls: bool,
     failing: &str,
 ) -> Result<(Result<Value>, Vec<String>)> {
     assert!(
@@ -1420,7 +1421,13 @@ fn candidate_session(
             if step == failing {
                 bail!("retryable: source_temporarily_unavailable");
             }
-            if step == "stored" || step == "cached" {
+            if step == "stored" {
+                return Ok(json!({
+                    "found": found.contains(&"stored"),
+                    "verify_legacy_controls": verify_legacy_controls,
+                }));
+            }
+            if step == "cached" {
                 return Ok(json!({ "found": found.contains(&step.as_str()) }));
             }
             Ok(json!({ "step": step }))
@@ -1623,13 +1630,23 @@ fn candidate_sessions_prepare_then_run_each_step_in_order() -> Result<()> {
             vec!["prepare", "request", "probe"],
         ),
     ] {
-        let (result, effects) = candidate_session(session, &found, "")?;
+        let (result, effects) = candidate_session(session, &found, true, "")?;
         assert_eq!(result?, json!({"step": steps.last().unwrap()}), "{session}");
         assert_eq!(effects, steps, "{session}");
     }
+    let (result, effects) = candidate_session("instance-candidate-build-session", &[], false, "")?;
+    assert_eq!(result?, json!({"step": "record"}));
+    assert_eq!(
+        effects,
+        built
+            .into_iter()
+            .filter(|step| *step != "controls")
+            .collect::<Vec<_>>()
+    );
     // A failed step stops the session, and its error reaches the host verbatim:
     // a refused CI-control check never reaches the cached lookup or the build host.
-    let (result, effects) = candidate_session("instance-candidate-build-session", &[], "controls")?;
+    let (result, effects) =
+        candidate_session("instance-candidate-build-session", &[], true, "controls")?;
     assert_eq!(
         format!("{:#}", result.unwrap_err()),
         "retryable: source_temporarily_unavailable"
@@ -1638,7 +1655,8 @@ fn candidate_sessions_prepare_then_run_each_step_in_order() -> Result<()> {
         effects,
         ["prepare", "stored", "archive", "inputs", "controls"]
     );
-    let (result, effects) = candidate_session("instance-candidate-build-session", &[], "native")?;
+    let (result, effects) =
+        candidate_session("instance-candidate-build-session", &[], true, "native")?;
     assert!(result.is_err());
     assert_eq!(effects.last().unwrap(), "native");
     for mode in crate::instance_candidate::Mode::ALL {
