@@ -87,6 +87,24 @@ pub(in crate::security_epoch::native_enrollment) struct ObservedScheduledBackupS
     refused: bool,
 }
 
+/// Deliberately uninhabited until an independently qualified, authenticated
+/// persisted-CREATE supplier exists. No file, annotation, observer DATA,
+/// configuration switch or fixture can construct this prerequisite.
+struct ProtectedScheduledCreate {
+    _unavailable: std::convert::Infallible,
+    _local: std::marker::PhantomData<Rc<()>>,
+}
+
+/// Closed future request input, NOT a presently accepting source supplier.
+/// Its whole observation retains the full PRE-ACCEPT BackupSubmitOriginal and
+/// both real message/issuer anchors; neither an identity-only stamp nor a fresh
+/// same-connection original can substitute. There are no authority getters.
+pub(in crate::security_epoch) struct AdmittedScheduledBackupRequest {
+    observation: ObservedScheduledBackupSubmit,
+    create: ProtectedScheduledCreate,
+    refused: bool,
+}
+
 const _: () = {
     macro_rules! assert_not_impl {
         ($owner:ty, $bound:path) => {{
@@ -119,6 +137,8 @@ const _: () = {
     opaque!(CapturedScheduledBackupSubmit);
     opaque!(CompletedBackupObservationChannel);
     opaque!(ObservedScheduledBackupSubmit);
+    opaque!(ProtectedScheduledCreate);
+    opaque!(AdmittedScheduledBackupRequest);
 };
 
 impl ScheduledBackupSocketName {
@@ -730,6 +750,43 @@ impl Drop for CompletedBackupObservationChannel {
 }
 
 impl ObservedScheduledBackupSubmit {
+    /// This currently ALWAYS refuses before any intent append, provider write
+    /// or private source read. Changing that requires a separately reviewed
+    /// genuine CREATE supplier, not an enable bit or a successful DATA decode.
+    pub(in crate::security_epoch::native_enrollment) fn try_admit_request(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        original: &mut NativeAcquisition,
+    ) -> Result<AdmittedScheduledBackupRequest> {
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check(stage, original)?;
+            ProtectedScheduledCreate::acquire()
+        }));
+        let checked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check(stage, original)));
+        let stage_checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stage.check_serving_acquisition(original)
+        }));
+        if !matches!(&requested, Ok(Ok(_)))
+            || !matches!(&checked, Ok(Ok(())))
+            || !matches!(&stage_checked, Ok(Ok(())))
+        {
+            self.refuse();
+            stage.refuse_serving();
+            original.refuse();
+        }
+        // All actual posts above ran even on the unavailable source or panic;
+        // preserve its first primary. This move is unreachable with the closed
+        // supplier and conveys no authority from a comparison or a boolean.
+        let create = finish_checked(requested, checked);
+        let create = finish_checked(Ok(create), stage_checked)?;
+        Ok(AdmittedScheduledBackupRequest {
+            observation: self,
+            create,
+            refused: false,
+        })
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn check(
         &mut self,
         stage: &mut EnrolledRoleStage<'_>,
@@ -790,6 +847,55 @@ impl ObservedScheduledBackupSubmit {
 }
 
 impl Drop for ObservedScheduledBackupSubmit {
+    fn drop(&mut self) {
+        self.refuse();
+    }
+}
+
+impl ProtectedScheduledCreate {
+    fn acquire() -> Result<Self> {
+        Err(anyhow::anyhow!(
+            "scheduled_backup_create_source_unqualified"
+        ))
+    }
+
+    fn check(&self) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "scheduled_backup_create_source_unqualified"
+        ))
+    }
+}
+
+impl AdmittedScheduledBackupRequest {
+    pub(in crate::security_epoch) fn check(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ensure!(!self.refused, "scheduled_backup_request_refused");
+            self.observation.check(stage, original)?;
+            self.create.check()?;
+            self.observation.check(stage, original)
+        }));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stage.check_serving_acquisition(original)
+        }));
+        if !matches!(&requested, Ok(Ok(()))) || !matches!(&checked, Ok(Ok(()))) {
+            self.refuse();
+            stage.refuse_serving();
+            original.refuse();
+        }
+        finish_checked(requested, checked)
+    }
+
+    fn refuse(&mut self) {
+        self.refused = true;
+        self.observation.refuse();
+    }
+}
+
+impl Drop for AdmittedScheduledBackupRequest {
     fn drop(&mut self) {
         self.refuse();
     }
