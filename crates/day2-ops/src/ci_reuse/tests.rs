@@ -380,6 +380,12 @@ impl Flaky {
         if self.failing == Some(&format!("transient-{call}")) {
             bail!(instance_source::Retryable(instance_source::TEMPORARY));
         }
+        // A reply the bucket's contents shaped: any writer under the key can
+        // make one.
+        ensure!(
+            self.failing != Some(&format!("oversized-{call}")),
+            "app_ci_results_reply_too_large"
+        );
         ensure!(self.failing != Some(call), "app_ci_results_http_403");
         Ok(())
     }
@@ -759,6 +765,13 @@ fn every_custody_check_refuses_the_candidate() {
             identity,
         ),
         (
+            // Its workflow fixed another SDK or case count, so the key is only
+            // its receipt's claim.
+            "another day2-ci workflow commit",
+            forge(|run| run["workflow_commit_sha"] = json!("e".repeat(40))),
+            "app CI ran it from another <org>/day2-ci workflow commit than this run's",
+        ),
+        (
             "another repository",
             forge(|run| run["repository"]["id"] = json!(18)),
             identity,
@@ -1070,7 +1083,7 @@ fn a_transient_read_or_a_refused_credential_falls_back_to_a_build() {
         &|run| {
             run.servers.script.lock().unwrap().mint = [(403, "{}".to_owned())].into();
         },
-        "git-oidc refused the token request with HTTP 403",
+        "git-oidc did not mint this run's token",
     );
     check(
         "Google STS",
@@ -1078,8 +1091,38 @@ fn a_transient_read_or_a_refused_credential_falls_back_to_a_build() {
             run.servers.script.lock().unwrap().sts =
                 Some((400, json!({"error": "invalid_grant"}).to_string()));
         },
-        "Google STS refused the token exchange with HTTP 400: invalid_grant",
+        "Google STS did not exchange this run's token",
     );
+    // A record keeps no provider text.
+    let run = Run::new("push");
+    run.stored(40, 1);
+    run.servers.script.lock().unwrap().sts = Some((
+        400,
+        json!({"error": "invalid_grant", "error_description": "provider-owned text"}).to_string(),
+    ));
+    let reason = run.missed().reason.unwrap_or_default();
+    assert!(
+        !reason.contains("invalid_grant") && !reason.contains("provider-owned"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_listing_the_buckets_contents_shaped_is_a_miss_not_a_failure() -> Result<()> {
+    // Anyone who can write under the key could make a listing too large or
+    // undecodable; that must not fail every push of the tree for 30 days.
+    let mut run = Run::new("push");
+    run.stored(40, 1);
+    run.failing = Some("oversized-list");
+    let report = run.missed();
+    assert!(
+        report
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("app_ci_results_reply_too_large")),
+        "{report:?}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -1117,6 +1160,17 @@ fn misconfiguration_fails_the_command() {
             )
         },
         "the forge's record of this run is not the run's",
+    );
+    check(
+        "this run's record names no workflow commit",
+        &|run| {
+            let mut value = record(41, 2, HEAD, "in_progress");
+            value["workflow_commit_sha"] = Value::Null;
+            run.fake
+                .route(&format!("{PREFIX}/actions/runs/41"), vec![ok(value)])
+        },
+        // The shared identity check refuses it before reuse reads the commit.
+        "the forge's run is not app CI's scoped verification run",
     );
     check(
         "this run is not a scoped run",

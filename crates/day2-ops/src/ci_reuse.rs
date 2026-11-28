@@ -22,12 +22,15 @@
 //!   when the forge binds it: the stored attempt is the current, successful
 //!   attempt of a scoped app CI push run on main, and the forge's archive of
 //!   that run's own commit has exactly this run's `app/` source inputs, as a
-//!   deploy binds its own commit's archive to the receipt it reads.
+//!   deploy binds its own commit's archive to the receipt it reads. The run
+//!   must also have run this run's `<org>/day2-ci` workflow commit, whose
+//!   rendered workflow fixed the key's SDK and cases: its own create-only
+//!   upload then took exactly the name it is found under.
 //! - **Custody**, per stored attempt, newest run first, at most
 //!   [`CANDIDATES`], as `ops/CiReuse.roc` orders the steps: `candidate` (the
 //!   forge's record of that run: app CI's scoped verification run of a push
-//!   to main, its current attempt the stored one, terminal and successful, not
-//!   this run), `source` (the forge's archive of that run's commit, whose
+//!   to main of this run's workflow commit, its current attempt the stored
+//!   one, terminal and successful, not this run), `source` (the forge's archive of that run's commit, whose
 //!   `app/` source inputs must be the key's), `receipt` (this attempt's
 //!   metadata and creation window, a complete run's receipt for the key's
 //!   inputs and cases, seed 42 and `DAY2_CI_DISTRIBUTION`), `artifact` and
@@ -44,14 +47,16 @@
 //!   git-oidc, STS and bucket request, downloads included, is bounded by the
 //!   time left as well as by its own deadline, and retries end there too.
 //! - **Misses and failures.** Absence under the key, every candidate refused,
-//!   a read that stayed transient, the deadline, and a refused mint or
-//!   exchange (which store fails on itself) are recorded as why nothing was
-//!   reused, and the command succeeds, so check builds the app. A stored
+//!   a read that stayed transient, the deadline, a refused mint or exchange
+//!   (which store fails on itself; recorded by step, never by provider text)
+//!   and a listing reply the bucket's contents shaped (too large, undecodable,
+//!   a name outside the key) are recorded as why nothing was reused, and the
+//!   command succeeds, so check builds the app. A stored
 //!   attempt refused by a custody check or by a non-transient read refuses
 //!   only that attempt. Misconfiguration fails the command (exit 6): an
 //!   unusable request, run record or directory, a missing or invalid input,
-//!   this run's own forge record refused or not app CI's, or a refused
-//!   listing.
+//!   this run's own forge record refused or not app CI's or without its
+//!   workflow commit, or a listing GCS refuses outright (401, 403, 404).
 //! - **Output.** For a push run, `DIRECTORY/reuse/` (0700) with `reuse.json`
 //!   ([`Record`]) written last and, when a result was reused, its
 //!   `app.tar.gz` and its `receipt.json`, the stored bytes.
@@ -336,6 +341,11 @@ pub struct Session {
     key: Option<String>,
     /// The CI repository the forge names for this run: its ID and name.
     source: Option<(u64, String)>,
+    /// The `<org>/day2-ci` commit whose workflow this run runs, as the forge
+    /// records it. That rendered workflow fixes each app's SDK, tooling
+    /// distribution and cases, so only a run of the same commit stored under
+    /// this key by its own workflow.
+    workflow_commit: Option<String>,
     /// When the lookup ends, on the session's clock.
     deadline: Duration,
     stage: Stage,
@@ -398,6 +408,7 @@ impl Session {
             head: None,
             key: None,
             source: None,
+            workflow_commit: None,
             deadline,
             stage: Stage::Done,
             finished: false,
@@ -554,20 +565,33 @@ impl Session {
                              its actions: read permission or the run is misconfigured",
                         ));
                     }
-                    Stage::List if !transient(&error) => {
+                    // Only the bucket refusing the push identity is a
+                    // misconfiguration. A reply the bucket's contents shape
+                    // (too large, undecodable, a name outside the key) is
+                    // something any writer could cause, so it is a miss.
+                    Stage::List if access_refused(&error) => {
                         return Err(error.context(
                             "ci reuse could not list its key in the results bucket: the push \
                              identity's read access or the bucket is misconfigured",
                         ));
                     }
                     _ => {
+                        // git-oidc's and STS's refusals carry provider text,
+                        // which a record never keeps: only the step is named.
+                        let detail = match stage {
+                            Stage::Mint => "git-oidc did not mint this run's token".to_owned(),
+                            Stage::Exchange => {
+                                "Google STS did not exchange this run's token".to_owned()
+                            }
+                            _ => format!("{error:#}"),
+                        };
                         let reason = if self.left().is_zero() {
                             format!(
-                                "the lookup's {} s deadline passed during {step}: {error:#}",
+                                "the lookup's {} s deadline passed during {step}: {detail}",
                                 BUDGET.as_secs()
                             )
                         } else {
-                            format!("{error:#}")
+                            detail
                         };
                         self.note(stage, &reason);
                     }
@@ -635,6 +659,12 @@ impl Session {
             .and_then(instance_source::proof_id)
             .context("the forge names no workflow repository for this run")?;
         app_ci::identity(&record, source_id, &source, &json!(event.repository_id))?;
+        let workflow_commit = record
+            .get("workflow_commit_sha")
+            .and_then(Value::as_str)
+            .filter(|commit| ci_fetch::canonical(commit))
+            .context("the forge names no workflow commit for this run")?
+            .to_owned();
         ensure!(
             record.get("id").and_then(instance_source::proof_id) == Some(event.run)
                 && record.get("head_sha") == Some(&json!(event.head))
@@ -645,6 +675,7 @@ impl Session {
             "the forge's record of this run is not the run's"
         );
         self.source = Some((source_id, source));
+        self.workflow_commit = Some(workflow_commit);
         self.stage = Stage::Mint;
         Ok(())
     }
@@ -804,6 +835,14 @@ impl Session {
             &source,
             &json!(self.event.repository_id),
         )?;
+        // The key's SDK and cases are only the stored receipt's claim. A run of
+        // the same workflow commit was rendered with this run's SDK, tooling
+        // distribution and cases, so its own upload took exactly this name:
+        // one planted here for it would have collided with it.
+        ensure!(
+            Some(&run.workflow_commit) == self.workflow_commit.as_ref(),
+            "app CI ran it from another <org>/day2-ci workflow commit than this run's"
+        );
         self.examined = Examined {
             run: Some(run),
             head: Some(head),
@@ -1018,6 +1057,16 @@ fn stored(rest: &str) -> Option<(u64, u64)> {
 /// verification run of a push to main ([`app_ci::identity`]), the run asked
 /// for, with a head commit, its current attempt terminal, successful and the
 /// stored one.
+/// Whether the results bucket refused the request outright: 401, 403 or 404.
+fn access_refused(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.to_string().as_str(),
+            "app_ci_results_http_401" | "app_ci_results_http_403" | "app_ci_results_http_404"
+        )
+    })
+}
+
 fn candidate(
     record: &Value,
     id: u64,

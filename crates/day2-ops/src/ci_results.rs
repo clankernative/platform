@@ -182,7 +182,7 @@ impl Gcs {
         let token = Zeroizing::new(self.token()?);
         let header = Zeroizing::new(format!("Bearer {}", token.as_str()));
         let mut value = reqwest::header::HeaderValue::from_str(&header)
-            .map_err(|_| anyhow!("the apply identity's access token is malformed"))?;
+            .map_err(|_| anyhow!("the results bucket's access token is malformed"))?;
         value.set_sensitive(true);
         // The deadline is the request's own total, which blocking body reads cannot renew. No transport error is
         // formatted: it names the URL.

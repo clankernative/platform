@@ -183,6 +183,7 @@ pub trait Transport {
 /// whole request when it gives one. Proxies come from the environment.
 pub struct Native {
     client: reqwest::blocking::Client,
+    timeout: Duration,
 }
 
 impl Native {
@@ -197,7 +198,7 @@ impl Native {
             .https_only(https_only)
             .build()
             .context("source HTTP client")?;
-        Ok(Self { client })
+        Ok(Self { client, timeout })
     }
 }
 
@@ -214,8 +215,9 @@ impl Transport for Native {
             .get(url)
             .header(reqwest::header::ACCEPT, "application/json");
         // A request's own timeout is its total, which body reads cannot renew.
+        // It replaces the client's, so it is never longer than the client's.
         if let Some(within) = within {
-            request = request.timeout(within);
+            request = request.timeout(within.min(self.timeout));
         }
         if let Some(token) = token {
             let mut value = reqwest::header::HeaderValue::from_str(&format!("token {token}"))

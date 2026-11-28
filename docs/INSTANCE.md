@@ -1072,9 +1072,15 @@ under a minute instead of building the app and running its campaign.
   built and verified by a successful app CI push run on main whose current
   attempt stored it, and the forge's archive of that run's own commit has
   exactly this run's `app/` source inputs, computed by the function a deploy
-  binds its own commit's archive with. A main commit that plants its archive
-  under another tree's key is therefore refused, and a later commit with that
-  tree never reuses it.
+  binds its own commit's archive with. The key's SDK and cases are likewise
+  only the receipt's claim, so the run must also have run this run's
+  `<org>/day2-ci` workflow commit: that rendered workflow fixed the app's SDK,
+  tooling distribution and cases, so the run's own create-only upload took
+  exactly the name a result for it would be found under, and one planted
+  there for it would have collided with it. A main commit that plants its
+  archive under another tree's key, or under a key of an SDK the app has not
+  selected yet, is therefore refused, and a later commit never reuses it. A
+  re-render of the workflow therefore starts reuse over.
 - **Run.** `DIRECTORY/event.json` must be this run's record, checked as
   [store](#store) checks it, and `DIRECTORY/reuse` must not exist yet.
 - **Key.** `<sdk>/<source inputs>-<cases>/` from `DAY2_CI_SDK`, the source
@@ -1103,9 +1109,10 @@ under a minute instead of building the app and running its campaign.
   4. For each stored attempt, newest run first (then newest attempt), at most
      8, the recipe runs its custody steps until one refuses it:
      1. `candidate`: the forge's record of that run must be app CI's scoped
-        `verification.yml` run of a push on main, the run asked for, with its
-        current attempt the stored one, terminal and successful. This run's
-        own earlier attempt is never reused.
+        `verification.yml` run of a push on main, the run asked for, of this
+        run's `<org>/day2-ci` workflow commit, with its current attempt the
+        stored one, terminal and successful. This run's own earlier attempt is
+        never reused.
      2. `source`: the forge's archive of that run's commit (`GET
         /repos/<org>/<id>/archive/<commit>.tar.gz`, at most 64 MiB, as fetch
         and deploy read one) must have exactly this run's `app/` source
@@ -1124,8 +1131,8 @@ under a minute instead of building the app and running its campaign.
      (`instance_source::app_ci`). Reuse differs from a deploy in what it
      selects: a deploy takes only the newest scoped run for its commit and
      reads the CI repository's ID from `<org>/day2-ci`; reuse accepts any
-     current, successful, source-bound attempt under the key and takes the
-     ID from this run's own scoped record.
+     current, successful, source-bound attempt of this run's workflow commit
+     under the key and takes the ID from this run's own scoped record.
   5. `result`: `DIRECTORY/reuse/` (0700) with the reused `app.tar.gz` and
      `receipt.json` (the stored bytes) and, last, `reuse.json`: `format` (1),
      `reused`, `reason` (why nothing was reused, else null) and `source` (the
@@ -1138,16 +1145,20 @@ under a minute instead of building the app and running its campaign.
   too. A step that would begin later misses without a request.
 - **Misses.** Absence under the key, every stored attempt refused, a read that
   stayed transient after its retries, the deadline, and a refused mint or
-  exchange (store fails on those itself) end the lookup. Each is recorded as
-  the reason and the command succeeds, so check builds as it always does. A
+  exchange (store fails on those itself), and a listing reply the bucket's
+  contents shaped (too large, undecodable, a name outside the key), which any
+  writer under the key could cause, end the lookup. Each is recorded as the
+  reason and the command succeeds, so check builds as it always does. A
+  refused mint or exchange is recorded by its step only: provider text never
+  enters the record. A
   stored attempt refused by a custody check, or by a read the forge or the
   bucket refuses outright (a run or archive the forge no longer has, an
   object GCS refuses), refuses only that attempt; the next is tried.
 - **Failures** exit 6 (`ci_reuse_failed`), because they are misconfiguration
   that a rebuild would hide: an unusable request, run record or directory; a
   missing or invalid job token or store input; this run's own forge record
-  refused outright (401, 403, 404) or not app CI's scoped run of this push; a
-  listing GCS refuses outright.
+  refused outright (401, 403, 404), not app CI's scoped run of this push, or
+  without its workflow commit; a listing GCS refuses outright (401, 403, 404).
 - **Report** (pinned by `cli/fixtures/ci-reuse-report.json`): the run,
   `reused` and `reason`, the `bucket` and `key`, the stored attempts `listed`,
   each attempt `tried` with its verdict, the `source` and the `output`
@@ -1168,7 +1179,9 @@ DIRECTORY/reuse`; `--reuse` with a base tree is refused.
   one; its source inputs are `HEAD/app`'s, recomputed; its cases are `CASES`
   and its seed 42; its `sdk_distribution` is this tooling image's own
   precompiled distribution (identity and size); the archive is the receipt's;
-  and the record's objects are under this key. Any failure exits 6 (`the
+  and the record's object names end in this key's
+  `<source inputs>-<cases>/<run>/<attempt>/` (check knows no SDK digest or
+  bucket; reuse, which does, chose them). Any failure exits 6 (`the
   reused result fails verification`): only a bad reuse record can produce one,
   so it is never a silent rebuild.
 - **Then** the JavaScript, Roc format and extension checks run; the native
