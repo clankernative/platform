@@ -1883,7 +1883,7 @@ mod tests {
 
     #[test]
     fn instance_render_without_forge_oidc_is_unchanged() {
-        // Golden: fixtures/instance-render-roots.json is this spec's render from before app CI's stacks existed.
+        // Golden: fixtures/instance-render-roots.json is this spec's render without forge.oidc.
         let scratch = Scratch::new();
         fs::write(scratch.0.join("day2.json"), spec_without_oidc()).unwrap();
         let directory = scratch.0.to_str().unwrap();

@@ -37,7 +37,7 @@
     },
     "root": "app-edge",
     "stack": "deploy/gke/stacks/app-edge",
-    "tfvars_json": "{\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace_prefix\":\"app-\",\"domain\":\"go.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\",\"user:grace@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}"
+    "tfvars_json": "{\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace_prefix\":\"app-\",\"domain\":\"go.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\",\"user:grace@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"],\"public_download_paths\":[\"/downloads/go.crx\",\"/downloads/updates.xml\"]}"
   },
   {
     "app_id": "home",
@@ -47,7 +47,7 @@
     },
     "root": "app-edge",
     "stack": "deploy/gke/stacks/app-edge",
-    "tfvars_json": "{\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace_prefix\":\"app-\",\"domain\":\"home.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\",\"user:grace@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}"
+    "tfvars_json": "{\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace_prefix\":\"app-\",\"domain\":\"home.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\",\"user:grace@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\",\"user:grace@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"],\"public_download_paths\":[]}"
   },
   {
     "app_id": "go",

@@ -80,6 +80,8 @@ InstanceSpec :: {
 	Extension : {
 		id : Str,
 		update_url : Str,
+
+		## The CRX and update manifest paths, sorted: exactly the app edge's `public_download_paths`.
 		downloads : List(Str),
 		signing_secret : Str,
 	}
@@ -274,7 +276,7 @@ derive_app = |org, domain, project, registry, apply_identity, bound| {
 			Pinned(extension_id) => Ok({
 				id: extension_id,
 				update_url: "https://${hostname}/downloads/updates.xml",
-				downloads: ["/downloads/${id}.crx", "/downloads/updates.xml"],
+				downloads: ["/downloads/${id}.crx", "/downloads/updates.xml"].sort_with(Names.order),
 				signing_secret: "${id}-chrome-extension-signing-key",
 			})
 		},
@@ -721,6 +723,31 @@ expect match InstanceSpec.from_json(sample) {
 								})
 	}
 	Err(_) => Bool.False
+}
+
+# The download paths are sorted, so an app whose name sorts after `updates` lists its update manifest first.
+expect {
+	wiki =
+		sample
+			.replace_first("\"home\":", "\"wiki\":")
+			.replace_first(
+				"\"manual\",\"extension\":null",
+				"\"manual\",\"extension\":\"abcdefghijklmnopabcdefghijklmnop\"",
+			)
+	match InstanceSpec.from_json(wiki) {
+		Ok(spec) => match spec.derived().apps {
+			[_, bound] =>
+				bound.extension
+					== Ok({
+						id: "abcdefghijklmnopabcdefghijklmnop",
+						update_url: "https://wiki.apps.example.com/downloads/updates.xml",
+						downloads: ["/downloads/updates.xml", "/downloads/wiki.crx"],
+						signing_secret: "wiki-chrome-extension-signing-key",
+					})
+			_ => Bool.False
+		}
+		Err(_) => Bool.False
+	}
 }
 
 expect match InstanceSpec.from_json(sample) {

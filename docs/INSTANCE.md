@@ -154,7 +154,7 @@ Nothing below can be configured, restated or overridden.
 | App backups | `<project>-<id>-backups` |
 | App CI results | `<project>-<id>-ci`, where the required workflow's store step writes; in the app's `app-edge` root when `forge.oidc` is set |
 | App resources | from `size`: `standard` 512 MiB, `large` 2048 MiB; both 1000m CPU, 1024 processes, 4 concurrent requests, 30 s shutdown and a 5 GiB SQLite volume |
-| Extension downloads | `/downloads/<id>.crx` and `/downloads/updates.xml`, when `extension` is set |
+| Extension downloads | `/downloads/<id>.crx` and `/downloads/updates.xml`, when `extension` is set: the app edge's `public_download_paths`, sorted, and the only paths that bypass IAP |
 | Extension update URL | `https://<id>.<domains.apps>/downloads/updates.xml`, when `extension` is set |
 | Extension signing key | Secret Manager secret `<id>-chrome-extension-signing-key`, when `extension` is set |
 
@@ -221,7 +221,7 @@ size preset or a fixed platform constant:
 | `project` | `project_id`, `region`, `state_bucket_name`, `state_prefixes`; `app_ci` with `forge.oidc` |
 | `cluster` | `project_id`, `region`, `zone`, `cluster_name`, `cluster_labels`, `subnet_cidr`, `pod_cidr`, `service_cidr`, `shared_node_pod_pids_limit` |
 | `tenancy` | `kube_context`, `app_namespace_prefix` |
-| `app-edge` | `project_id`, `region`, `cluster_name`, `cluster_location`, `kube_context`, `app_id`, `namespace_prefix`, `domain`, `iap_members`, `deployer_subjects`, `offsite_backup_readers`, `sqlite_storage_gb`, `storage_class_name`, `kube_dns_service_ip`, `cluster_cidrs`; `app_ci` with `forge.oidc` |
+| `app-edge` | `project_id`, `region`, `cluster_name`, `cluster_location`, `kube_context`, `app_id`, `namespace_prefix`, `domain`, `iap_members`, `deployer_subjects`, `offsite_backup_readers`, `sqlite_storage_gb`, `storage_class_name`, `kube_dns_service_ip`, `cluster_cidrs`, `public_download_paths` (empty without `extension`); `app_ci` with `forge.oidc` |
 | `day2-app` | `kube_context`, `app_id`, `namespace`, `installation`, `environment`, `hosted_domain`, `admins`, `edge_origin`, `runtime_resources`, `pod_pids_limit`, `backup_bucket` |
 
 - **People.** Only the `operators` deploy an app by hand
@@ -251,7 +251,6 @@ it:
 - node counts, the Cloud Asset API opt-in and other project or cluster choices;
 - discovered IDs (`project_number`, `cloudflare_zone_id`,
   `backend_service_name`);
-- extension download routes (step 4);
 - per-app extras: runtime identities, secrets, provider credentials, resource
   catalogs and policies, schedules, pod labels and guardrail overrides
   (`container_max`, `resource_guardrails`).
