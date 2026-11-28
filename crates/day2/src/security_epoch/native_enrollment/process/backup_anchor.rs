@@ -16,7 +16,7 @@ use crate::security_epoch::{
 use anyhow::{Context, Result, ensure};
 use day2_capabilities::Digest;
 use rustix::{
-    fd::AsRawFd,
+    fd::{AsFd, AsRawFd},
     fs::{Mode, OFlags},
     net::{
         AddressFamily, KernelPidVisibility, ReceivedPidfdRights, ReceivedPidfdRightsPacket,
@@ -38,6 +38,95 @@ pub(in crate::security_epoch::native_enrollment) struct ScheduledJobSender {
 }
 
 impl ScheduledJobSender {
+    /// Fixed observer Bind only. Forward the ORIGINAL message PIDFD and SAME
+    /// accepted socket as exactly two rights; never expose either descriptor.
+    /// The issuer validates this pair and does not read the Submit stream.
+    pub(in crate::security_epoch::native_enrollment) fn send_observation_bind(
+        &mut self,
+        issuer: &File,
+        packet: &crate::security_epoch::native_enrollment::protocol::Packet,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        use crate::security_epoch::native_enrollment::protocol::{MAX_PACKET, Packet};
+        use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
+        let requested = (|| {
+            self.check(original)?;
+            ensure!(
+                matches!(packet, Packet::BackupObserveBind { .. }),
+                "backup_observer_bind_purpose"
+            );
+            let bytes = serde_json::to_vec(packet)?;
+            ensure!(
+                !bytes.is_empty() && bytes.len() <= MAX_PACKET,
+                "backup_observer_bind_bound"
+            );
+            let rights = [self.process.pidfd.as_fd(), self.socket.as_fd()];
+            loop {
+                original.remaining()?;
+                // Rebuild unsent ancillary storage on AGAIN/INTR; a successful
+                // or partial send is never repeated or treated as unapplied.
+                let mut space =
+                    [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(2))];
+                let mut ancillary = SendAncillaryBuffer::new(&mut space);
+                ensure!(
+                    ancillary.push(SendAncillaryMessage::ScmRights(&rights)),
+                    "backup_observer_rights_bound"
+                );
+                match rustix::net::sendmsg(
+                    issuer,
+                    &[std::io::IoSlice::new(&bytes)],
+                    &mut ancillary,
+                    SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
+                ) {
+                    Ok(count) => {
+                        ensure!(count == bytes.len(), "backup_observer_partial_bind");
+                        break;
+                    }
+                    Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {
+                        crate::security_epoch::native_enrollment::channel::wait(
+                            issuer,
+                            rustix::event::PollFlags::OUT,
+                            original,
+                        )?
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok(())
+        })();
+        let checked = self.check(original);
+        if requested.is_err() || checked.is_err() {
+            self.refused = true;
+            original.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    /// Compare supplied historical DATA with the real retained message actor.
+    /// This returns no actor/descriptor or native authority to the caller.
+    pub(in crate::security_epoch::native_enrollment) fn require_process_data(
+        &mut self,
+        expected: &ProcessData,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check(original)?;
+            ensure!(
+                *expected == self.process.data,
+                "backup_observer_job_changed"
+            );
+            Ok(())
+        })();
+        let checked = self.check(original);
+        if requested.is_err() || checked.is_err() {
+            self.refused = true;
+            original.refuse();
+        }
+        requested?;
+        checked
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn receive(
         received: rustix::net::ReceivedPidfdPacket,
         socket: Rc<File>,

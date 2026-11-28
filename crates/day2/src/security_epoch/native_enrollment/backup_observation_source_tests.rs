@@ -101,6 +101,26 @@ fn actual_submit_clock_guard_keeps_narrower_ceiling_and_refuses_retirement() {
     assert!(request_guard.check(&mut request).is_err());
 }
 
+fn socket_resource_source(source: &str) -> String {
+    let mut file = syn::parse_file(source).unwrap();
+    let mut removed = 0;
+    file.items.retain_mut(|item| {
+        let syn::Item::Impl(item) = item else { return true; };
+        if matches!(&*item.self_ty, syn::Type::Path(ty) if ty.path.is_ident("ObservedScheduledBackupSubmit")) {
+            removed += 1; return false;
+        }
+        if matches!(&*item.self_ty, syn::Type::Path(ty) if ty.path.is_ident("CapturedScheduledBackupSubmit")) {
+            item.items.retain(|member| {
+                let remove = matches!(member, syn::ImplItem::Fn(method) if method.sig.ident=="observe_issuer");
+                removed += usize::from(remove); !remove
+            });
+        }
+        true
+    });
+    assert_eq!(removed, 3, "exact separately checked client/check/drop");
+    canonical(file.to_token_stream()).to_string()
+}
+
 fn socket_resource_contract(socket: &str, directory: &str, birth: &str) -> bool {
     [
         "const PATH: &str = \"/run/day2-native-enrollment/scheduled-backup/request.sock\";",
@@ -153,12 +173,7 @@ fn socket_resource_contract(socket: &str, directory: &str, birth: &str) -> bool 
 
 #[test]
 fn dedicated_socket_keeps_fixed_child_actual_name_original_posts_and_no_permission_factory() {
-    let socket = canonical(
-        syn::parse_file(include_str!("channel/scheduled_backup.rs"))
-            .unwrap()
-            .to_token_stream(),
-    )
-    .to_string();
+    let socket = socket_resource_source(include_str!("channel/scheduled_backup.rs"));
     let directory = canonical(
         syn::parse_file(include_str!("storage_socket_directory.rs"))
             .unwrap()
@@ -298,6 +313,7 @@ fn submit_contract(receive: &str, check: &str, sender_receive: &str, sender_chec
         ].iter().all(|needle| sender_check.contains(&fragment(needle)))
         && !receive.contains(&fragment("NativeAcquisition::begin"))
         && !receive.contains("recv_pidfd_rights_packet")
+        && !receive.contains("receive_issuer")
 }
 
 #[test]
@@ -310,6 +326,18 @@ fn actual_submit_consumes_connection_and_keeps_same_original_and_kernel_sender()
     let sender_check = selected_method(sender, "ScheduledJobSender", "check");
     assert!(submit_contract(
         &receive,
+        &check,
+        &sender_receive,
+        &sender_check
+    ));
+    let changed = receive.replacen(
+        &fragment("self.check_resources()?;"),
+        &fragment("self.check_resources()?; channel.receive_issuer(original)?;"),
+        1,
+    );
+    assert_ne!(changed, receive);
+    assert!(!submit_contract(
+        &changed,
         &check,
         &sender_receive,
         &sender_check
@@ -633,4 +661,278 @@ fn actual_linux_service_keeps_production_items_before_inline_test_modules() {
     }
     actual.items.extend(moved);
     assert!(!ordered(&actual));
+}
+
+#[test]
+fn completed_observer_cursor_is_same_original_and_has_no_later_transport_step() {
+    use super::handshake::{Actor, Observation, Protocol, Transcript, Transport};
+    use day2_capabilities::Digest;
+    use std::time::Duration;
+    let at = |now| Observation {
+        domain: Digest::new(b"same-real-original-data"),
+        origin: Duration::from_secs(100),
+        deadline: Duration::from_secs(105),
+        now: Duration::from_secs(now),
+    };
+    let mut complete = Transcript::new(Protocol::Enrollment, Actor::Client);
+    for _ in 0..4 {
+        let (direction, frame) = complete.next().unwrap();
+        complete.begin(direction, at(100)).unwrap();
+        complete.delivered(frame, at(100)).unwrap();
+    }
+    complete
+        .require_completed_backup_observation_data(at(101))
+        .unwrap();
+    assert!(complete.complete());
+    assert!(complete.next().is_none());
+    // Ordinary peer EOF has no new frame. No poll/read/transport operation is
+    // called by the completed comparison check, and it remains local DATA.
+    complete
+        .require_completed_backup_observation_data(at(102))
+        .unwrap();
+    for cut in 0..6 {
+        let mut changed = complete.clone();
+        let mut observed = at(103);
+        match cut {
+            0 => observed.domain = Digest::new(b"another-original"),
+            1 => observed.origin = Duration::from_secs(99),
+            2 => observed.deadline = Duration::from_secs(106),
+            3 => observed.now = Duration::from_secs(105),
+            4 => observed.now = Duration::from_secs(101),
+            _ => changed.refuse(),
+        }
+        assert!(
+            changed
+                .require_completed_backup_observation_data(observed)
+                .is_err()
+        );
+        assert!(
+            changed
+                .require_completed_backup_observation_data(at(103))
+                .is_err()
+        );
+    }
+    for count in 0..4 {
+        let mut partial = Transcript::new(Protocol::Enrollment, Actor::Client);
+        for _ in 0..count {
+            let (direction, frame) = partial.next().unwrap();
+            partial.begin(direction, at(100)).unwrap();
+            partial.delivered(frame, at(100)).unwrap();
+        }
+        assert!(
+            partial
+                .require_completed_backup_observation_data(at(101))
+                .is_err()
+        );
+    }
+    let mut busy = Transcript::new(Protocol::Enrollment, Actor::Client);
+    let (direction, _) = busy.next().unwrap();
+    busy.begin(direction, at(100)).unwrap();
+    busy.transport(Transport::WouldBlock, at(100)).unwrap();
+    assert!(
+        busy.require_completed_backup_observation_data(at(101))
+            .is_err()
+    );
+}
+
+fn completed_channel_contract(source: &str) -> bool {
+    let mut cursor = 0;
+    for expected in [
+        "self.original.check(original)?;",
+        "!self.channel.refused.get()",
+        "require_idle_socket_profile(&self.channel.socket)?;",
+        "net::sockopt::socket_passcred(&self.channel.socket)?",
+        "net::sockopt::socket_passpidfd(&self.channel.socket)?",
+        "fcntl_getfl(&self.channel.socket)?.contains(OFlags::NONBLOCK)",
+        "require_completed_backup_observation_data(Channel::observation(original))?;",
+        "original.remaining()?;",
+        "self.refuse(); original.refuse();",
+    ] {
+        let expected = fragment(expected);
+        let Some(at) = source[cursor..].find(&expected) else {
+            return false;
+        };
+        cursor += at + expected.len();
+    }
+    ![
+        "require_connected",
+        "idle_open",
+        "poll",
+        "recv",
+        "receive",
+        "send",
+        "wait",
+        "connect",
+    ]
+    .iter()
+    .any(|forbidden| source.contains(forbidden))
+        && !source.contains(&fragment("NativeAcquisition::begin"))
+}
+
+#[test]
+fn actual_completed_observation_channel_has_no_post_grant_io_or_hup_dependency() {
+    let socket = include_str!("channel/scheduled_backup.rs");
+    let checked = selected_method(socket, "CompletedBackupObservationChannel", "check");
+    assert!(completed_channel_contract(&checked));
+    for extra in [
+        "super::require_connected(&self.channel.socket, original)?;",
+        "super::idle_open(&self.channel.socket)?;",
+        "rustix::event::poll(&mut fds, None)?;",
+        "self.channel.receive_issuer(original)?;",
+        "self.channel.send(packet, original)?;",
+        "let _fresh = NativeAcquisition::begin(5)?;",
+    ] {
+        let changed = checked.replacen(
+            &fragment("original.remaining()?;"),
+            &fragment(&format!("{extra} original.remaining()?;")),
+            1,
+        );
+        assert_ne!(changed, checked);
+        assert!(!completed_channel_contract(&changed));
+    }
+    let ctor = selected_method(socket, "Channel", "complete_backup_observation");
+    assert!(ctor.contains(&fragment("mut self, original: &mut NativeAcquisition")));
+    assert!(ctor.contains(&fragment(
+        "let mut guard = BackupSubmitOriginal::capture(original)?;"
+    )));
+    assert!(ctor.contains(&fragment(
+        "require_completed_backup_observation_data(Self::observation(original))?;"
+    )));
+    assert!(ctor.contains(&fragment(
+        "CompletedBackupObservationChannel { channel: self, original: guard }"
+    )));
+    assert!(!ctor.contains(&fragment("NativeAcquisition::begin")));
+}
+
+fn issuer_client_contract(client: &str, check: &str, sender: &str) -> bool {
+    let mut next = 0;
+    for required in [
+        "self.check(original)?;",
+        "let mut same = stage.capture_same_owner()?;",
+        "same.meet_current_read_view(stage, original)?;",
+        "let identity = stage.storage()?.backup_observer_identity_data(original)?;",
+        "let intent = self.intent_data(original)?;",
+        "protocol::nonce(\"scheduled-backup-observe-request\")?",
+        "Channel::connect(original)?",
+        "Packet::BackupObserveHello",
+        "let (packet, mut nonce_peer) = channel.receive_issuer(original)?;",
+        "nonce_peer.bind(&identity.certificate, &identity.policy, original)?;",
+        "same.meet_current_read_view(stage, original)?;",
+        "self.check(original)?;",
+        "stage.storage()?.sign_backup_observer_bind(&identity, &intent, (&request, &challenge), original)?;",
+        "channel.send_backup_observe_bind(&mut self, &Packet::BackupObserveBind { request: request.clone(), challenge: challenge.clone(), signature }, original)?;",
+        "let (packet, mut grant_peer) = channel.receive_issuer(original)?;",
+        "grant_peer.bind(&identity.certificate, &identity.policy, original)?;",
+        "observation.data.request == request && observation.data.challenge == challenge",
+        "let channel = channel.complete_backup_observation(original)?;",
+        "observed.check(stage, original)?;",
+        "stage.check_serving_acquisition(original)",
+        "stage.refuse_serving(); original.refuse();",
+    ] {
+        let required = fragment(required);
+        let Some(at) = client[next..].find(&required) else {
+            return false;
+        };
+        next += at + required.len();
+    }
+    ["self.same.meet_current_read_view(stage, original)?;", "self.submit.check(original)?;", "let identity = stage.storage()?.backup_observer_identity_data(original)?;", "identity == self.identity", "self.nonce_peer.bind(&identity.certificate, &identity.policy, original)?;", "self.grant_peer.bind(&identity.certificate, &identity.policy, original)?;", "self.nonce_peer.check_live(original)?;", "self.grant_peer.check_live(original)?;", "self.observation.verify_data(&identity.policy, &identity.certificate, (&identity.controller, &identity.public_key), &intent, (&self.request, &self.challenge), original.sample()?.elapsed)?;", "self.submit.require_job_data(&self.observation.data.job, original)?;", "self.channel.check(original)?;", "stage.check_serving_acquisition(original)", "self.refuse(); stage.refuse_serving(); original.refuse();"]
+        .iter().all(|required| check.contains(&fragment(required)))
+        && ["self.check(original)?;", "Packet::BackupObserveBind { .. }", "bytes.len() <= MAX_PACKET", "let rights = [self.process.pidfd.as_fd(), self.socket.as_fd()];", "rustix::cmsg_space!(ScmRights(2))", "SendAncillaryMessage::ScmRights(&rights)", "count == bytes.len()", "let checked = self.check(original);"]
+            .iter().all(|required| sender.contains(&fragment(required)))
+        && client.matches(&fragment("channel.receive_issuer(original)?")).count() == 2
+        && !["NativeAcquisition::begin", "sign_storage", "backup_source", "finish_known"].iter().any(|forbidden| client.contains(&fragment(forbidden)))
+}
+
+#[test]
+fn actual_issuer_client_retains_submit_receipts_and_purpose_closed_rights() {
+    let source = include_str!("channel/scheduled_backup.rs");
+    let client = selected_method(source, "CapturedScheduledBackupSubmit", "observe_issuer");
+    let check = selected_method(source, "ObservedScheduledBackupSubmit", "check");
+    let sender = selected_method(
+        include_str!("process/backup_anchor.rs"),
+        "ScheduledJobSender",
+        "send_observation_bind",
+    );
+    assert!(issuer_client_contract(&client, &check, &sender));
+    for boundary in [
+        "same.meet_current_read_view(stage, original)?;",
+        "nonce_peer.bind(&identity.certificate, &identity.policy, original)?;",
+        "grant_peer.bind(&identity.certificate, &identity.policy, original)?;",
+        "observed.check(stage, original)?;",
+    ] {
+        let changed = client.replacen(&fragment(boundary), &fragment("unrelated()?;"), 1);
+        assert_ne!(changed, client);
+        assert!(!issuer_client_contract(&changed, &check, &sender));
+    }
+    for boundary in [
+        "self.nonce_peer.check_live(original)?;",
+        "self.grant_peer.check_live(original)?;",
+        "identity == self.identity",
+        "self.submit.require_job_data(&self.observation.data.job, original)?;",
+        "self.channel.check(original)?;",
+    ] {
+        let changed = check.replacen(&fragment(boundary), &fragment("unrelated()?;"), 1);
+        assert_ne!(changed, check);
+        assert!(!issuer_client_contract(&client, &changed, &sender));
+    }
+    for (from, to) in [
+        (
+            "[self.process.pidfd.as_fd(), self.socket.as_fd()]",
+            "[self.socket.as_fd(), self.process.pidfd.as_fd()]",
+        ),
+        ("ScmRights(2)", "ScmRights(1)"),
+        (
+            "[self.process.pidfd.as_fd(), self.socket.as_fd()]",
+            "[self.process.pidfd.as_fd(), self.socket.as_fd(), issuer.as_fd()]",
+        ),
+        ("count == bytes.len()", "true"),
+    ] {
+        let changed = sender.replacen(&fragment(from), &fragment(to), 1);
+        assert_ne!(changed, sender);
+        assert!(!issuer_client_contract(&client, &check, &changed));
+    }
+}
+
+fn fixed_observer_data_contract(identity: &str, signer: &str) -> bool {
+    ["self.check_storage_acquisition(original)?;", "self.scheduled_backup_root_selection()?;", "self.stage.owner.current.try_borrow()", "BackupObserverIdentityData { policy: self.stage.owner.policy.clone(), certificate: self.stage.owner.certificate.clone(), controller, public_key: self.stage.owner.key.public() }", "self.stage.refuse_serving(); original.refuse();"]
+        .iter().all(|required| identity.contains(&fragment(required)))
+        && identity.matches(&fragment("self.check_storage_acquisition(original)")).count() == 2
+        && ["let current = self.backup_observer_identity_data(original)?;", "current == *expected", "crate::security_epoch::scheduled_backup::requester::intent_digest_data(intent)?", "self.stage.owner.key.sign(\"scheduled-backup-observe-bind\", &(&current.policy.digest()?, &current.public_key, nonces.0, nonces.1, &intent))", "self.check_storage_acquisition(original)", "self.stage.refuse_serving(); original.refuse();"]
+            .iter().all(|required| signer.contains(&fragment(required)))
+        && !identity.contains(&fragment("NativeAcquisition::begin")) && !signer.contains(&fragment("NativeAcquisition::begin"))
+}
+
+#[test]
+fn actual_observer_projection_and_signer_use_only_this_checked_controller_and_fixed_body() {
+    let source = include_str!("owner/storage.rs");
+    let owner = syn::parse_str::<syn::Type>("EnrolledStorageStage<'_, '_>")
+        .unwrap()
+        .to_token_stream()
+        .to_string();
+    let identity = selected_method(source, &owner, "backup_observer_identity_data");
+    let signer = selected_method(source, &owner, "sign_backup_observer_bind");
+    assert!(fixed_observer_data_contract(&identity, &signer));
+    for (from, to) in [
+        ("self.scheduled_backup_root_selection()?;", "unrelated()?;"),
+        (
+            "self.check_storage_acquisition(original)?;",
+            "unrelated()?;",
+        ),
+        ("self.stage.owner.key.public()", "caller_key()"),
+    ] {
+        let changed = identity.replacen(&fragment(from), &fragment(to), 1);
+        assert_ne!(changed, identity);
+        assert!(!fixed_observer_data_contract(&changed, &signer));
+    }
+    for (from, to) in [
+        ("current == *expected", "true"),
+        ("intent_digest_data(intent)?", "unbounded_digest(intent)?"),
+        ("\"scheduled-backup-observe-bind\"", "caller_purpose"),
+        ("&current.public_key", "&expected.public_key"),
+        ("self.check_storage_acquisition(original)", "unrelated()"),
+    ] {
+        let changed = signer.replacen(&fragment(from), &fragment(to), 1);
+        assert_ne!(changed, signer);
+        assert!(!fixed_observer_data_contract(&identity, &changed));
+    }
 }

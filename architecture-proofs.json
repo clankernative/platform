@@ -151,7 +151,7 @@
     {
       "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
       "scope": "const",
-      "fingerprint": "sha256:6dc58505828c4f25a62347be6c81a9081972d09a6f719a6978a37efb8fa93897",
+      "fingerprint": "sha256:c538a24541ba736d8caede4d5d765342a8220db2924ac073cfc1169883339a65",
       "registration": null
     },
     {
@@ -8690,7 +8690,11 @@
       "kind": "private_material",
       "consuming_methods": [],
       "methods": [
-        "fn check (& mut self , original : & mut NativeAcquisition) -> Result < () >"
+        "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , original : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn intent_data (& mut self , original : & mut NativeAcquisition) -> Result < Vec < u8 > >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn observe_issuer (mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < ObservedScheduledBackupSubmit >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_job_data (& mut self , expected : & crate :: security_epoch :: native_enrollment :: protocol :: ProcessData , original : & mut NativeAcquisition) -> Result < () >"
       ],
       "factories": [
         {
@@ -8701,10 +8705,88 @@
       "material_uses": [
         {
           "owner": "CapturedScheduledBackupSubmit",
-          "signature": "fn check (& mut self , original : & mut NativeAcquisition) -> Result < () >"
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , original : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "CapturedScheduledBackupSubmit",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn intent_data (& mut self , original : & mut NativeAcquisition) -> Result < Vec < u8 > >"
+        },
+        {
+          "owner": "CapturedScheduledBackupSubmit",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn observe_issuer (mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < ObservedScheduledBackupSubmit >"
+        },
+        {
+          "owner": "CapturedScheduledBackupSubmit",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CapturedScheduledBackupSubmit",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_job_data (& mut self , expected : & crate :: security_epoch :: native_enrollment :: protocol :: ProcessData , original : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "Channel",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn send_backup_observe_bind (& mut self , submit : & mut CapturedScheduledBackupSubmit , packet : & crate :: security_epoch :: native_enrollment :: protocol :: Packet , original : & mut NativeAcquisition) -> Result < () >"
         }
       ],
       "proof_uses": [],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+      "type_name": "CompletedBackupObservationChannel",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , original : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "Channel",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn complete_backup_observation (mut self , original : & mut NativeAcquisition) -> Result < CompletedBackupObservationChannel >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "CompletedBackupObservationChannel",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , original : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "CompletedBackupObservationChannel",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:d3b76571f353d8b05bba772fa3106863f656e9cd0fb33cb532fafa772a5712fb",
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2/src/security_epoch/native_enrollment/channel/scheduled_backup.rs",
+      "type_name": "ObservedScheduledBackupSubmit",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < () >",
+        "fn refuse (& mut self)"
+      ],
+      "factories": [
+        {
+          "owner": "CapturedScheduledBackupSubmit",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn observe_issuer (mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < ObservedScheduledBackupSubmit >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ObservedScheduledBackupSubmit",
+          "signature": "fn refuse (& mut self)"
+        },
+        {
+          "owner": "ObservedScheduledBackupSubmit",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , stage : & mut EnrolledRoleStage < '_ > , original : & mut NativeAcquisition) -> Result < () >"
+        }
+      ],
+      "proof_uses": [],
+      "destructor": "sha256:891cb8734b44eca64a6ef426d5c57683168de3c61e66ebf9d564bb62353b215b",
       "owning_children": []
     },
     {
@@ -10140,7 +10222,9 @@
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_code (& mut self) -> Result < Digest >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_peer_role (& mut self) -> Result < NativeRole >",
         "pub (in crate :: security_epoch :: native_enrollment) fn storage_statement (& mut self) -> Result < StageStatement >",
-        "fn storage_statement_data (& mut self) -> Result < StageStatement >"
+        "fn storage_statement_data (& mut self) -> Result < StageStatement >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn backup_observer_identity_data (& mut self , original : & mut NativeAcquisition) -> Result < BackupObserverIdentityData >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn sign_backup_observer_bind (& mut self , expected : & BackupObserverIdentityData , intent : & [u8] , nonces : (& Digest , & Digest) , original : & mut NativeAcquisition) -> Result < String >"
       ],
       "factories": [
         {
@@ -10584,6 +10668,14 @@
         {
           "owner": "RestoredWriterPeer",
           "signature": "pub (super) fn finish_binding_data (& mut self , storage : & mut EnrolledStorageStage < '_ , '_ > , loan : & mut crate :: security_epoch :: bootstrap :: RestoreFinalInstallationLoan < '_ , '_ , '_ >) -> Result < (super :: super :: protocol :: RestoreIssuerCompletionData , super :: super :: restore_peer_wire :: RestoreAppStatement ,) >"
+        },
+        {
+          "owner": "EnrolledStorageStage < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn backup_observer_identity_data (& mut self , original : & mut NativeAcquisition) -> Result < BackupObserverIdentityData >"
+        },
+        {
+          "owner": "EnrolledStorageStage < '_ , '_ >",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn sign_backup_observer_bind (& mut self , expected : & BackupObserverIdentityData , intent : & [u8] , nonces : (& Digest , & Digest) , original : & mut NativeAcquisition) -> Result < String >"
         }
       ],
       "proof_uses": [],
@@ -14585,7 +14677,9 @@
       "methods": [
         "pub (in crate :: security_epoch :: native_enrollment) fn check (& mut self , original : & mut NativeAcquisition) -> Result < () >",
         "pub (in crate :: security_epoch :: native_enrollment) fn receive (received : rustix :: net :: ReceivedPidfdPacket , socket : Rc < File > , expected_code : & Digest , original : & mut NativeAcquisition) -> Result < Self >",
-        "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)"
+        "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)",
+        "pub (in crate :: security_epoch :: native_enrollment) fn require_process_data (& mut self , expected : & ProcessData , original : & mut NativeAcquisition) -> Result < () >",
+        "pub (in crate :: security_epoch :: native_enrollment) fn send_observation_bind (& mut self , issuer : & File , packet : & crate :: security_epoch :: native_enrollment :: protocol :: Packet , original : & mut NativeAcquisition) -> Result < () >"
       ],
       "factories": [
         {
@@ -14601,6 +14695,14 @@
         {
           "owner": "ScheduledJobSender",
           "signature": "pub (in crate :: security_epoch :: native_enrollment) fn refuse (& mut self)"
+        },
+        {
+          "owner": "ScheduledJobSender",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn require_process_data (& mut self , expected : & ProcessData , original : & mut NativeAcquisition) -> Result < () >"
+        },
+        {
+          "owner": "ScheduledJobSender",
+          "signature": "pub (in crate :: security_epoch :: native_enrollment) fn send_observation_bind (& mut self , issuer : & File , packet : & crate :: security_epoch :: native_enrollment :: protocol :: Packet , original : & mut NativeAcquisition) -> Result < () >"
         }
       ],
       "proof_uses": [],

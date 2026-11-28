@@ -2,11 +2,15 @@
 //! The Job mounts only this fixed child, not storage or enrollment sockets.
 //! A connected socket or matching pathname grants no source permission.
 
-use super::{configure, idle_open, require_idle_socket_profile, wait};
+use super::{Channel, Direction, configure, idle_open, require_idle_socket_profile, wait};
 use crate::security_epoch::{
     native_clock::NativeAcquisition,
     native_enrollment::{
-        EnrolledRoleStage, owner::BackupSubmitOriginal, process::backup_anchor::ScheduledJobSender,
+        EnrolledRoleStage, SameEnrolledOwner,
+        issuer_peer::IssuerReceipt,
+        owner::BackupSubmitOriginal,
+        process::backup_anchor::ScheduledJobSender,
+        protocol::{BackupObserverIdentityData, SignedBackupObservation},
         storage_socket_directory::ScheduledBackupSocketDirectory,
     },
 };
@@ -58,6 +62,28 @@ pub(in crate::security_epoch::native_enrollment) struct CapturedScheduledBackupS
     refused: bool,
 }
 
+/// Consumed, completed one-shot issuer exchange. The peer may close normally;
+/// no method can send, receive, reconnect or infer the issuer's later posts.
+pub(in crate::security_epoch::native_enrollment) struct CompletedBackupObservationChannel {
+    channel: Channel,
+    original: BackupSubmitOriginal,
+}
+
+/// Real completed comparison, never CREATE/request/source admission. No DATA
+/// can construct this actual Submit/issuer-process/Controller continuity owner.
+pub(in crate::security_epoch::native_enrollment) struct ObservedScheduledBackupSubmit {
+    submit: CapturedScheduledBackupSubmit,
+    channel: CompletedBackupObservationChannel,
+    nonce_peer: IssuerReceipt,
+    grant_peer: IssuerReceipt,
+    same: SameEnrolledOwner,
+    identity: BackupObserverIdentityData,
+    observation: SignedBackupObservation,
+    request: day2_capabilities::Digest,
+    challenge: day2_capabilities::Digest,
+    refused: bool,
+}
+
 const _: () = {
     macro_rules! assert_not_impl {
         ($owner:ty, $bound:path) => {{
@@ -88,6 +114,8 @@ const _: () = {
     opaque!(ScheduledBackupSocketListener);
     opaque!(ScheduledBackupConnection);
     opaque!(CapturedScheduledBackupSubmit);
+    opaque!(CompletedBackupObservationChannel);
+    opaque!(ObservedScheduledBackupSubmit);
 };
 
 impl ScheduledBackupSocketName {
@@ -323,7 +351,110 @@ impl ScheduledBackupConnection {
 }
 
 impl CapturedScheduledBackupSubmit {
-    fn check(&mut self, original: &mut NativeAcquisition) -> Result<()> {
+    /// Consumes the actual Submit through the one fixed issuer exchange. The
+    /// actual same Controller stage/original and both kernel receipts survive.
+    pub(in crate::security_epoch::native_enrollment) fn observe_issuer(
+        mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        original: &mut NativeAcquisition,
+    ) -> Result<ObservedScheduledBackupSubmit> {
+        use crate::security_epoch::native_enrollment::protocol::{self, Packet};
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<ObservedScheduledBackupSubmit> {
+                self.check(original)?;
+                let mut same = stage.capture_same_owner()?;
+                same.meet_current_read_view(stage, original)?;
+                let identity = stage.storage()?.backup_observer_identity_data(original)?;
+                let intent = self.intent_data(original)?;
+                let policy = identity.policy.digest()?;
+                let request = protocol::nonce("scheduled-backup-observe-request")?;
+                let mut channel = Channel::connect(original)?;
+                channel.send(
+                    &Packet::BackupObserveHello {
+                        policy,
+                        public_key: identity.public_key.clone(),
+                        request: request.clone(),
+                        intent: String::from_utf8(intent.clone())?,
+                    },
+                    original,
+                )?;
+                let (packet, mut nonce_peer) = channel.receive_issuer(original)?;
+                let Packet::BackupObserveNonce {
+                    request: echoed,
+                    challenge,
+                } = packet
+                else {
+                    anyhow::bail!("native_backup_observation_order")
+                };
+                ensure!(echoed == request, "native_backup_observation_request");
+                nonce_peer.bind(&identity.certificate, &identity.policy, original)?;
+                same.meet_current_read_view(stage, original)?;
+                self.check(original)?;
+                let signature = stage.storage()?.sign_backup_observer_bind(
+                    &identity,
+                    &intent,
+                    (&request, &challenge),
+                    original,
+                )?;
+                channel.send_backup_observe_bind(
+                    &mut self,
+                    &Packet::BackupObserveBind {
+                        request: request.clone(),
+                        challenge: challenge.clone(),
+                        signature,
+                    },
+                    original,
+                )?;
+                let (packet, mut grant_peer) = channel.receive_issuer(original)?;
+                let Packet::BackupObserveGrant { observation } = packet else {
+                    anyhow::bail!("native_backup_observation_order")
+                };
+                grant_peer.bind(&identity.certificate, &identity.policy, original)?;
+                ensure!(
+                    observation.data.request == request && observation.data.challenge == challenge,
+                    "native_backup_observation_nonce_changed"
+                );
+                let channel = channel.complete_backup_observation(original)?;
+                let mut observed = ObservedScheduledBackupSubmit {
+                    submit: self,
+                    channel,
+                    nonce_peer,
+                    grant_peer,
+                    same,
+                    identity,
+                    observation: *observation,
+                    request,
+                    challenge,
+                    refused: false,
+                };
+                observed.check(stage, original)?;
+                Ok(observed)
+            },
+        ));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stage.check_serving_acquisition(original)
+        }));
+        if !matches!(&requested, Ok(Ok(_))) || !matches!(&checked, Ok(Ok(()))) {
+            stage.refuse_serving();
+            original.refuse();
+        }
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(observed)) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => {
+                    result?;
+                    Ok(observed)
+                }
+            },
+        }
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn check(
+        &mut self,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
         let requested = (|| {
             ensure!(!self.refused, "backup_submit_refused");
             self.original.check(original)?;
@@ -341,6 +472,215 @@ impl CapturedScheduledBackupSubmit {
             original.refuse();
         }
         requested
+    }
+
+    /// These are the already-submitted public comparison bytes, not private
+    /// snapshot DATA, a role, source owner or descriptor. Copy only after the
+    /// same actual Submit checks; it cannot reconstruct this resource.
+    pub(in crate::security_epoch::native_enrollment) fn intent_data(
+        &mut self,
+        original: &mut NativeAcquisition,
+    ) -> Result<Vec<u8>> {
+        self.check(original)?;
+        Ok(self.intent.clone())
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn require_job_data(
+        &mut self,
+        expected: &crate::security_epoch::native_enrollment::protocol::ProcessData,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.check(original)?;
+            self.sender.require_process_data(expected, original)
+        })();
+        let checked = self.check(original);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+            original.refuse();
+        }
+        requested?;
+        checked
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn refuse(&mut self) {
+        self.refused = true;
+        self.original.refuse();
+        self.sender.refuse();
+        self.connection.refused.set(true);
+    }
+}
+
+impl Channel {
+    pub(in crate::security_epoch::native_enrollment) fn complete_backup_observation(
+        mut self,
+        original: &mut NativeAcquisition,
+    ) -> Result<CompletedBackupObservationChannel> {
+        let mut guard = BackupSubmitOriginal::capture(original)?;
+        let requested = (|| {
+            ensure!(!self.refused.get(), "backup_observer_channel_refused");
+            self.transcript
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("backup_observer_cursor_missing"))?
+                .require_completed_backup_observation_data(Self::observation(original))?;
+            guard.check(original)?;
+            Ok(())
+        })();
+        if requested.is_err() {
+            self.refuse();
+            guard.refuse();
+            original.refuse();
+        }
+        requested?;
+        let mut completed = CompletedBackupObservationChannel {
+            channel: self,
+            original: guard,
+        };
+        completed.check(original)?;
+        Ok(completed)
+    }
+
+    /// The sole two-rights sender is purpose-closed to this actual Submit and
+    /// issuer Bind cursor. No arbitrary descriptor/ancillary API is exposed.
+    pub(in crate::security_epoch::native_enrollment) fn send_backup_observe_bind(
+        &mut self,
+        submit: &mut CapturedScheduledBackupSubmit,
+        packet: &crate::security_epoch::native_enrollment::protocol::Packet,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        use crate::security_epoch::native_enrollment::protocol::Packet;
+        let requested = (|| {
+            ensure!(
+                !self.refused.get() && matches!(packet, Packet::BackupObserveBind { .. }),
+                "backup_observer_bind_purpose"
+            );
+            submit.check(original)?;
+            self.begin_packet(Direction::Send, packet.frame(), original)?;
+            submit
+                .sender
+                .send_observation_bind(&self.socket, packet, original)?;
+            self.packet_delivered(packet.frame(), original)?;
+            Ok(())
+        })();
+        let checked = submit.check(original);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+            submit.refuse();
+            original.refuse();
+        }
+        requested?;
+        checked
+    }
+}
+
+impl CompletedBackupObservationChannel {
+    pub(in crate::security_epoch::native_enrollment) fn check(
+        &mut self,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = (|| {
+            self.original.check(original)?;
+            ensure!(
+                !self.channel.refused.get(),
+                "backup_observer_channel_refused"
+            );
+            require_idle_socket_profile(&self.channel.socket)?;
+            ensure!(
+                net::sockopt::socket_passcred(&self.channel.socket)?
+                    && net::sockopt::socket_passpidfd(&self.channel.socket)?
+                    && rustix::fs::fcntl_getfl(&self.channel.socket)?.contains(OFlags::NONBLOCK),
+                "backup_observer_channel_profile"
+            );
+            self.channel
+                .transcript
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("backup_observer_cursor_missing"))?
+                .require_completed_backup_observation_data(Channel::observation(original))?;
+            original.remaining()?;
+            Ok(())
+        })();
+        if requested.is_err() {
+            self.refuse();
+            original.refuse();
+        }
+        requested
+    }
+
+    pub(in crate::security_epoch::native_enrollment) fn refuse(&mut self) {
+        self.original.refuse();
+        self.channel.refuse();
+    }
+}
+
+impl Drop for CompletedBackupObservationChannel {
+    fn drop(&mut self) {
+        self.refuse();
+    }
+}
+
+impl ObservedScheduledBackupSubmit {
+    pub(in crate::security_epoch::native_enrollment) fn check(
+        &mut self,
+        stage: &mut EnrolledRoleStage<'_>,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+            ensure!(!self.refused, "backup_observation_refused");
+            self.same.meet_current_read_view(stage, original)?;
+            self.submit.check(original)?;
+            let identity = stage.storage()?.backup_observer_identity_data(original)?;
+            ensure!(
+                identity == self.identity,
+                "backup_observer_controller_changed"
+            );
+            self.nonce_peer
+                .bind(&identity.certificate, &identity.policy, original)?;
+            self.grant_peer
+                .bind(&identity.certificate, &identity.policy, original)?;
+            self.nonce_peer.check_live(original)?;
+            self.grant_peer.check_live(original)?;
+            let intent = self.submit.intent_data(original)?;
+            self.observation.verify_data(
+                &identity.policy,
+                &identity.certificate,
+                (&identity.controller, &identity.public_key),
+                &intent,
+                (&self.request, &self.challenge),
+                original.sample()?.elapsed,
+            )?;
+            self.submit
+                .require_job_data(&self.observation.data.job, original)?;
+            self.channel.check(original)?;
+            Ok(())
+        }));
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stage.check_serving_acquisition(original)
+        }));
+        if !matches!(&requested, Ok(Ok(()))) || !matches!(&checked, Ok(Ok(()))) {
+            self.refuse();
+            stage.refuse_serving();
+            original.refuse();
+        }
+        match requested {
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(())) => match checked {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => result,
+            },
+        }
+    }
+
+    fn refuse(&mut self) {
+        self.refused = true;
+        self.submit.refuse();
+        self.channel.refuse();
+    }
+}
+
+impl Drop for ObservedScheduledBackupSubmit {
+    fn drop(&mut self) {
+        self.refuse();
     }
 }
 

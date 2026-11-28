@@ -5682,3 +5682,202 @@ fn actual_app_post_selector_preserves_primary_identity_with_simultaneous_refusal
         }
     }
 }
+
+#[test]
+fn scheduled_observation_signature_binds_actual_comparison_inputs_and_expiry() -> anyhow::Result<()>
+{
+    use super::protocol::{BackupObservationData, RuntimeBinding, SignedBackupObservation};
+    use crate::security_epoch::scheduled_backup::requester;
+    use std::time::Duration;
+    // Synthetic signed DATA only; no retained role, process, source or original
+    // is fabricated. The real receiver separately retains those resources.
+    let root = KeyOwner::generate()?;
+    let issuer = KeyOwner::generate()?;
+    let controller_key = KeyOwner::generate()?.public();
+    let mut policy = policy(&root);
+    // The older general policy fixture uses placeholder namespace UIDs; this
+    // scheduled-workload codec requires the actual UUID shape even in DATA.
+    for role in [
+        &mut policy.bootstrap.app,
+        &mut policy.bootstrap.controller,
+        &mut policy.bootstrap.shell,
+    ] {
+        role.namespace.uid = "00000000-0000-0000-0000-000000000002".into();
+    }
+    let (mut selected, mut intent, mut workload) = requester::comparison_fixture_data()?;
+    selected.scope = policy.bootstrap.scope.clone();
+    selected.cluster = Digest::of(&policy.bootstrap.cluster)?;
+    selected.node_name = policy.runtime.node_name.clone();
+    selected.node = Digest::of(&(
+        "day2-scheduled-backup-node-v1",
+        &policy.runtime.node_name,
+        &policy.runtime.node_uid,
+    ))?;
+    selected.namespace = policy.bootstrap.app.namespace.clone();
+    selected.image = policy.bootstrap.app.container.image.clone();
+    policy.scheduled_backup = Some(selected.clone());
+    policy.validate()?;
+    let controller = process(policy.code(super::NativeRole::EpochController).clone());
+    let mut job = process(selected.executable.clone());
+    job.process += 1;
+    job.start_ticks += 1;
+    intent["slot"]["scope"] = serde_json::to_value(&selected.scope)?;
+    intent["requester"]["cluster"] = serde_json::to_value(&selected.cluster)?;
+    intent["requester"]["node"] = serde_json::to_value(&selected.node)?;
+    intent["requester"]["namespace_uid"] = serde_json::to_value(&selected.namespace.uid)?;
+    intent["requester"]["image"] = serde_json::to_value(&selected.image)?;
+    intent["requester"]["process"] =
+        serde_json::to_value(Digest::of(&("day2-scheduled-backup-process-v1", &job))?)?;
+    intent["transport"]["controller"] = serde_json::to_value(Digest::of(&(
+        "day2-scheduled-backup-controller-v1",
+        &controller_key,
+        &controller,
+    ))?)?;
+    workload.admission_generation = selected.admission_generation_data()?;
+    intent["admission_generation"] = serde_json::to_value(&workload.admission_generation)?;
+    intent["destination"]["prefix"] =
+        serde_json::json!(format!("{}/20261122T170000Z", selected.scope.app.as_str()));
+    let bytes = requester::fixture_intent_bytes(intent)?;
+    let data = IssuerData {
+        policy: policy.digest()?,
+        root_version: policy.root.version.clone(),
+        nonce: Digest::new(b"synthetic-issuer"),
+        public_key: issuer.public(),
+        process: process(policy.issuer_code.clone()),
+        provisioner: process(policy.provisioner_code.clone()),
+    };
+    let certificate = IssuerCertificate {
+        signature: root.sign("issuer-birth", &data)?,
+        data,
+    };
+    let request = Digest::new(b"actual-request");
+    let challenge = Digest::new(b"actual-challenge");
+    let data = BackupObservationData {
+        issuer: certificate.digest()?,
+        policy: policy.digest()?,
+        controller: controller.clone(),
+        controller_key: controller_key.clone(),
+        job: job.clone(),
+        runtime: RuntimeBinding {
+            node_uid: policy.runtime.node_uid.clone(),
+            boot: job.boot.clone(),
+            container: crate::security_epoch::runtime_profile::ContainerFacts {
+                pod_name: workload.pod_name.clone(),
+                pod_uid: workload.pod_uid.clone(),
+                node_name: selected.node_name.clone(),
+                container_name: selected.container.clone(),
+                container_id: workload.container_id.clone(),
+                image: selected.image.clone(),
+                restart_count: 0,
+            },
+        },
+        workload,
+        intent: requester::intent_digest_data(&bytes)?,
+        request: request.clone(),
+        challenge: challenge.clone(),
+        issuer_original: Digest::new(b"synthetic-issuer-original"),
+        origin_ns: 100_000_000_000,
+        deadline_ns: 105_000_000_000,
+    };
+    let signed = SignedBackupObservation {
+        signature: issuer.sign("scheduled-backup-observation", &data)?,
+        data,
+    };
+    let check = |value: &SignedBackupObservation, at| {
+        value.verify_data(
+            &policy,
+            &certificate,
+            (&controller, &controller_key),
+            &bytes,
+            (&request, &challenge),
+            Duration::from_secs(at),
+        )
+    };
+    check(&signed, 100)?;
+    let encoded = serde_json::to_vec(&protocol::Packet::BackupObserveGrant {
+        observation: Box::new(signed.clone()),
+    })?;
+    assert!(encoded.len() <= protocol::MAX_PACKET);
+    let protocol::Packet::BackupObserveGrant {
+        observation: decoded,
+    } = protocol::decode(&encoded)?
+    else {
+        panic!("actual Grant variant required")
+    };
+    check(&decoded, 101)?;
+    let mut unknown: serde_json::Value = serde_json::from_slice(&encoded)?;
+    unknown["observation"]["data"]["unexpected"] = serde_json::json!(true);
+    assert!(protocol::decode(&serde_json::to_vec(&unknown)?).is_err());
+    let mut oversized = encoded.clone();
+    oversized.resize(protocol::MAX_PACKET + 1, b' ');
+    let _: protocol::Packet = serde_json::from_slice(&oversized)?;
+    assert!(protocol::decode(&oversized).is_err());
+    let text = String::from_utf8(encoded)?;
+    let duplicate = text.replacen("\"challenge\":", "\"challenge\":null,\"challenge\":", 1);
+    assert_ne!(duplicate, text);
+    assert!(protocol::decode(duplicate.as_bytes()).is_err());
+    check(&signed, 104)?;
+    for at in [99, 105, 106] {
+        assert!(check(&signed, at).is_err());
+    }
+    // Re-sign incoherent DATA, proving the semantic joins independently of
+    // signature integrity; an unchanged old signature is tested separately.
+    for cut in 0..12 {
+        let mut changed = signed.clone();
+        match cut {
+            0 => changed.data.controller.start_ticks += 1,
+            1 => changed.data.job.start_ticks += 1,
+            2 => changed.data.request = Digest::new(b"another-request"),
+            3 => changed.data.challenge = Digest::new(b"another-challenge"),
+            4 => changed.data.workload.job_uid = "00000000-0000-0000-0000-000000000099".into(),
+            5 => changed.data.workload.restart_count = 1,
+            6 => changed.data.runtime.container.pod_uid = "another-pod".into(),
+            7 => changed.data.runtime.node_uid = "another-node".into(),
+            8 => changed.data.runtime.boot = "another-boot".into(),
+            9 => changed.data.runtime.container.image = Digest::new(b"another-image"),
+            10 => changed.data.origin_ns = changed.data.deadline_ns,
+            _ => changed.data.deadline_ns += 1,
+        }
+        changed.signature = issuer.sign("scheduled-backup-observation", &changed.data)?;
+        assert!(check(&changed, 101).is_err(), "cut {cut}");
+    }
+    for signature in [
+        KeyOwner::generate()?.sign("scheduled-backup-observation", &signed.data)?,
+        issuer.sign("another-purpose", &signed.data)?,
+    ] {
+        let mut forged = signed.clone();
+        forged.signature = signature;
+        assert!(check(&forged, 101).is_err());
+    }
+    let mut tampered = signed.clone();
+    tampered.data.issuer_original = Digest::new(b"another-original");
+    assert!(check(&tampered, 101).is_err());
+    let changed = Digest::new(b"caller-supplied-nonce");
+    assert!(
+        signed
+            .verify_data(
+                &policy,
+                &certificate,
+                (&controller, &controller_key),
+                &bytes,
+                (&changed, &challenge),
+                Duration::from_secs(101)
+            )
+            .is_err()
+    );
+    let mut absent = policy.clone();
+    absent.scheduled_backup = None;
+    assert!(
+        signed
+            .verify_data(
+                &absent,
+                &certificate,
+                (&controller, &controller_key),
+                &bytes,
+                (&request, &challenge),
+                Duration::from_secs(101)
+            )
+            .is_err()
+    );
+    Ok(())
+}

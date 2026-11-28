@@ -1201,12 +1201,17 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
             "listen",
             "accept_with",
             "send",
+            "sendmsg",
+            "recvmsg",
             "recv_pidfd_packet",
+            "recv_pidfd_rights_packet",
             "sockopt",
         ],
         "rustix::net::sockopt" => &[
             "set_socket_passcred",
             "set_socket_passpidfd",
+            "socket_passcred",
+            "socket_passpidfd",
             "socket_type",
             "socket_domain",
             "socket_acceptconn",
@@ -1214,7 +1219,16 @@ fn glob_names(prefix: &str) -> &'static [&'static str] {
         "rustix::event" => &["poll"],
         "rustix::process" => &["getppid"],
         "rustix::fs" => &[
-            "open", "openat", "openat2", "fstatfs", "statx", "fsync", "mkdirat", "fchown", "fchmod",
+            "open",
+            "openat",
+            "openat2",
+            "fstatfs",
+            "statx",
+            "fsync",
+            "mkdirat",
+            "fchown",
+            "fchmod",
+            "fcntl_getfl",
         ],
         "rustix::io" => &["pread", "pwrite", "fcntl_dupfd_cloexec"],
         "nix" => &["sys", "poll"],
@@ -6334,9 +6348,14 @@ fn hazard(target: &str) -> Option<&'static str> {
             | "rustix::net::listen"
             | "rustix::net::accept_with"
             | "rustix::net::send"
+            | "rustix::net::sendmsg"
+            | "rustix::net::recvmsg"
             | "rustix::net::recv_pidfd_packet"
+            | "rustix::net::recv_pidfd_rights_packet"
             | "rustix::net::sockopt::set_socket_passcred"
             | "rustix::net::sockopt::set_socket_passpidfd"
+            | "rustix::net::sockopt::socket_passcred"
+            | "rustix::net::sockopt::socket_passpidfd"
             | "rustix::net::sockopt::socket_type"
             | "rustix::net::sockopt::socket_domain"
             | "rustix::net::sockopt::socket_acceptconn"
@@ -6363,6 +6382,7 @@ fn hazard(target: &str) -> Option<&'static str> {
             | "rustix::fs::mkdirat"
             | "rustix::fs::fchown"
             | "rustix::fs::fchmod"
+            | "rustix::fs::fcntl_getfl"
             | "rustix::io::pread"
             | "rustix::io::pwrite"
             | "rustix::io::fcntl_dupfd_cloexec"
@@ -7891,6 +7911,12 @@ mod tests {
             ("nix::sys::socket", "getsockopt", "network"),
             ("nix::poll", "poll", "scheduling"),
             ("rustix::net", "recv_pidfd_packet", "network"),
+            ("rustix::net", "sendmsg", "network"),
+            ("rustix::net", "recvmsg", "network"),
+            ("rustix::net", "recv_pidfd_rights_packet", "network"),
+            ("rustix::net::sockopt", "socket_passcred", "network"),
+            ("rustix::net::sockopt", "socket_passpidfd", "network"),
+            ("rustix::fs", "fcntl_getfl", "filesystem"),
             ("rustix::net", "socketpair", "network"),
             ("rustix::net::sockopt", "set_socket_passpidfd", "network"),
             ("rustix::event", "poll", "scheduling"),
@@ -7909,6 +7935,7 @@ mod tests {
                     "use {module} as adapter; fn f() {{ adapter::{operation}(input, option); }}"
                 ),
                 format!("use {module}::*; fn f() {{ {operation}(input, option); }}"),
+                format!("fn f() {{ let _observe = {module}::{operation}; }}"),
             ] {
                 let findings = scan(&source);
                 let effects = findings
@@ -7937,6 +7964,7 @@ mod tests {
         for source in [
             "fn f() { nix::poll::PollFlags::POLLIN; nix::poll::PollTimeout::ZERO; nix::sys::socket::SockType::Stream; }",
             "mod local { pub fn poll() {} pub fn getsockopt() {} } fn f() { local::poll(); local::getsockopt(); }",
+            "mod local { pub fn sendmsg() {} pub fn recvmsg() {} pub fn recv_pidfd_rights_packet() {} pub fn socket_passcred() {} pub fn socket_passpidfd() {} pub fn fcntl_getfl() {} } fn f() { local::sendmsg(); local::recvmsg(); local::recv_pidfd_rights_packet(); local::socket_passcred(); local::socket_passpidfd(); local::fcntl_getfl(); }",
         ] {
             assert!(scan(source).is_empty(), "{source}");
         }
