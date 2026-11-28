@@ -161,10 +161,10 @@ impl Drop for Backing {
 /// Fresh mechanical publisher, not a Controller owner or an authenticated source.
 /// Actual native construction must rule out fork/adoption/older writer aliases.
 pub struct FreshPage {
-    inner: Option<Backing>,
+    inner: Option<Box<Backing>>,
 }
 pub struct PendingPublication {
-    inner: Option<Backing>,
+    inner: Option<Box<Backing>>,
     phase: AttemptState,
     failure: Option<Error>,
 }
@@ -181,20 +181,20 @@ enum AttemptState {
 /// caller's independent posts finish. This cannot retry, prepare or publish;
 /// it never claims that a competing alias's Known became Refused.
 pub struct FailedPublication {
-    inner: Backing,
+    inner: Box<Backing>,
     error: Error,
 }
 pub struct ReadyPublication {
-    inner: Option<Backing>,
+    inner: Option<Box<Backing>>,
 }
 /// Inert owning DATA. Later disposal never changes the shared terminal byte.
 pub struct PublishedData {
-    inner: Backing,
+    inner: Box<Backing>,
 }
 /// Local refusal; the shared byte may already be Known from an unqualified
 /// competing alias. This is NOT proof that shared state became Refused.
 pub struct LocalRefusalData {
-    inner: Backing,
+    inner: Box<Backing>,
 }
 pub enum Publication {
     Known(PublishedData),
@@ -261,8 +261,11 @@ impl FreshPage {
         backing.frame[HEADER_BYTES + 8..].copy_from_slice(&ino.to_le_bytes());
         backing.descriptor = Some(ro);
         drop(rw);
+        // Allocate once while creating Fresh. Every later state, including a
+        // failed result, moves this same allocation without boxing or cleanup
+        // between the attempted operation and the caller's independent posts.
         Ok(Self {
-            inner: Some(backing),
+            inner: Some(Box::new(backing)),
         })
     }
 
@@ -709,19 +712,24 @@ mod tests {
     }
 
     fn prepared(mut pending: PendingPublication) -> ReadyPublication {
+        let identity = backing_identity(pending.inner.as_ref().unwrap());
         pending.prepare().unwrap();
-        pending.into_ready().unwrap_or_else(|failed| {
+        let ready = pending.into_ready().unwrap_or_else(|failed| {
             panic!("mechanical preparation refused: {:?}", failed.error_data())
-        })
+        });
+        assert_eq!(backing_identity(ready.inner.as_ref().unwrap()), identity);
+        ready
     }
 
     #[cfg_attr(not(feature = "kernel-qualification"), test)]
     fn real_pending_publication_and_later_cleanup_keep_known_irreversible() {
         let (pending, received) = delivered();
         assert_eq!(received.state_data().unwrap(), StateData::Pending);
+        let identity = backing_identity(pending.inner.as_ref().unwrap());
         let Publication::Known(mut data) = prepared(pending).publish() else {
             panic!("first publication refused")
         };
+        assert_eq!(backing_identity(&data.inner), identity);
         assert_eq!(received.state_data().unwrap(), StateData::Known);
         let cleanup = data.dispose();
         assert_eq!(
@@ -1030,10 +1038,11 @@ mod tests {
         assert!(validate_received_data(fd, frame, binding()).is_ok());
     }
 
-    fn backing_identity(inner: &Backing) -> (usize, i32, u64, u64) {
+    fn backing_identity(inner: &Backing) -> (usize, usize, i32, u64, u64) {
         let fd = inner.descriptor.as_ref().unwrap();
         let stat = rustix::fs::fstat(fd).unwrap();
         (
+            std::ptr::from_ref(inner) as usize,
             inner.address.unwrap().as_ptr() as usize,
             fd.as_raw_fd(),
             stat.st_dev,
@@ -1043,12 +1052,15 @@ mod tests {
 
     #[cfg_attr(not(feature = "kernel-qualification"), test)]
     fn failed_attempts_retain_actual_backing_and_refuse_every_reentry() {
+        assert!(size_of::<Result<ReadyPublication, FailedPublication>>() <= 128);
         // Independent protocol cuts: prepare-before-send, ready-before-send,
         // ready-before-prepare, duplicate-send, and duplicate-prepare.
         for cut in 0..5 {
             let (left, _right) = sockets();
-            let mut attempt = FreshPage::create(binding()).unwrap().into_pending_attempt();
-            let identity = backing_identity(attempt.inner.as_ref().unwrap());
+            let fresh = FreshPage::create(binding()).unwrap();
+            let identity = backing_identity(fresh.inner.as_ref().unwrap());
+            let mut attempt = fresh.into_pending_attempt();
+            assert_eq!(backing_identity(attempt.inner.as_ref().unwrap()), identity);
             if cut >= 2 {
                 attempt.send_pending(left.as_fd()).unwrap();
             }
