@@ -1,6 +1,5 @@
 import Capability
 import Build
-import ChromeExtension
 
 Check :: [].{
 	Step : { kind : Str, operation : Str, payload : Str }
@@ -74,10 +73,11 @@ Check :: [].{
 
 	checked! : Str, U64, U64, [Tested, Untested], (Str => Try(Str, Str)) => Try(Build.Receipt, Str)
 	checked! = |source, seed, count, tests, host!| {
-		_ = ChromeExtension.verify!(source, host!)?
 		# The build runs this seed and count as its required verification before it
 		# selects the artifact, so that evidence is the check. A second campaign over
-		# the same artifact would repeat the build's own.
+		# the same artifact would repeat the build's own. An extension release is
+		# verified against day2.json's pin, which only app CI and `day2 instance
+		# extension` have.
 		match tests {
 			Tested => Build.tested!(source, seed, count, host!)
 			Untested => Build.checked!(source, seed, count, host!)

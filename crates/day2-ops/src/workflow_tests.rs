@@ -1,7 +1,7 @@
 //! Exercise the compiled Roc workflows through the real private protocol. Failure
 //! injection verifies that policy cannot proceed to later effects after a failed
 //! native check, while the Reports integration tests exercise the real adapters.
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use day2::automation;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -195,118 +195,64 @@ fn ui_lock_command_emits_the_native_source_record() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn extension_commands_route_to_their_native_capabilities() -> Result<()> {
-    for (arguments, expected, input) in [
-        (
-            vec!["extension", "verify", "app"],
-            vec!["chrome-extension-verify"],
-            json!({"source":"app"}),
-        ),
-        (
-            vec!["extension", "policy", "app"],
-            vec!["chrome-extension-policy"],
-            json!({"source":"app"}),
-        ),
-        (
-            vec!["extension", "local", "app", "unpacked"],
-            vec!["chrome-extension-local"],
-            json!({"source":"app","output":"unpacked"}),
-        ),
-        (
-            vec!["extension", "fleet", "app", "exampleco-tools"],
-            vec!["chrome-extension-fleet"],
-            json!({"source":"app","project":"exampleco-tools"}),
-        ),
-    ] {
-        let mut effects = Vec::new();
-        let mut all = vec!["platform"];
-        all.extend(&arguments);
-        let receipt = automation::run(&automation::runner()?, &all, |request| {
-            effects.push(request.action.clone());
-            assert_eq!(request.decode::<Value>()?, input);
-            Ok(json!({"fixture":true}))
-        })?;
-        assert_eq!(effects, expected);
-        assert_eq!(receipt, json!({"fixture":true}));
-    }
-    Ok(())
-}
-
-#[test]
-fn extension_pack_verifies_the_written_release_before_reporting_it() -> Result<()> {
+/// The steps `day2 instance extension <mode>`'s recipe requests; `fail` names
+/// the step whose host call fails.
+fn extension_effects(mode: &str, fail: Option<&str>) -> Result<(Vec<String>, Value)> {
     let mut effects = Vec::new();
     let receipt = automation::run(
         &automation::runner()?,
-        &["platform", "extension", "pack", "app", "/dev/fd/63"],
+        &["instance-extension-session", mode],
         |request| {
-            effects.push(request.action.clone());
-            match request.action.as_str() {
-                "chrome-extension-pack" => {
-                    assert_eq!(
-                        request.decode::<Value>()?,
-                        json!({"source":"app","key":"/dev/fd/63"})
-                    );
-                    Ok(json!({"release":{"version":"2"}}))
-                }
-                "chrome-extension-verify" => Ok(json!({"declared":true})),
-                action => bail!("unexpected effect {action}"),
+            ensure!(
+                request.action == "instance-extension-step",
+                "unexpected extension capability: {}",
+                request.action
+            );
+            let name = request.decode::<Value>()?["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            effects.push(name.clone());
+            if fail == Some(name.as_str()) {
+                bail!("chrome_extension_signing_key");
             }
+            Ok(json!({ "step": name }))
         },
-    )?;
-    assert_eq!(
-        effects,
-        ["chrome-extension-pack", "chrome-extension-verify"]
     );
-    assert_eq!(receipt, json!({"release":{"version":"2"}}));
+    receipt.map(|receipt| (effects, receipt))
+}
 
-    let mut after_failure = Vec::new();
-    assert!(
-        automation::run(
-            &automation::runner()?,
-            &["platform", "extension", "pack", "app", "key.pem"],
-            |request| {
-                after_failure.push(request.action.clone());
-                bail!("chrome_extension_signing_key")
-            },
-        )
-        .is_err()
+#[test]
+fn extension_commands_run_their_own_step_and_pack_verifies_what_it_wrote() -> Result<()> {
+    for mode in ["verify", "local", "policy", "fleet"] {
+        assert_eq!(
+            extension_effects(mode, None)?,
+            (vec![mode.to_owned()], json!({ "step": mode }))
+        );
+    }
+    assert_eq!(
+        extension_effects("pack", None)?,
+        (
+            vec!["pack".to_owned(), "verify".to_owned()],
+            json!({ "step": "pack" })
+        ),
+        "the packed release, verified as CI will"
     );
-    assert_eq!(after_failure, ["chrome-extension-pack"]);
-    for incomplete in [
-        vec!["platform", "extension", "pack", "app"],
-        vec!["platform", "extension", "local", "app"],
-        vec!["platform", "extension", "sign", "app"],
+    assert!(extension_effects("pack", Some("pack")).is_err());
+    assert!(extension_effects("sign", None).is_err());
+    // An extension's names come from day2.json, so no platform workflow reaches
+    // an extension step.
+    for arguments in [
+        vec!["platform", "extension", "verify", "app"],
+        vec!["platform", "extension", "pack", "app", "/dev/fd/63"],
     ] {
         assert!(
-            automation::run(&automation::runner()?, &incomplete, |_| bail!(
-                "invalid extension usage reached native effects"
+            automation::run(&automation::runner()?, &arguments, |_| bail!(
+                "a platform workflow reached native effects"
             ))
             .is_err()
         );
     }
-    Ok(())
-}
-
-#[test]
-fn check_verifies_the_extension_release_before_building() -> Result<()> {
-    let mut effects = Vec::new();
-    let result = automation::run(
-        &automation::runner()?,
-        &["platform", "check", "app", "42", "1"],
-        |request| {
-            effects.push(request.action.clone());
-            match request.action.as_str() {
-                "chrome-extension-verify" => {
-                    assert_eq!(request.decode::<Value>()?, json!({"source":"app"}));
-                    bail!("chrome_extension_stale")
-                }
-                action => bail!("unexpected effect {action}"),
-            }
-        },
-    );
-    assert!(format!("{:#}", result.unwrap_err()).contains("chrome_extension_stale"));
-    assert_eq!(effects, ["chrome-extension-verify"]);
     Ok(())
 }
 
@@ -331,13 +277,14 @@ fn check_is_one_build_whose_required_verification_uses_the_requested_campaign() 
                     );
                     Ok(serde_json::to_value(&built)?)
                 }
-                "chrome-extension-verify" => Ok(json!({"declared":false})),
-                // A second campaign would start with dev-create.
+                // A second campaign would start with dev-create; an extension
+                // check needs day2.json's pin, which only app CI and
+                // `day2 instance extension` have.
                 action => bail!("unexpected check capability: {action}"),
             }
         },
     )?;
-    assert_eq!(effects, ["chrome-extension-verify", "build-source"]);
+    assert_eq!(effects, ["build-source"]);
     assert_eq!(receipt, serde_json::to_value(&built.verification)?);
     Ok(())
 }
@@ -527,11 +474,6 @@ fn ci_check_effects(route: Value) -> Result<Vec<String>> {
                         json!({})
                     })
                 }
-                "chrome-extension-verify" => {
-                    assert_eq!(input, json!({"source": "/work/head/app"}));
-                    effects.push(request.action.clone());
-                    Ok(json!({"declared": false}))
-                }
                 "build-source" => {
                     assert_eq!(
                         input,
@@ -562,7 +504,7 @@ fn ci_check_runs_each_selected_lane_once_in_order() -> Result<()> {
             "route",
             "javascript",
             "format",
-            "chrome-extension-verify",
+            "extension",
             "build-source",
             "artifact",
             "result",
@@ -570,12 +512,7 @@ fn ci_check_runs_each_selected_lane_once_in_order() -> Result<()> {
     );
     assert_eq!(
         ci_check_effects(route(false, true, false))?,
-        [
-            "ci-check-prepare",
-            "route",
-            "chrome-extension-verify",
-            "result"
-        ]
+        ["ci-check-prepare", "route", "extension", "result"]
     );
     assert_eq!(
         ci_check_effects(route(false, false, false))?,
@@ -592,7 +529,7 @@ fn ci_check_runs_each_selected_lane_once_in_order() -> Result<()> {
             "route",
             "javascript",
             "format",
-            "chrome-extension-verify",
+            "extension",
             "artifact",
             "result",
         ]

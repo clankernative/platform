@@ -1411,6 +1411,7 @@ mod tests {
                     "schedules": "enabled",
                     "extension": {
                         "id": "jldmikbinomhomcbmeppagennfohakni",
+                        "crx": "go.crx",
                         "update_url": "https://go.apps.example.com/downloads/updates.xml",
                         "downloads": ["/downloads/go.crx", "/downloads/updates.xml"],
                         "signing_secret": "go-chrome-extension-signing-key"

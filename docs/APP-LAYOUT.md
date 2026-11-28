@@ -230,10 +230,11 @@ its recorded world and does not consult a live release journal.
 
 ## Public release downloads
 
-Apps may opt into anonymous, artifact-pinned release files by placing `.crx`
-and `.xml` files directly under `public-downloads/`. Today these are Chrome
-extension releases, which `day2 platform extension pack` writes and `platform
-check` verifies; see [Chrome extensions](CHROME-EXTENSIONS.md). The build rejects other
+An app whose instance pins a Chrome extension publishes its release as
+anonymous, artifact-pinned files directly under `public-downloads/`: `<app>.crx`
+and `updates.xml`, which `day2 instance extension pack` writes. App CI admits no
+other file there, and none at all for an app without a pin; see
+[Chrome extensions](CHROME-EXTENSIONS.md). The build itself rejects other
 types, subdirectories, symlinks, special files, invalid filenames and excess
 files/bytes (32 files, 2 MiB per file, 16 MiB total). It pins the selected bytes
 and MIME types in `Artifact.public_downloads`, copies them into the immutable
@@ -253,12 +254,12 @@ If the installation uses IAP at its load balancer, IAP blocks a download
 before it reaches the app unless its exact URL is in the app edge's
 `public_download_paths`. The instance renders that list from the app's
 `extension` pin: its CRX and `updates.xml`, or nothing for an app without one.
-Any other file in `public-downloads/` builds but stays behind IAP. The module
+App CI refuses any other file in `public-downloads/`. The module
 keeps the default backend authenticated and adds an IAP-free backend only for
 those exact paths. Do not select a wildcard or disable IAP for the app.
 
-An app declares its extension in the app-root `.chrome-extension/` directory
-(`extension.json`, the unpacked `src/`, and an optional `local/` overlay). The
+An app keeps its pinned extension's source in the app-root `.chrome-extension/`
+directory (the unpacked `src/` and an optional `local/` overlay). The
 app source-capture paths exclude that directory; only the signed release in
 `public-downloads/` enters the runtime artifact. This does not add an app build
 hook, package manager or server-side execution capability. Signing keys never

@@ -20,6 +20,7 @@ import InstanceSource
 import InstanceCandidate
 import InstanceDeploy
 import InstanceSelection
+import InstanceExtension
 import InstanceCiWorkflow
 import CiCheck
 import CiFetch
@@ -83,6 +84,7 @@ main! = |args| {
 		Cli.Request.Candidate(candidate) => candidated!(candidate)
 		Cli.Request.Deploy(deploy) => deployed!(deploy)
 		Cli.Request.Selection(selection) => selected!(selection)
+		Cli.Request.Extension(extension) => extended!(extension)
 		Cli.Request.CiCheck(check) => ci_checked!(check)
 		Cli.Request.CiFetch(run) => ci_fetched!(run)
 		Cli.Request.CiReuse(reuse) => ci_reused!(reuse)
@@ -302,6 +304,29 @@ selected! = |selection| {
 			Err(_) => failed(Problem.SelectionFailed("the platform host returned an unreadable selection receipt"))
 		}
 		Err(error) => failed(Problem.SelectionFailed(error))
+	}
+}
+
+## Validate the spec and derive the app's extension pin here, then run the extension command through the platform host,
+## which validates the request again. Any refusal exits 6 with the host's message.
+extended! : Cli.Extension => Output.Outcome
+extended! = |command| {
+	reported = command.action.reported_command()
+	failed = |problem| Output.Outcome.Failed(problem, command.format, reported)
+	(path, spec) = match InstanceSpec.load!(command.directory) {
+		Ok(found) => found
+		Err(problem) => return failed(problem)
+	}
+	request = match InstanceExtension.request(spec, command) {
+		Ok(value) => value
+		Err(problem) => return failed(problem)
+	}
+	match Host.instance_extension!(command.action.verb(), request) {
+		Ok(raw) => match InstanceExtension.receipt(raw) {
+			Ok(report) => Output.Outcome.Extended(command, path, report)
+			Err(_) => failed(Problem.ExtensionFailed("the platform host returned an unreadable receipt"))
+		}
+		Err(error) => failed(InstanceExtension.problem(error))
 	}
 }
 

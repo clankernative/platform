@@ -32,7 +32,7 @@ CiCheck :: [].{
 		reasons : List({ path : Str, change : Str, lanes : List(Str), rules : List(Str) }),
 		javascript_files : Try(U64, [Null]),
 		roc_files : Try(U64, [Null]),
-		extension_declared : Try(Bool, [Null]),
+		extension_pinned : Try(Bool, [Null]),
 		source_inputs : Str,
 		artifact : Str,
 		output : Try(Str, [Null]),

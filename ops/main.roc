@@ -9,6 +9,7 @@ package
 		InstanceCandidate,
 		InstanceDeploy,
 		InstanceSelection,
+		ChromeExtension,
 		InstanceCiWorkflow,
 		Build,
 		Delegation,

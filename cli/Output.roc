@@ -10,6 +10,7 @@ import InstanceSource
 import InstanceCandidate
 import InstanceDeploy
 import InstanceSelection
+import InstanceExtension
 import InstanceCiWorkflow
 import CiCheck
 import CiFetch
@@ -30,6 +31,7 @@ Output :: { outcome : Outcome }.{
 		Candidated(Cli.CandidateRequest, Try(Names.LocalPath, [Null]), InstanceCandidate.Report),
 		Deployed(Cli.Deploy, Names.LocalPath, InstanceDeploy.Report),
 		Selected(Cli.Selection, Names.LocalPath, InstanceSelection.Receipt),
+		Extended(Cli.Extension, Names.LocalPath, InstanceExtension.Report),
 		CiChecked(Cli.CiCheckRequest, CiCheck.Report),
 		CiFetched(Cli.CiRun, CiFetch.Report),
 		CiReused(Cli.CiReuseRequest, CiReuse.Report),
@@ -72,6 +74,7 @@ Output :: { outcome : Outcome }.{
 			Outcome.Candidated(request, path, report) => candidated_text(request, path, report)
 			Outcome.Deployed(request, path, report) => deployed_text(request, path, report.receipt)
 			Outcome.Selected(_, _, receipt) => selected_text(receipt)
+			Outcome.Extended(request, _, report) => extended_text(request, report)
 			Outcome.CiChecked(request, report) => ci_checked_text(request, report)
 			Outcome.CiFetched(request, report) => ci_fetched_text(request, report)
 			Outcome.CiReused(request, report) => ci_reused_text(request, report)
@@ -115,6 +118,7 @@ format = |outcome| match outcome {
 	Output.Outcome.Candidated(request, _, _) => request.parts().format
 	Output.Outcome.Deployed(request, _, _) => request.format
 	Output.Outcome.Selected(request, _, _) => request.format
+	Output.Outcome.Extended(request, _, _) => request.format
 	Output.Outcome.CiChecked(request, _) => request.parts().format
 	Output.Outcome.CiFetched(request, _) => request.parts().format
 	Output.Outcome.CiReused(request, _) => request.parts().format
@@ -180,6 +184,7 @@ json = |outcome| match outcome {
 	Output.Outcome.Candidated(request, path, report) => candidated_json(request, path, report)
 	Output.Outcome.Deployed(_, path, report) => deployed_json(path, report)
 	Output.Outcome.Selected(_, path, receipt) => selected_json(path, receipt)
+	Output.Outcome.Extended(request, path, report) => extended_json(request, path, report)
 	Output.Outcome.CiChecked(request, report) => ci_checked_json(request, report)
 	Output.Outcome.CiFetched(request, report) => ci_fetched_json(request, report)
 	Output.Outcome.CiReused(request, report) => ci_reused_json(request, report)
@@ -695,6 +700,40 @@ deployed_text = |request, path, receipt| Str.join_with(
 	"\n",
 )
 
+extended_json : Cli.Extension, Names.LocalPath, InstanceExtension.Report -> Str
+# As candidated_json: the envelope is encoded with `"receipt":null`, which only that key can spell, and the host's text
+# replaces it verbatim.
+extended_json = |request, path, report| {
+	null : Try({}, [Null])
+	null = Err(Null)
+	actions : List(Cli.ActionDto)
+	actions = []
+	Json.to_str({
+		schema_version: 1.U64,
+		ok: Bool.True,
+		command: request.action.reported_command().name(),
+		exit_code: 0.I32,
+		context: { spec_path: path.to_str(), spec_validation: "checked" },
+		result: { receipt: null },
+		error: null,
+		next_actions: actions,
+	})
+		.replace_first("\"receipt\":null", "\"receipt\":${report.text}")
+}
+
+## The host's receipt is the record: its JSON, after the command and app.
+extended_text : Cli.Extension, InstanceExtension.Report -> Str
+extended_text = |request, report| Str.join_with(
+	[
+		"DAY2  /  instance extension ${request.action.verb()}",
+		"",
+		"  App  ${Output.safe(request.app_id)}",
+		"",
+		Output.safe(report.text),
+	],
+	"\n",
+)
+
 selected_json : Names.LocalPath, InstanceSelection.Receipt -> Str
 selected_json = |path, receipt| {
 	null : Try({}, [Null])
@@ -844,10 +883,10 @@ ci_checked_text = |request, report| {
 				"  ${Output.safe(reason.path)}: ${reason.change}, ${listed(reason.lanes)}${Output.safe(why)}"
 			},
 		)
-	extension = match outcome.extension_declared {
-		Ok(declared) => row(
+	extension = match outcome.extension_pinned {
+		Ok(pinned) => row(
 			"Extension",
-			if declared "declared release verified" else "none declared; no release downloads",
+			if pinned "pinned release verified" else "none pinned; no downloads",
 		)
 		Err(Null) => []
 	}

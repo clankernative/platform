@@ -2,7 +2,6 @@
 # callback exposes fixed Rust capabilities; no shell or arbitrary argv crosses it.
 import Build
 import Check
-import ChromeExtension
 import LocalDev
 import Backup
 import Infra
@@ -16,11 +15,6 @@ Workflow :: [].{
 		Help,
 		Build(Str),
 		UiLock(Str),
-		ExtensionVerify(Str),
-		ExtensionPack(Str, Str),
-		ExtensionLocal(Str, Str),
-		ExtensionPolicy(Str),
-		ExtensionFleet(Str, Str),
 		Check(Str, U64, U64),
 		LocalDev(List(Str)),
 		Backup(Str, Str, Str),
@@ -45,11 +39,6 @@ Workflow :: [].{
 		[] | ["--help"] => Ok(Help)
 		["build", source] => Ok(Build(source))
 		["ui-lock", source] => Ok(UiLock(source))
-		["extension", "verify", source] => Ok(ExtensionVerify(source))
-		["extension", "pack", source, key] => Ok(ExtensionPack(source, key))
-		["extension", "local", source, output] => Ok(ExtensionLocal(source, output))
-		["extension", "policy", source] => Ok(ExtensionPolicy(source))
-		["extension", "fleet", source, project] => Ok(ExtensionFleet(source, project))
 		["check", source] | ["test", source] => Ok(Check(source, 3_664_912_422, 16))
 		["check", source, seed, count] | ["test", source, seed, count] => {
 			checked_seed = U64.from_str(seed).map_err(|_| "seed must be a U64")?
@@ -123,7 +112,7 @@ Workflow :: [].{
 			Ok(AuthorityActivate(instance, app_name, target, operator, expected, request_id))
 		}
 		_ => Err(
-			"usage: day2 platform build SOURCE | ui-lock SOURCE | extension verify|policy SOURCE | extension pack SOURCE SIGNING_KEY_PEM | extension fleet SOURCE GCP_PROJECT | extension local SOURCE NEW_DIRECTORY | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | restore protected INSTANCE APP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|recovery-abandon|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
+			"usage: day2 platform build SOURCE | ui-lock SOURCE | check SOURCE [SEED CASES] | local-dev [SOURCE] [OPTIONS] | backup INSTANCE APP NEW_DIRECTORY | restore BACKUP NEW_DIRECTORY | restore inspect BACKUP | restore protected INSTANCE APP | infra plan CONFIG NEW_DIRECTORY | maintain inspect|backup|authority-apply|recovery-abandon|activate|mark-activated|rollout|runtime-rollout REQUEST_JSON_FILE | maintain recover SESSION_JOURNAL_FILE",
 		)
 	}
 
@@ -135,11 +124,6 @@ Workflow :: [].{
 				commands: [
 					"build SOURCE",
 					"ui-lock SOURCE",
-					"extension verify SOURCE",
-					"extension pack SOURCE SIGNING_KEY_PEM",
-					"extension local SOURCE NEW_DIRECTORY",
-					"extension policy SOURCE",
-					"extension fleet SOURCE GCP_PROJECT",
 					"check SOURCE [SEED CASES]",
 					"local-dev [SOURCE] [OPTIONS]",
 					"backup INSTANCE APP NEW_DIRECTORY",
@@ -164,11 +148,6 @@ Workflow :: [].{
 			Ok(Json.to_str(receipt))
 		}
 		UiLock(source) => UiDependency.lock!(source, host!)
-		ExtensionVerify(source) => ChromeExtension.verify!(source, host!)
-		ExtensionPack(source, key) => ChromeExtension.pack!(source, key, host!)
-		ExtensionLocal(source, output) => ChromeExtension.local!(source, output, host!)
-		ExtensionPolicy(source) => ChromeExtension.policy!(source, host!)
-		ExtensionFleet(source, project) => ChromeExtension.fleet!(source, project, host!)
 		Check(source, seed, count) => Check.run!(source, seed, count, host!)
 		LocalDev(args) => LocalDev.run!(args, host!)
 		Backup(instance, app_name, output) => Backup.take!(instance, app_name, output, host!)
@@ -223,17 +202,5 @@ expect match Workflow.parse(["maintain", "recovery-abandon", "request.json"]) {
 	_ => Bool.False
 }
 
-expect match Workflow.parse(["extension", "pack", "app", "/dev/fd/63"]) {
-	Ok(ExtensionPack("app", "/dev/fd/63")) => Bool.True
-	_ => Bool.False
-}
-
-expect match Workflow.parse(["extension", "pack", "app"]) {
-	Err(_) => Bool.True
-	_ => Bool.False
-}
-
-expect match Workflow.parse(["extension", "fleet", "app", "exampleco-tools"]) {
-	Ok(ExtensionFleet("app", "exampleco-tools")) => Bool.True
-	_ => Bool.False
-}
+# An extension's names come from day2.json, so its commands are `day2 instance extension`, never platform workflows.
+expect Workflow.parse(["extension", "pack", "app", "/dev/fd/63"]).is_err()

@@ -22,6 +22,7 @@ Cli :: [].{
 		Candidate(CandidateRequest),
 		Deploy(Deploy),
 		Selection(Selection),
+		Extension(Extension),
 		CiCheck(CiCheckRequest),
 		CiFetch(CiRun),
 		CiReuse(CiReuseRequest),
@@ -50,6 +51,11 @@ Cli :: [].{
 		InstanceCandidateNativeProbe,
 		InstanceDeploy,
 		InstanceSelection,
+		InstanceExtensionVerify,
+		InstanceExtensionPack,
+		InstanceExtensionLocal,
+		InstanceExtensionPolicy,
+		InstanceExtensionFleet,
 		CiCheck,
 		CiFetch,
 		CiReuse,
@@ -77,6 +83,11 @@ Cli :: [].{
 			InstanceCandidateNativeProbe => "instance.candidate.native-probe"
 			InstanceDeploy => "instance.deploy"
 			InstanceSelection => "instance.selection"
+			InstanceExtensionVerify => "instance.extension.verify"
+			InstanceExtensionPack => "instance.extension.pack"
+			InstanceExtensionLocal => "instance.extension.local"
+			InstanceExtensionPolicy => "instance.extension.policy"
+			InstanceExtensionFleet => "instance.extension.fleet"
 			CiCheck => "ci.check"
 			CiFetch => "ci.fetch"
 			CiReuse => "ci.reuse"
@@ -266,6 +277,50 @@ Cli :: [].{
 
 	## `instance selection` inspects a single-replica app's saved release.
 	Selection : { directory : Names.LocalPath, app_id : Str, format : Format }
+
+	## An `instance extension` command on one app's Chrome extension, against the extension day2.json pins for it.
+	## SOURCE is the app root, which holds `.chrome-extension/` and `public-downloads/`.
+	## - verify DIRECTORY APP SOURCE: the committed release, or for an app without a pin, that it publishes none.
+	## - pack DIRECTORY APP SOURCE SIGNING_KEY: sign the sources into `public-downloads/`, then verify the release.
+	## - local DIRECTORY APP SOURCE NEW_DIRECTORY: an unpacked build for Load unpacked.
+	## - policy DIRECTORY APP SOURCE: the browser policy that force-installs the release.
+	## - fleet DIRECTORY APP SOURCE: the release's uptake in the instance project's edge request logs.
+	ExtensionAction := [Verify, Pack(Names.LocalPath), Local(Names.LocalPath), Policy, Fleet].{
+		verb : ExtensionAction -> Str
+		verb = |action| match action {
+			Verify => "verify"
+			Pack(_) => "pack"
+			Local(_) => "local"
+			Policy => "policy"
+			Fleet => "fleet"
+		}
+
+		## The command a response reports.
+		reported_command : ExtensionAction -> Command
+		reported_command = |action| match action {
+			Verify => Command.InstanceExtensionVerify
+			Pack(_) => Command.InstanceExtensionPack
+			Local(_) => Command.InstanceExtensionLocal
+			Policy => Command.InstanceExtensionPolicy
+			Fleet => Command.InstanceExtensionFleet
+		}
+
+		## The command's arguments after the app directory.
+		trailing : ExtensionAction -> List(Str)
+		trailing = |action| match action {
+			Pack(key) => [key.to_str()]
+			Local(output) => [output.to_str()]
+			Verify | Policy | Fleet => []
+		}
+	}
+
+	Extension : {
+		action : ExtensionAction,
+		directory : Names.LocalPath,
+		app_id : Str,
+		source : Names.LocalPath,
+		format : Format,
+	}
 
 	## `instance deploy` runs a selected candidate on a single-replica app.
 	Deploy : {
@@ -511,6 +566,7 @@ Cli :: [].{
 					["instance", "candidate", ..] => Ok(Request.Help(raw.format))
 					["instance", "deploy", ..] => Ok(Request.Help(raw.format))
 					["instance", "selection", ..] => Ok(Request.Help(raw.format))
+					["instance", "extension", ..] => Ok(Request.Help(raw.format))
 					["instance", "ci-workflow", ..] => Ok(Request.Help(raw.format))
 					["ci", ..] => Ok(Request.Help(raw.format))
 					["app", "describe", name] => {
@@ -579,6 +635,24 @@ Cli :: [].{
 						}),
 					)
 				}
+				["instance", "extension", "verify", directory, app_id, source] => Ok(
+					Request.Extension(extension_request(ExtensionAction.Verify, directory, app_id, source, raw)?),
+				)
+				["instance", "extension", "pack", directory, app_id, source, key] => {
+					action = ExtensionAction.Pack(local_path("extension pack", key, "a signing key file")?)
+					Ok(Request.Extension(extension_request(action, directory, app_id, source, raw)?))
+				}
+				["instance", "extension", "local", directory, app_id, source, output] => {
+					action = ExtensionAction.Local(local_path("extension local", output, "a new output directory")?)
+					Ok(Request.Extension(extension_request(action, directory, app_id, source, raw)?))
+				}
+				["instance", "extension", "policy", directory, app_id, source] => Ok(
+					Request.Extension(extension_request(ExtensionAction.Policy, directory, app_id, source, raw)?),
+				)
+				["instance", "extension", "fleet", directory, app_id, source] => Ok(
+					Request.Extension(extension_request(ExtensionAction.Fleet, directory, app_id, source, raw)?),
+				)
+				["instance", "extension", ..] if raw.positionals.len() < 7 => Err(Problem.MissingArgument)
 				["instance", "release"]
 				| ["instance", "release", "publish"]
 				| ["instance", "release", "publish", _]
@@ -782,6 +856,7 @@ Cli :: [].{
 		Request.Candidate(value) => value.parts().format
 		Request.Deploy(value) => value.format
 		Request.Selection(value) => value.format
+		Request.Extension(value) => value.format
 		Request.CiCheck(value) => value.parts().format
 		Request.CiFetch(value) => value.parts().format
 		Request.CiReuse(value) => value.parts().format
@@ -858,6 +933,16 @@ Cli :: [].{
 				},
 			)
 			Request.Selection(value) => ["day2", "instance", "selection", value.directory.to_str(), value.app_id]
+			Request.Extension(value) => [
+				"day2",
+				"instance",
+				"extension",
+				value.action.verb(),
+				value.directory.to_str(),
+				value.app_id,
+				value.source.to_str(),
+			]
+				.concat(value.action.trailing())
 			Request.CiCheck(value) => ["day2", "ci", "check"].concat(value.positional_arguments())
 			Request.CiFetch(value) => ["day2", "ci", "fetch", value.parts().directory.to_str()]
 			Request.CiReuse(value) => [
@@ -1009,6 +1094,21 @@ release_path = |verb, value, role|
 	Names.LocalPath.from_str(value)
 		.map_err(|_| Problem.InvalidArguments("instance release ${verb} requires ${role} of at most 4096 bytes"))
 
+extension_request : Cli.ExtensionAction, Str, Str, Str, Raw -> Try(Cli.Extension, Problem)
+extension_request = |action, directory, app_id, source, raw| {
+	verb = "extension ${action.verb()}"
+	if has_options(raw) {
+		return Err(Problem.ConflictingOptions("instance ${verb} accepts only --agent or --json."))
+	}
+	Ok({
+		action,
+		directory: local_path(verb, directory, "an instance directory")?,
+		app_id: candidate_app(app_id, "instance ${verb}")?,
+		source: local_path(verb, source, "an app directory")?,
+		format: raw.format,
+	})
+}
+
 ## A manifest reference as the instance approves it: sha256:<64 lowercase hex digits>, and its size in canonical
 ## decimal, 1 to 65536 bytes.
 reference : Str, Str -> Try(Cli.Reference, Problem)
@@ -1138,6 +1238,7 @@ instance_command = |args| match args {
 	["apply", ..] => Cli.Command.InstanceApply
 	["deploy", ..] => Cli.Command.InstanceDeploy
 	["selection", ..] => Cli.Command.InstanceSelection
+	["extension", .. as rest] => extension_command(rest)
 	["ci-workflow", ..] => Cli.Command.InstanceCiWorkflow
 	["release", .. as rest] => release_command(rest)
 	["source", .. as rest] => source_command(rest)
@@ -1165,6 +1266,18 @@ source_command = |args| match args {
 	["checked-artifact", ..] => Cli.Command.InstanceSourceCheckedArtifact
 	[arg, .. as rest] if arg.starts_with("-") => source_command(rest)
 	_ => Cli.Command.InstanceSourceHead
+}
+
+## The extension verb follows `extension`, after any flags. An incomplete extension command reports the read-only verify.
+extension_command : List(Str) -> Cli.Command
+extension_command = |args| match args {
+	["--instance", _, .. as rest] | ["--operation", _, .. as rest] => extension_command(rest)
+	["pack", ..] => Cli.Command.InstanceExtensionPack
+	["local", ..] => Cli.Command.InstanceExtensionLocal
+	["policy", ..] => Cli.Command.InstanceExtensionPolicy
+	["fleet", ..] => Cli.Command.InstanceExtensionFleet
+	[arg, .. as rest] if arg.starts_with("-") => extension_command(rest)
+	_ => Cli.Command.InstanceExtensionVerify
 }
 
 ## The candidate verb follows `candidate`, after any flags. An incomplete candidate command reports the read-only check.

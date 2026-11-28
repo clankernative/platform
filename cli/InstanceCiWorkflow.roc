@@ -8,13 +8,14 @@ import "fixtures/ci-workflow.yml" as golden_workflow : Str
 ## the host reads for it: the project's number, which the workload identity provider's audience names, and each app's
 ## tooling image from its selected SDK release manifest.
 ##
-## The workflow is named `day2` with one job, `verification`, so Gitea posts the status context
-## `day2 / verification (pull_request)` (and `(push)`), which InstanceSpec's required check names. The job runs only in
-## the repositories of a map rendered inline into each expression: never a repository or org variable, which an app
-## repository could override to redirect its own CI. Its four steps run one `day2` command each: fetch, reuse, check and
-## store. Only fetch and reuse, which run before any app code, receive the job token, only reuse and store the git-oidc
-## request token, and check, which runs the app's code, neither. The token reads the app repository's own run records
-## (`actions: read`), which reuse checks an earlier main run's custody against.
+## The workflow is named `day2` with one job, `verification`, so Gitea posts the status context `day2 / verification
+## (pull_request)` (and `(push)`), which InstanceSpec's required check names. The job runs only in the repositories of a
+## map rendered inline into each expression: never a repository or org variable, which an app repository could override
+## to redirect its own CI. Its four steps run one `day2` command each: fetch, reuse, check and store. Check verifies the
+## app's extension release against its day2.json pin, which the map also carries. Only fetch and reuse, which run before
+## any app code, receive the job token, only reuse and store the git-oidc request token, and check, which runs the app's
+## code, neither. The token reads the app repository's own run records (`actions: read`), which reuse checks an earlier
+## main run's custody against.
 InstanceCiWorkflow :: [].{
 
 	## Where the rendered file lives in <org>/day2-ci.
@@ -93,11 +94,17 @@ InstanceCiWorkflow :: [].{
 		entries =
 			names.apps.map(
 				|bound| {
+					# The extension check's pin: null, or exactly the names the instance derives for it.
+					extension : Try({ id : Str, crx : Str, update_url : Str }, [Null])
+					extension = bound.extension.map_ok(
+						|pin| { id: pin.id, crx: pin.crx, update_url: pin.update_url },
+					)
 					value = Json.to_str({
 						audience,
 						bucket: bound.ci_bucket,
 						cases: bound.verification,
 						distribution: selected(bound.id).distribution,
+						extension,
 						image: selected(bound.id).tooling_image,
 						sdk: bound.sdk,
 					})
@@ -162,6 +169,8 @@ InstanceCiWorkflow :: [].{
 					.concat([
 						"        run: ${cli} ci reuse ${run} ${lookup(".cases")}",
 						"      - name: check",
+						"        env:",
+						"          DAY2_CI_EXTENSION: ${dollar}{{ toJSON(fromJSON('${map}')[github.repository].extension) }}",
 						"        run: ${cli} ci check ${run}/head ${dollar}{{ github.event_name == 'pull_request' && '${run}/base' || '--reuse ${run}/reuse' }} ${
 							lookup(".cases")
 						} ${run}/out",

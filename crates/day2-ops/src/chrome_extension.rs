@@ -1,23 +1,24 @@
-//! Native file adapter for `day2 platform extension`. Release rules live in
-//! `day2::chrome_extension`; this module reads an app's declared extension and
-//! writes its signed downloads or an unpacked local build. `fleet` also reads
-//! the edge's request logs for the release downloads, read-only.
-use anyhow::{Context, Result, ensure};
+//! Native file adapter for `day2 instance extension` and app CI's extension
+//! check. Release rules live in `day2::chrome_extension`; this module reads an
+//! app's extension source and downloads and writes its signed downloads or an
+//! unpacked local build, always against the extension day2.json pins for the
+//! app. `fleet` also reads the edge's request logs for the release downloads,
+//! read-only.
+use anyhow::{Context, Result, bail, ensure};
 use day2::{
-    chrome_extension::{self as extension, Config, DownloadRequest, Files},
+    chrome_extension::{self as extension, Binding, DownloadRequest, Files},
     public_downloads,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs,
     io::{ErrorKind, Read},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     time::Duration,
 };
 
-const MAX_CONFIG_BYTES: u64 = 4096;
 const MAX_DEPTH: usize = 16;
 /// macOS Finder metadata is never extension source.
 const IGNORED: &str = ".DS_Store";
@@ -25,22 +26,196 @@ const IGNORED: &str = ".DS_Store";
 /// window that holds more rather than summarizing part of it.
 const MAX_LOG_ENTRIES: usize = 20_000;
 
-pub fn verify(app: &Path) -> Result<Value> {
+/// The command a `day2 instance extension` session runs; the host's action
+/// fixes it.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Mode {
+    Verify,
+    Pack,
+    Local,
+    Policy,
+    Fleet,
+}
+
+impl Mode {
+    pub const ALL: [Self; 5] = [
+        Self::Verify,
+        Self::Pack,
+        Self::Local,
+        Self::Policy,
+        Self::Fleet,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Verify => "verify",
+            Self::Pack => "pack",
+            Self::Local => "local",
+            Self::Policy => "policy",
+            Self::Fleet => "fleet",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.name() == name)
+    }
+}
+
+/// What the CLI hands the host for `day2 instance extension <mode>`, derived
+/// from day2.json: the app, its source, its pin and the mode's own input.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Request {
+    pub mode: Mode,
+    pub app_id: String,
+    /// The app root, which holds `.chrome-extension/` and `public-downloads/`.
+    pub source: PathBuf,
+    /// day2.json's pin for the app; only `verify` accepts an app without one.
+    pub extension: Option<Binding>,
+    /// pack: the signing key's PEM file, outside the app.
+    pub key: Option<PathBuf>,
+    /// local: the new directory for the unpacked build.
+    pub output: Option<PathBuf>,
+    /// fleet: the instance's GCP project, whose edge logs the downloads.
+    pub project: Option<String>,
+}
+
+impl Request {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            crate::ci_fetch::app_id(&self.app_id),
+            "an instance extension request names an app ID"
+        );
+        let wanted = match self.mode {
+            Mode::Pack => [true, false, false],
+            Mode::Local => [false, true, false],
+            Mode::Fleet => [false, false, true],
+            Mode::Verify | Mode::Policy => [false, false, false],
+        };
+        ensure!(
+            [
+                self.key.is_some(),
+                self.output.is_some(),
+                self.project.is_some()
+            ] == wanted,
+            "an instance extension {} request names only its own inputs",
+            self.mode.name()
+        );
+        match &self.extension {
+            Some(binding) => {
+                binding.validate()?;
+                ensure!(
+                    binding.crx == format!("{}.crx", self.app_id),
+                    "the extension's CRX is <app>.crx, as day2.json derives it"
+                );
+            }
+            None => ensure!(
+                self.mode == Mode::Verify,
+                "day2.json pins no Chrome extension for {}",
+                self.app_id
+            ),
+        }
+        Ok(())
+    }
+
+    fn pinned(&self) -> Result<&Binding> {
+        self.extension
+            .as_ref()
+            .with_context(|| format!("day2.json pins no Chrome extension for {}", self.app_id))
+    }
+}
+
+/// One `day2 instance extension` command. The recipe names each step; the
+/// session runs only its mode's, and `pack`'s verification after it.
+pub struct Session {
+    request: Request,
+    done: Vec<Mode>,
+}
+
+impl Session {
+    pub fn new(mode: Mode, request: Request) -> Result<Self> {
+        ensure!(
+            request.mode == mode,
+            "the instance extension request is for {}, not {}",
+            request.mode.name(),
+            mode.name()
+        );
+        request.validate()?;
+        Ok(Self {
+            request,
+            done: Vec::new(),
+        })
+    }
+
+    pub fn step(&mut self, name: &str) -> Result<Value> {
+        let step = Mode::from_name(name)
+            .with_context(|| format!("unknown instance extension step: {name}"))?;
+        let mode = self.request.mode;
+        let expected = match (mode, self.done.as_slice()) {
+            (_, []) => mode,
+            (Mode::Pack, [Mode::Pack]) => Mode::Verify,
+            _ => bail!("instance extension {} runs nothing more", mode.name()),
+        };
+        ensure!(
+            step == expected,
+            "instance extension {} runs {} next, not {name}",
+            mode.name(),
+            expected.name()
+        );
+        let source = &self.request.source;
+        let value = match step {
+            Mode::Verify => verify(source, self.request.extension.as_ref())?,
+            Mode::Pack => pack(
+                source,
+                self.request.pinned()?,
+                self.request.key.as_deref().context("pack names a key")?,
+            )?,
+            Mode::Local => local(
+                source,
+                self.request.pinned()?,
+                self.request
+                    .output
+                    .as_deref()
+                    .context("local names an output")?,
+            )?,
+            Mode::Policy => policy(source, self.request.pinned()?)?,
+            Mode::Fleet => fleet(
+                source,
+                self.request.pinned()?,
+                self.request
+                    .project
+                    .as_deref()
+                    .context("fleet names a project")?,
+            )?,
+        };
+        self.done.push(step);
+        Ok(value)
+    }
+}
+
+/// Verify the app's extension release against day2.json's pin. An app without
+/// one may have neither extension source nor downloads.
+pub fn verify(app: &Path, binding: Option<&Binding>) -> Result<Value> {
     let downloads = downloads(app)?;
-    let Some(config) = declaration(app)? else {
-        extension::verify_undeclared(&downloads)?;
-        return Ok(json!({"declared": false}));
+    let Some(binding) = binding else {
+        ensure!(
+            !present(app)?,
+            "chrome_extension_unpinned: day2.json pins no Chrome extension for this app; remove {}/ or pin its ID",
+            extension::DIRECTORY
+        );
+        extension::verify_unpinned(&downloads)?;
+        return Ok(json!({"pinned": false}));
     };
-    let release = extension::verify(&config, &source(app)?, &downloads)?;
-    Ok(json!({"declared": true, "release": release}))
+    let release = extension::verify(binding, &source(app)?, &downloads)?;
+    Ok(json!({"pinned": true, "release": release}))
 }
 
 /// Sign the current sources and replace the release in `public-downloads/`.
-pub fn pack(app: &Path, key: &Path) -> Result<Value> {
-    let config = required(app)?;
+pub fn pack(app: &Path, binding: &Binding, key: &Path) -> Result<Value> {
     let source = source(app)?;
     let package = extension::pack(
-        &config,
+        binding,
         &source,
         &downloads(app)?,
         &signing_key(app, key)?,
@@ -48,7 +223,7 @@ pub fn pack(app: &Path, key: &Path) -> Result<Value> {
     )?;
     let directory = app.join(public_downloads::SOURCE_DIRECTORY);
     fs::create_dir_all(&directory)?;
-    replace(&directory, &config.package, &package.crx)?;
+    replace(&directory, &binding.crx, &package.crx)?;
     replace(
         &directory,
         extension::UPDATE_MANIFEST,
@@ -56,13 +231,12 @@ pub fn pack(app: &Path, key: &Path) -> Result<Value> {
     )?;
     Ok(json!({
         "release": package.release,
-        "policy": extension::policy(&config, &source)?,
+        "policy": extension::policy(binding, &source)?,
     }))
 }
 
 /// Write an unpacked build into a new directory.
-pub fn local(app: &Path, output: &Path) -> Result<Value> {
-    let config = required(app)?;
+pub fn local(app: &Path, binding: &Binding, output: &Path) -> Result<Value> {
     let overlay = app
         .join(extension::DIRECTORY)
         .join(extension::LOCAL_DIRECTORY);
@@ -70,7 +244,7 @@ pub fn local(app: &Path, output: &Path) -> Result<Value> {
         Err(error) if error.kind() == ErrorKind::NotFound => Files::new(),
         _ => tree(&overlay)?,
     };
-    let files = extension::local(&config, &source(app)?, &overlay)?;
+    let files = extension::local(binding, &source(app)?, &downloads(app)?, &overlay)?;
     ensure!(
         fs::symlink_metadata(output).is_err_and(|error| error.kind() == ErrorKind::NotFound),
         "chrome_extension_local: {} already exists; choose a new directory",
@@ -88,14 +262,14 @@ pub fn local(app: &Path, output: &Path) -> Result<Value> {
     }))
 }
 
-pub fn policy(app: &Path) -> Result<Value> {
-    extension::policy(&required(app)?, &source(app)?)
+pub fn policy(app: &Path, binding: &Binding) -> Result<Value> {
+    extension::policy(binding, &source(app)?)
 }
 
 /// Report how managed browsers are taking up the app's verified release, from
 /// the last day of the GCP project's load-balancer request logs. It reads with
 /// the operator's gcloud credentials and needs no browser-policy access.
-pub fn fleet(app: &Path, project: &str) -> Result<Value> {
+pub fn fleet(app: &Path, binding: &Binding, project: &str) -> Result<Value> {
     ensure!(
         (6..=30).contains(&project.len())
             && project.starts_with(|first: char| first.is_ascii_lowercase())
@@ -105,8 +279,7 @@ pub fn fleet(app: &Path, project: &str) -> Result<Value> {
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
         "chrome_extension_fleet_project: expected a GCP project ID"
     );
-    let config = required(app)?;
-    let release = extension::verify(&config, &source(app)?, &downloads(app)?)?;
+    let release = extension::verify(binding, &source(app)?, &downloads(app)?)?;
     let directory = release
         .update_url
         .strip_suffix(extension::UPDATE_MANIFEST)
@@ -167,38 +340,20 @@ pub fn fleet(app: &Path, project: &str) -> Result<Value> {
     )?)?)
 }
 
-fn required(app: &Path) -> Result<Config> {
-    declaration(app)?.with_context(|| {
-        format!(
-            "chrome_extension_config: {} has no {}/{}",
-            app.display(),
-            extension::DIRECTORY,
-            extension::CONFIG_FILE
-        )
-    })
-}
-
-/// `None` when the app has no `.chrome-extension/` directory at all.
-fn declaration(app: &Path) -> Result<Option<Config>> {
-    let directory = app.join(extension::DIRECTORY);
-    match fs::symlink_metadata(&directory) {
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        metadata => ensure!(
-            metadata?.file_type().is_dir(),
-            "chrome_extension_config: {} must be a directory",
-            extension::DIRECTORY
-        ),
+/// Whether the app has a `.chrome-extension/` directory, which only a pinned
+/// extension may.
+fn present(app: &Path) -> Result<bool> {
+    match fs::symlink_metadata(app.join(extension::DIRECTORY)) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        metadata => {
+            ensure!(
+                metadata?.file_type().is_dir(),
+                "chrome_extension_source: {} must be a directory",
+                extension::DIRECTORY
+            );
+            Ok(true)
+        }
     }
-    let bytes =
-        day2_assets::read_regular(&directory.join(extension::CONFIG_FILE), MAX_CONFIG_BYTES)
-            .with_context(|| {
-                format!(
-                    "chrome_extension_config: declare the extension in {}/{}",
-                    extension::DIRECTORY,
-                    extension::CONFIG_FILE
-                )
-            })?;
-    extension::config(&bytes).map(Some)
 }
 
 fn source(app: &Path) -> Result<Files> {
@@ -344,28 +499,93 @@ mod tests {
     fn app() -> Result<tempfile::TempDir> {
         let app = tempfile::tempdir()?;
         fs::create_dir_all(app.path().join(".chrome-extension/src/icons"))?;
-        fs::write(
-            app.path().join(".chrome-extension/extension.json"),
-            br#"{"id":"aenkglomgaiikbngepnbfminfpfgmape","package":"reminders.crx"}"#,
-        )?;
         fs::write(app.path().join(".chrome-extension/src/background.js"), b"1")?;
         fs::write(app.path().join(".chrome-extension/src/icons/a.png"), b"2")?;
         fs::write(app.path().join(".chrome-extension/src/.DS_Store"), b"x")?;
         Ok(app)
     }
 
+    fn binding() -> Binding {
+        Binding {
+            id: "aenkglomgaiikbngepnbfminfpfgmape".into(),
+            crx: "reminders.crx".into(),
+            update_url: "https://reminders.example.com/downloads/updates.xml".into(),
+        }
+    }
+
+    fn request(mode: Mode) -> Request {
+        Request {
+            mode,
+            app_id: "reminders".into(),
+            source: "/work/reminders/app".into(),
+            extension: Some(binding()),
+            key: None,
+            output: None,
+            project: None,
+        }
+    }
+
+    fn refusal<T>(result: Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("expected a refusal"),
+            Err(error) => format!("{error:#}"),
+        }
+    }
+
     #[test]
-    fn apps_without_a_declaration_may_not_publish_extension_releases() -> Result<()> {
+    fn apps_without_a_pin_may_not_publish_extension_releases() -> Result<()> {
         let app = tempfile::tempdir()?;
-        assert_eq!(verify(app.path())?, json!({"declared": false}));
+        assert_eq!(verify(app.path(), None)?, json!({"pinned": false}));
         fs::create_dir(app.path().join("public-downloads"))?;
         fs::write(app.path().join("public-downloads/tool.crx"), b"crx")?;
-        assert!(
-            format!("{:#}", verify(app.path()).unwrap_err())
-                .contains("chrome_extension_undeclared")
-        );
+        assert!(refusal(verify(app.path(), None)).contains("chrome_extension_unpinned"));
+        fs::remove_file(app.path().join("public-downloads/tool.crx"))?;
         fs::create_dir(app.path().join(".chrome-extension"))?;
-        assert!(format!("{:#}", verify(app.path()).unwrap_err()).contains("declare the extension"));
+        assert!(refusal(verify(app.path(), None)).contains("remove .chrome-extension/"));
+        assert!(refusal(verify(app.path(), Some(&binding()))).contains("src is missing"));
+        Ok(())
+    }
+
+    #[test]
+    fn requests_name_their_modes_inputs_and_a_pin_for_the_app() {
+        let mut pack = request(Mode::Pack);
+        pack.key = Some("/dev/fd/63".into());
+        assert!(Session::new(Mode::Pack, pack.clone()).is_ok());
+        assert!(
+            refusal(Session::new(Mode::Verify, pack.clone())).contains("is for pack, not verify")
+        );
+        let mut keyed = request(Mode::Policy);
+        keyed.key = pack.key.clone();
+        assert!(refusal(Session::new(Mode::Policy, keyed)).contains("only its own inputs"));
+        assert!(Session::new(Mode::Local, request(Mode::Local)).is_err());
+        let mut unpinned = request(Mode::Policy);
+        unpinned.extension = None;
+        assert!(
+            refusal(Session::new(Mode::Policy, unpinned.clone()))
+                .contains("pins no Chrome extension for reminders")
+        );
+        unpinned.mode = Mode::Verify;
+        assert!(Session::new(Mode::Verify, unpinned).is_ok());
+        let mut renamed = request(Mode::Verify);
+        renamed.app_id = "notes".into();
+        assert!(refusal(Session::new(Mode::Verify, renamed)).contains("<app>.crx"));
+    }
+
+    #[test]
+    fn sessions_run_their_mode_then_only_packs_verification() -> Result<()> {
+        let app = tempfile::tempdir()?;
+        let mut unpinned = request(Mode::Verify);
+        unpinned.source = app.path().into();
+        unpinned.extension = None;
+        let mut session = Session::new(Mode::Verify, unpinned)?;
+        assert!(refusal(session.step("pack")).contains("runs verify next, not pack"));
+        assert_eq!(session.step("verify")?, json!({"pinned": false}));
+        assert!(refusal(session.step("verify")).contains("runs nothing more"));
+        let mut pack = request(Mode::Pack);
+        pack.key = Some("/dev/fd/63".into());
+        let mut session = Session::new(Mode::Pack, pack)?;
+        assert!(refusal(session.step("verify")).contains("runs pack next, not verify"));
+        assert!(refusal(session.step("sign")).contains("unknown instance extension step"));
         Ok(())
     }
 
@@ -413,7 +633,7 @@ mod tests {
     fn local_builds_require_a_new_directory() -> Result<()> {
         let app = app()?;
         let existing = tempfile::tempdir()?;
-        let message = format!("{:#}", local(app.path(), existing.path()).unwrap_err());
+        let message = refusal(local(app.path(), &binding(), existing.path()));
         assert!(
             message.contains("manifest.json is missing") || message.contains("already exists"),
             "{message}"

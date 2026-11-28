@@ -4,8 +4,11 @@
 //! directory); CiCheck.roc chooses the step order; this adapter validates the
 //! request, routes the change, runs the JavaScript checks, packs the checked
 //! artifact and writes the receipt, refusing any step out of order or outside
-//! its lane. The host records the build and the extension check it ran for the
-//! session, so the receipt never trusts a recipe's account of them.
+//! its lane. The host records the build it ran for the session and runs the
+//! extension check itself, so the receipt never trusts a recipe's account of
+//! them. The extension check verifies against day2.json's pin for the app,
+//! which the rendered workflow passes in `DAY2_CI_EXTENSION`: `null`, or the
+//! pinned ID, CRX filename and update URL.
 //!
 //! The app lives in `app/` of its repository. The seed is fixed. Forge
 //! identity (repository, commit, run) is not known here and is not recorded.
@@ -65,6 +68,31 @@ const REQUEST_LIMIT: u64 = 65_536;
 const SOURCE_LIMIT: u64 = 4 << 20;
 /// Each fixed platform tool the checks run: the formatter and the linter.
 const TOOL_DEADLINE: Duration = Duration::from_secs(900);
+/// day2.json's extension pin for the run's app, as the rendered workflow
+/// passes it: `null` or a [`day2::chrome_extension::Binding`].
+pub const EXTENSION: &str = "DAY2_CI_EXTENSION";
+const EXTENSION_LIMIT: usize = 1024;
+
+/// The pin `DAY2_CI_EXTENSION` names. The workflow always sets it, so an unset
+/// variable is a refusal, never an app without an extension.
+pub fn extension_pin(
+    value: Option<std::ffi::OsString>,
+) -> Result<Option<day2::chrome_extension::Binding>> {
+    let value = value
+        .with_context(|| format!("{EXTENSION} must name day2.json's extension pin, or null"))?
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{EXTENSION} must be UTF-8 JSON"))?;
+    ensure!(
+        value.len() <= EXTENSION_LIMIT,
+        "{EXTENSION} exceeds {EXTENSION_LIMIT} bytes"
+    );
+    let pin: Option<day2::chrome_extension::Binding> =
+        day2::json::decode(value.as_bytes()).with_context(|| format!("invalid {EXTENSION}"))?;
+    if let Some(binding) = &pin {
+        binding.validate()?;
+    }
+    Ok(pin)
+}
 
 /// What the CLI hands the host.
 #[derive(Debug, Deserialize, Serialize)]
@@ -297,6 +325,9 @@ pub struct Session {
     done: BTreeSet<&'static str>,
     javascript: Option<u64>,
     format: Option<u64>,
+    /// day2.json's extension pin for the app.
+    pin: Option<day2::chrome_extension::Binding>,
+    /// Whether the extension check ran, and whether the app had a pin.
     extension: Option<bool>,
     built: Option<Built>,
     packed: Option<Packed>,
@@ -308,7 +339,12 @@ pub struct Session {
 impl Session {
     /// Validate the request, read the tooling's SDK identity and the head tree.
     pub fn prepare(path: &Path, platform: &Path) -> Result<Self> {
-        let session = Self::with_sdk(path, platform, sdk_distribution(platform)?)?;
+        let session = Self::with_sdk(
+            path,
+            platform,
+            sdk_distribution(platform)?,
+            extension_pin(std::env::var_os(EXTENSION))?,
+        )?;
         seed_abi(platform, Path::new(ABI_SEED))?;
         Ok(session)
     }
@@ -317,6 +353,7 @@ impl Session {
         path: &Path,
         platform: &Path,
         sdk: Option<day2::sdk_release::BlobIdentity>,
+        pin: Option<day2::chrome_extension::Binding>,
     ) -> Result<Self> {
         let request = Request::read(path)?;
         let head = read_tree(&request.head)?;
@@ -338,6 +375,7 @@ impl Session {
             done: BTreeSet::new(),
             javascript: None,
             format: None,
+            pin,
             extension: None,
             built: None,
             packed: None,
@@ -365,6 +403,7 @@ impl Session {
             "route" => "route",
             "javascript" => "javascript",
             "format" => "format",
+            "extension" => "extension",
             "artifact" => "artifact",
             "result" => "result",
             _ => bail!("unknown CI check step: {name}"),
@@ -377,6 +416,7 @@ impl Session {
             "route" => self.route(),
             "javascript" => self.javascript(),
             "format" => self.format(),
+            "extension" => self.extension(),
             "artifact" => self.artifact(),
             _ => self.result(),
         }
@@ -534,18 +574,17 @@ impl Session {
         Ok(json!({ "files": files }))
     }
 
-    /// The host ran `platform extension verify` on `source`.
-    pub fn extension_verified(&mut self, source: &Path, result: &Value) -> Result<()> {
+    /// The head tree's extension release against day2.json's pin: the native
+    /// lane's build publishes its downloads, and the extension lane is its source.
+    fn extension(&mut self) -> Result<Value> {
+        let lanes = self.lanes()?;
         ensure!(
-            std::path::absolute(source)? == self.app(),
-            "CI checks only the head tree's app"
+            lanes.native || lanes.extension,
+            "the change selects no extension check"
         );
-        self.extension = Some(
-            result["declared"]
-                .as_bool()
-                .context("invalid extension verification")?,
-        );
-        Ok(())
+        let verified = crate::chrome_extension::verify(&self.app(), self.pin.as_ref())?;
+        self.extension = Some(self.pin.is_some());
+        Ok(verified)
     }
 
     /// The host is about to build `source`: only the head tree's app, once,
@@ -689,7 +728,7 @@ impl Session {
             reasons: route.reasons.clone(),
             javascript_files: self.javascript,
             roc_files: self.format,
-            extension_declared: self.extension,
+            extension_pinned: self.extension,
             source_inputs,
             artifact: self.artifact.name().to_owned(),
             output: receipt.as_ref().map(|_| self.request.output.clone()),
@@ -716,7 +755,7 @@ pub struct Report {
     pub reasons: Vec<Reason>,
     pub javascript_files: Option<u64>,
     pub roc_files: Option<u64>,
-    pub extension_declared: Option<bool>,
+    pub extension_pinned: Option<bool>,
     pub source_inputs: String,
     pub artifact: String,
     pub output: Option<PathBuf>,

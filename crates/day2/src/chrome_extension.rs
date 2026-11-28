@@ -1,11 +1,13 @@
-//! Self-hosted Chrome extensions. An app may declare one Manifest V3 extension in
+//! Self-hosted Chrome extensions. The instance pins at most one Manifest V3
+//! extension per app (day2.json's `extension`), whose source is the app's
 //! `.chrome-extension/`. The Platform packs it as a deterministic CRX3 with the
-//! app's signing key and publishes it through `public-downloads/` with a Chrome
-//! update manifest. A person signs each release; CI and `platform check` verify it
-//! against the pinned public identity without any private key.
+//! extension's signing key, injecting the manifest's `key` and `update_url`, and
+//! publishes it through `public-downloads/` with a Chrome update manifest. A
+//! person signs each release; CI verifies it against the instance's pin without
+//! any private key.
 //!
-//! These functions are pure. Callers read the source tree, existing downloads and
-//! signing key, and supply randomness for RSA blinding.
+//! These functions are pure. Callers read the instance's pin, the source tree,
+//! existing downloads and signing key, and supply randomness for RSA blinding.
 use crate::public_downloads;
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -19,11 +21,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
-/// App-root directory holding the extension declaration, source and local overlay.
-/// The app build never captures it; only signed release bytes enter the artifact.
+/// App-root directory holding the extension source and local overlay. The app
+/// build never captures it; only signed release bytes enter the artifact.
 pub const DIRECTORY: &str = ".chrome-extension";
-pub const CONFIG_FILE: &str = "extension.json";
-/// The exact unpacked extension that every release packs.
+/// The unpacked extension that every release packs, without the manifest
+/// fields the Platform derives.
 pub const SOURCE_DIRECTORY: &str = "src";
 /// Optional files that replace release sources only in a local unpacked build.
 pub const LOCAL_DIRECTORY: &str = "local";
@@ -33,6 +35,10 @@ pub const MAX_FILES: usize = 512;
 pub const MAX_SOURCE_BYTES: u64 = public_downloads::MAX_FILE_BYTES;
 pub const MAX_KEY_BYTES: u64 = 16 * 1024;
 const MAX_PATH_BYTES: usize = 240;
+/// Manifest fields every release carries and no source declares: the signing
+/// key's public key, which unpacked builds need to keep the release identity,
+/// and the instance's update URL.
+const INJECTED: [&str; 2] = ["key", "update_url"];
 const SIGNED_DATA_PREFIX: &[u8] = b"CRX3 SignedData\x00";
 const RSA_ALGORITHM: &[u8] = &[
     0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
@@ -41,14 +47,59 @@ const RSA_ALGORITHM: &[u8] = &[
 /// Relative path to file bytes, using `/` separators.
 pub type Files = BTreeMap<String, Vec<u8>>;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+/// The extension an instance pins for one app. cli/InstanceSpec.roc derives
+/// every name from the app and its pinned ID; the app restates none of them.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
-    /// The Chrome extension ID derived from the signing key. Changing it creates a
-    /// different extension for every managed browser.
+pub struct Binding {
+    /// The Chrome extension ID: the first 128 bits of SHA-256 over the signing
+    /// key's public key. Changing it creates a different extension for every
+    /// managed browser.
     pub id: String,
-    /// The CRX filename under `public-downloads/`.
-    pub package: String,
+    /// `<app>.crx`, the CRX filename under `public-downloads/`.
+    pub crx: String,
+    /// `https://<app host>/downloads/updates.xml`, which every release names.
+    pub update_url: String,
+}
+
+impl Binding {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.id.len() == 32 && self.id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)),
+            "chrome_extension_id: expected 32 characters a-p"
+        );
+        ensure!(
+            self.crx.ends_with(".crx")
+                && self.crx != UPDATE_MANIFEST
+                && public_downloads::media_type(&self.crx).is_ok(),
+            "chrome_extension_package: expected a public download filename ending in .crx"
+        );
+        let host = self
+            .update_url
+            .strip_prefix("https://")
+            .and_then(|rest| rest.strip_suffix("/downloads/updates.xml"))
+            .unwrap_or_default();
+        ensure!(
+            !host.is_empty()
+                && host.len() <= 253
+                && !host.starts_with(['.', '-'])
+                && !host.ends_with(['.', '-'])
+                && !host.contains("..")
+                && host.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'-')
+                }),
+            "chrome_extension_update_url: expected https://HOST/downloads/updates.xml"
+        );
+        Ok(())
+    }
+
+    /// The package's URL beside the update manifest.
+    fn codebase(&self) -> String {
+        let directory = &self.update_url[..self.update_url.len() - UPDATE_MANIFEST.len()];
+        format!("{directory}{}", self.crx)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -68,12 +119,11 @@ pub struct Package {
     pub release: Release,
 }
 
+/// A source manifest, which declares none of the injected fields.
 struct Manifest {
     version: Version,
-    update_url: String,
-    codebase: String,
     minimum_chrome_version: Option<String>,
-    public_key: Vec<u8>,
+    value: Map<String, Value>,
 }
 
 /// A Chrome version, compared numerically and published exactly as written.
@@ -81,21 +131,6 @@ struct Manifest {
 struct Version {
     parts: [u16; 4],
     text: String,
-}
-
-pub fn config(bytes: &[u8]) -> Result<Config> {
-    let config: Config = crate::json::decode(bytes).context("chrome_extension_config")?;
-    ensure!(
-        config.id.len() == 32 && config.id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)),
-        "chrome_extension_id: expected 32 characters a-p"
-    );
-    ensure!(
-        config.package.ends_with(".crx")
-            && config.package != UPDATE_MANIFEST
-            && public_downloads::media_type(&config.package).is_ok(),
-        "chrome_extension_package: expected a public download filename ending in .crx"
-    );
-    Ok(config)
 }
 
 /// Chrome's extension ID: the first 128 bits of SHA-256(SubjectPublicKeyInfo),
@@ -108,49 +143,50 @@ pub fn extension_id(public_key: &[u8]) -> String {
         .collect()
 }
 
-/// Check that the committed release matches the declaration and current sources.
-/// `downloads` is the complete flat `public-downloads/` directory.
-pub fn verify(config: &Config, source: &Files, downloads: &Files) -> Result<Release> {
-    let manifest = manifest(config, source)?;
+/// Check that the committed release is the pinned extension's and packs the
+/// current sources. `downloads` is the complete flat `public-downloads/`
+/// directory. The release's key is the package's own signing key, which must
+/// be the pinned ID's.
+pub fn verify(binding: &Binding, source: &Files, downloads: &Files) -> Result<Release> {
+    binding.validate()?;
+    let manifest = manifest(source)?;
     let names = downloads.keys().map(String::as_str).collect::<Vec<_>>();
-    let mut expected = vec![config.package.as_str(), UPDATE_MANIFEST];
+    let mut expected = vec![binding.crx.as_str(), UPDATE_MANIFEST];
     expected.sort_unstable();
     ensure!(
         names == expected,
-        "chrome_extension_downloads: public-downloads/ must contain exactly {} and {}; run `day2 platform extension pack`",
-        config.package,
+        "chrome_extension_downloads: public-downloads/ must contain exactly {} and {}; run `day2 instance extension pack`",
+        binding.crx,
         UPDATE_MANIFEST
     );
-    let crx = &downloads[&config.package];
+    let crx = &downloads[&binding.crx];
     let (public_key, archive) = open(crx)?;
     ensure!(
-        extension_id(public_key) == config.id && public_key == manifest.public_key,
-        "chrome_extension_identity: the package is not signed by the declared extension key"
+        extension_id(public_key) == binding.id,
+        "chrome_extension_identity: the package is not signed by extension {}, which day2.json pins",
+        binding.id
     );
     ensure!(
-        archive == zip(source)?,
-        "chrome_extension_stale: {} differs from {}/{}; bump the manifest version and run `day2 platform extension pack`",
-        config.package,
+        downloads[UPDATE_MANIFEST] == update_manifest(binding, &manifest),
+        "chrome_extension_update_manifest: {} does not describe this release; run `day2 instance extension pack`",
+        UPDATE_MANIFEST
+    );
+    ensure!(
+        archive == zip(&released(binding, source, public_key)?)?,
+        "chrome_extension_stale: {} differs from {}/{}; bump the manifest version and run `day2 instance extension pack`",
+        binding.crx,
         DIRECTORY,
         SOURCE_DIRECTORY
     );
-    ensure!(
-        downloads[UPDATE_MANIFEST] == update_manifest(&config.id, &manifest),
-        "chrome_extension_update_manifest: {} does not describe this release; run `day2 platform extension pack`",
-        UPDATE_MANIFEST
-    );
-    Ok(release(config, &manifest, crx))
+    Ok(release(binding, &manifest, crx))
 }
 
-/// Refuse release files that no declaration verifies.
-pub fn verify_undeclared(downloads: &Files) -> Result<()> {
+/// An app the instance pins no extension for publishes no downloads: the only
+/// public download is a pinned extension's release.
+pub fn verify_unpinned(downloads: &Files) -> Result<()> {
     ensure!(
-        !downloads
-            .keys()
-            .any(|name| name.ends_with(".crx") || name == UPDATE_MANIFEST),
-        "chrome_extension_undeclared: public-downloads/ contains a Chrome extension release without {}/{}",
-        DIRECTORY,
-        CONFIG_FILE
+        downloads.is_empty(),
+        "chrome_extension_unpinned: public-downloads/ may hold only the release of the extension day2.json pins, and it pins none for this app"
     );
     Ok(())
 }
@@ -158,22 +194,23 @@ pub fn verify_undeclared(downloads: &Files) -> Result<()> {
 /// Sign the current sources. `downloads` holds the previous release, if any; a
 /// changed extension must have a newer version, and a release never downgrades.
 pub fn pack(
-    config: &Config,
+    binding: &Binding,
     source: &Files,
     downloads: &Files,
     private_key: &[u8],
     random: &dyn SecureRandom,
 ) -> Result<Package> {
-    let manifest = manifest(config, source)?;
+    binding.validate()?;
+    let manifest = manifest(source)?;
     let key = signing_key(private_key)?;
     let public_key = subject_public_key_info(key.public().as_ref());
     ensure!(
-        extension_id(&public_key) == config.id && public_key == manifest.public_key,
-        "chrome_extension_signing_key: the key does not belong to extension {}",
-        config.id
+        extension_id(&public_key) == binding.id,
+        "chrome_extension_signing_key: the key does not belong to extension {}, which day2.json pins",
+        binding.id
     );
-    let archive = zip(source)?;
-    if let Some(previous) = previous(config, downloads)? {
+    let archive = zip(&released(binding, source, &public_key)?)?;
+    if let Some(previous) = previous(binding, downloads)? {
         ensure!(
             manifest.version >= previous.0,
             "chrome_extension_downgrade: version {} is older than the published {}",
@@ -212,14 +249,14 @@ pub fn pack(
         crx.len() as u64 <= public_downloads::MAX_FILE_BYTES,
         "chrome_extension_package_budget"
     );
-    let update_manifest = update_manifest(&config.id, &manifest);
-    let release = release(config, &manifest, &crx);
+    let update_manifest = update_manifest(binding, &manifest);
+    let release = release(binding, &manifest, &crx);
     let downloads = Files::from([
-        (config.package.clone(), crx.clone()),
+        (binding.crx.clone(), crx.clone()),
         (UPDATE_MANIFEST.to_owned(), update_manifest.clone()),
     ]);
     ensure!(
-        verify(config, source, &downloads)? == release,
+        verify(binding, source, &downloads)? == release,
         "chrome_extension_self_check"
     );
     Ok(Package {
@@ -230,11 +267,19 @@ pub fn pack(
 }
 
 /// An unpacked build for `chrome://extensions` → Load unpacked. It never checks
-/// for updates and omits permissions only managed installs receive. An overlay
-/// changes the behavior, so that build also drops the release identity and is
-/// named as a local build.
-pub fn local(config: &Config, source: &Files, overlay: &Files) -> Result<Files> {
-    manifest(config, source)?;
+/// for updates and omits permissions only managed installs receive. Without an
+/// overlay it keeps the release identity: the key of the committed package in
+/// `downloads`, which must be the pinned extension's, though its contents may
+/// predate the sources. An overlay changes the behavior, so that build has no
+/// key and is named as a local build.
+pub fn local(
+    binding: &Binding,
+    source: &Files,
+    downloads: &Files,
+    overlay: &Files,
+) -> Result<Files> {
+    binding.validate()?;
+    let manifest = manifest(source)?;
     ensure!(
         !overlay.contains_key("manifest.json"),
         "chrome_extension_local_manifest: {}/{} cannot replace manifest.json",
@@ -242,14 +287,26 @@ pub fn local(config: &Config, source: &Files, overlay: &Files) -> Result<Files> 
         LOCAL_DIRECTORY
     );
     files(overlay)?;
-    let mut value: Map<String, Value> = serde_json::from_slice(&source["manifest.json"])?;
-    value.remove("update_url");
+    let mut value = manifest.value;
     // Chrome grants blocking web requests only to policy-installed MV3 extensions.
     if let Some(Value::Array(permissions)) = value.get_mut("permissions") {
         permissions.retain(|permission| permission != "webRequestBlocking");
     }
-    if !overlay.is_empty() {
-        value.remove("key");
+    if overlay.is_empty() {
+        let crx = downloads.get(&binding.crx).with_context(|| {
+            format!(
+                "chrome_extension_local: public-downloads/{} holds no release to take the extension's key from; pack one first",
+                binding.crx
+            )
+        })?;
+        let (public_key, _) = open(crx)?;
+        ensure!(
+            extension_id(public_key) == binding.id,
+            "chrome_extension_identity: the package is not signed by extension {}, which day2.json pins",
+            binding.id
+        );
+        value.insert("key".into(), Value::String(STANDARD.encode(public_key)));
+    } else {
         let name = value
             .get("name")
             .and_then(Value::as_str)
@@ -258,34 +315,33 @@ pub fn local(config: &Config, source: &Files, overlay: &Files) -> Result<Files> 
     }
     let mut output = source.clone();
     output.extend(overlay.clone());
-    let mut manifest = serde_json::to_vec_pretty(&value)?;
-    manifest.push(b'\n');
-    output.insert("manifest.json".into(), manifest);
+    output.insert("manifest.json".into(), pretty(&value)?);
     Ok(output)
 }
 
 /// The Google Admin values and equivalent `ExtensionSettings` policy that
 /// force-install the release on managed Chrome. A person applies them; the
 /// Platform never holds a credential that can change browser policy.
-pub fn policy(config: &Config, source: &Files) -> Result<Value> {
-    let manifest = manifest(config, source)?;
+pub fn policy(binding: &Binding, source: &Files) -> Result<Value> {
+    binding.validate()?;
+    let manifest = manifest(source)?;
     let mut settings = Map::new();
     settings.insert(
-        config.id.clone(),
+        binding.id.clone(),
         json!({
             "installation_mode": "force_installed",
-            "update_url": manifest.update_url,
+            "update_url": binding.update_url,
             "override_update_url": true,
         }),
     );
     Ok(json!({
-        "extension_id": config.id,
+        "extension_id": binding.id,
         "version": manifest.version.to_string(),
-        "update_url": manifest.update_url,
+        "update_url": binding.update_url,
         "admin_console": {
             "add": "Add Chrome app or extension by ID, From a custom URL",
             "installation_policy": "Force install",
-            "installation_url": manifest.update_url,
+            "installation_url": binding.update_url,
             "update_url": "Installation URL (see above)",
         },
         "chrome_policy": { "ExtensionSettings": settings },
@@ -431,18 +487,54 @@ fn update_check<'a>(query: &'a str, id: &str) -> Option<UpdateCheck<'a>> {
         })
 }
 
-fn release(config: &Config, manifest: &Manifest, crx: &[u8]) -> Release {
+fn release(binding: &Binding, manifest: &Manifest, crx: &[u8]) -> Release {
     Release {
-        extension_id: config.id.clone(),
+        extension_id: binding.id.clone(),
         version: manifest.version.to_string(),
-        package: config.package.clone(),
-        update_url: manifest.update_url.clone(),
-        codebase: manifest.codebase.clone(),
+        package: binding.crx.clone(),
+        update_url: binding.update_url.clone(),
+        codebase: binding.codebase(),
         crx_digest: crate::digest(crx),
     }
 }
 
-fn manifest(config: &Config, source: &Files) -> Result<Manifest> {
+/// The files a release packs: the sources, with the signing key's public key
+/// and the instance's update URL inserted as the manifest's first members. The
+/// rest of the manifest is the source's bytes, so a release never depends on how
+/// a JSON library writes. Neither value needs escaping: the key is base64 and
+/// [`Binding::validate`] admits only plain URL bytes.
+fn released(binding: &Binding, source: &Files, public_key: &[u8]) -> Result<Files> {
+    let bytes = &source["manifest.json"];
+    let opening = bytes
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+        .filter(|start| bytes[*start] == b'{')
+        .context("chrome_extension_manifest: expected a JSON object")?;
+    let injected = format!(
+        "\n  \"key\": \"{}\",\n  \"update_url\": \"{}\",",
+        STANDARD.encode(public_key),
+        binding.update_url
+    );
+    let mut files = source.clone();
+    files.insert(
+        "manifest.json".into(),
+        [
+            &bytes[..=opening],
+            injected.as_bytes(),
+            &bytes[opening + 1..],
+        ]
+        .concat(),
+    );
+    Ok(files)
+}
+
+fn pretty(value: &Map<String, Value>) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn manifest(source: &Files) -> Result<Manifest> {
     files(source)?;
     let bytes = source.get("manifest.json").with_context(|| {
         format!(
@@ -463,32 +555,12 @@ fn manifest(config: &Config, source: &Files) -> Result<Manifest> {
     );
     text("name")?;
     let version = Version::parse(text("version")?)?;
-    let public_key = STANDARD
-        .decode(text("key")?)
-        .context("chrome_extension_manifest: `key` must be base64")?;
-    ensure!(
-        public_key.len() <= 1024
-            && subject_public_key_info(rsa_public_key(&public_key)?) == public_key
-            && extension_id(&public_key) == config.id,
-        "chrome_extension_manifest: `key` must be the RSA public key of extension {}",
-        config.id
-    );
-    let update_url = text("update_url")?;
-    let host = update_url
-        .strip_prefix("https://")
-        .and_then(|rest| rest.strip_suffix("/downloads/updates.xml"))
-        .unwrap_or_default();
-    ensure!(
-        !host.is_empty()
-            && host.len() <= 253
-            && !host.starts_with(['.', '-'])
-            && !host.ends_with(['.', '-'])
-            && !host.contains("..")
-            && host.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
-            }),
-        "chrome_extension_manifest: update_url must be https://HOST/downloads/updates.xml"
-    );
+    for field in INJECTED {
+        ensure!(
+            !value.contains_key(field),
+            "chrome_extension_manifest: remove `{field}` from {DIRECTORY}/{SOURCE_DIRECTORY}/manifest.json; every release derives it from day2.json's pin"
+        );
+    }
     let minimum_chrome_version = match value.get("minimum_chrome_version") {
         None => None,
         Some(Value::String(minimum)) => Some(Version::parse(minimum)?.to_string()),
@@ -496,10 +568,8 @@ fn manifest(config: &Config, source: &Files) -> Result<Manifest> {
     };
     Ok(Manifest {
         version,
-        update_url: update_url.to_owned(),
-        codebase: format!("https://{host}/downloads/{}", config.package),
         minimum_chrome_version,
-        public_key,
+        value,
     })
 }
 
@@ -579,22 +649,19 @@ fn signing_key(pem: &[u8]) -> Result<rsa::KeyPair> {
 }
 
 /// Previous release: its verified version and archive.
-fn previous(config: &Config, downloads: &Files) -> Result<Option<(Version, Vec<u8>)>> {
-    let (crx, xml) = match (
-        downloads.get(&config.package),
-        downloads.get(UPDATE_MANIFEST),
-    ) {
+fn previous(binding: &Binding, downloads: &Files) -> Result<Option<(Version, Vec<u8>)>> {
+    let (crx, xml) = match (downloads.get(&binding.crx), downloads.get(UPDATE_MANIFEST)) {
         (None, None) => return Ok(None),
         (Some(crx), Some(xml)) => (crx, xml),
         _ => bail!(
             "chrome_extension_previous: public-downloads/ has only half of a release; restore both {} and {} or remove both",
-            config.package,
+            binding.crx,
             UPDATE_MANIFEST
         ),
     };
     let (public_key, archive) = open(crx)?;
     ensure!(
-        extension_id(public_key) == config.id,
+        extension_id(public_key) == binding.id,
         "chrome_extension_previous: the existing package belongs to another extension"
     );
     // The XML declaration also has a version attribute; read only updatecheck's.
@@ -838,15 +905,17 @@ fn crc32(bytes: &[u8]) -> u32 {
     })
 }
 
-fn update_manifest(id: &str, manifest: &Manifest) -> Vec<u8> {
+fn update_manifest(binding: &Binding, manifest: &Manifest) -> Vec<u8> {
     let minimum = manifest
         .minimum_chrome_version
         .as_ref()
         .map(|minimum| format!(" prodversionmin=\"{minimum}\""))
         .unwrap_or_default();
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gupdate xmlns=\"http://www.google.com/update2/response\" protocol=\"2.0\">\n  <app appid=\"{id}\">\n    <updatecheck codebase=\"{}\" version=\"{}\"{minimum} />\n  </app>\n</gupdate>\n",
-        manifest.codebase, manifest.version
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gupdate xmlns=\"http://www.google.com/update2/response\" protocol=\"2.0\">\n  <app appid=\"{}\">\n    <updatecheck codebase=\"{}\" version=\"{}\"{minimum} />\n  </app>\n</gupdate>\n",
+        binding.id,
+        binding.codebase(),
+        manifest.version
     )
     .into_bytes()
 }

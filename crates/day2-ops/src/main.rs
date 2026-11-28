@@ -46,6 +46,8 @@ struct Operations {
     candidate_session: Option<instance_candidate::Session>,
     deploy_session: Option<instance_deploy::Session>,
     selection_session: Option<instance_selection::Session>,
+    /// `day2 instance extension`'s session; the host action fixes its mode.
+    extension_session: Option<chrome_extension::Session>,
     /// Whether the host action started `day2 ci check`, and its session.
     ci_mode: bool,
     ci_session: Option<ci_check::Session>,
@@ -441,52 +443,17 @@ impl Operations {
                 let parameters: Input = input(&request)?;
                 day2::build_dependencies::write_lock(&platform()?, &parameters.source)
             }
-            "chrome-extension-verify" | "chrome-extension-policy" => {
+            "instance-extension-step" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Input {
-                    source: PathBuf,
+                    name: String,
                 }
-                let parameters: Input = input(&request)?;
-                if request.action == "chrome-extension-verify" {
-                    let verified = chrome_extension::verify(&parameters.source)?;
-                    if let Some(session) = self.ci_session.as_mut() {
-                        session.extension_verified(&parameters.source, &verified)?;
-                    }
-                    Ok(verified)
-                } else {
-                    chrome_extension::policy(&parameters.source)
-                }
-            }
-            "chrome-extension-pack" => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Input {
-                    source: PathBuf,
-                    key: PathBuf,
-                }
-                let parameters: Input = input(&request)?;
-                chrome_extension::pack(&parameters.source, &parameters.key)
-            }
-            "chrome-extension-fleet" => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Input {
-                    source: PathBuf,
-                    project: String,
-                }
-                let parameters: Input = input(&request)?;
-                chrome_extension::fleet(&parameters.source, &parameters.project)
-            }
-            "chrome-extension-local" => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Input {
-                    source: PathBuf,
-                    output: PathBuf,
-                }
-                let parameters: Input = input(&request)?;
-                chrome_extension::local(&parameters.source, &parameters.output)
+                let name = input::<Input>(&request)?.name;
+                self.extension_session
+                    .as_mut()
+                    .context("instance extension session required")?
+                    .step(&name)
             }
             "build-source" => {
                 #[derive(Deserialize)]
@@ -1238,6 +1205,13 @@ fn candidate_mode(action: &str) -> Option<instance_candidate::Mode> {
         .and_then(instance_candidate::Mode::from_name)
 }
 
+/// The extension command a host action starts: `instance-extension-<mode>`.
+fn extension_mode(action: &str) -> Option<chrome_extension::Mode> {
+    action
+        .strip_prefix("instance-extension-")
+        .and_then(chrome_extension::Mode::from_name)
+}
+
 /// The source command a host action starts: `instance-source-<mode>`.
 fn source_mode(action: &str) -> Option<instance_source::Mode> {
     action
@@ -1263,6 +1237,7 @@ fn run(request: Request) -> Result<Value> {
         candidate_session: None,
         deploy_session: None,
         selection_session: None,
+        extension_session: None,
         ci_mode: false,
         ci_session: None,
         fetch_mode: false,
@@ -1295,6 +1270,7 @@ fn run(request: Request) -> Result<Value> {
     .contains(&request.action.as_str())
         && source_mode(&request.action).is_none()
         && candidate_mode(&request.action).is_none()
+        && extension_mode(&request.action).is_none()
     {
         ensure!(
             ["instance-project", "artifact-project", "artifact-version"]
@@ -1395,6 +1371,13 @@ fn run(request: Request) -> Result<Value> {
         let input: Input = input(&request)?;
         operations.instance_mode = Some(instance_roots::Mode::Deploy);
         vec!["instance-deploy-session".into(), input.request, input.roots]
+    } else if let Some(mode) = extension_mode(&request.action) {
+        // `day2 instance extension <mode>` only: the action fixes the mode and
+        // the session validates the request, including the pin, which the
+        // recipe never names.
+        operations.extension_session =
+            Some(chrome_extension::Session::new(mode, input(&request)?)?);
+        vec!["instance-extension-session".into(), mode.name().into()]
     } else if request.action == "instance-selection" {
         operations.selection_session = Some(instance_selection::Session::new(
             input(&request)?,

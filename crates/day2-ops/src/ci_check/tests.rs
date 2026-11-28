@@ -18,7 +18,7 @@ fn repository() -> tempfile::TempDir {
     write(root, "app/domain/README.md", b"rules\n");
     write(root, "app/ui/app.js", b"export const a = 1;\n");
     write(root, "app/ui/NOTES.md", b"notes\n");
-    write(root, "app/.chrome-extension/extension.json", b"{}\n");
+    write(root, "app/.chrome-extension/README.md", b"# Extension\n");
     write(
         root,
         "app/.chrome-extension/src/background.js",
@@ -422,7 +422,7 @@ fn the_report_shape_is_pinned_for_the_cli() -> Result<()> {
         ],
         javascript_files: Some(3),
         roc_files: Some(12),
-        extension_declared: Some(true),
+        extension_pinned: Some(true),
         source_inputs: inputs.clone(),
         artifact: "written".into(),
         output: Some("/work/ci".into()),
@@ -491,7 +491,7 @@ fn session_reusing(
             reuse: reuse.map(Path::to_path_buf),
         })?,
     )?;
-    Session::with_sdk(&request, &work.join("platform"), sdk)
+    Session::with_sdk(&request, &work.join("platform"), sdk, None)
 }
 
 fn session(head: &Path, base: Option<&Path>, work: &Path) -> Result<Session> {
@@ -560,6 +560,88 @@ fn a_session_runs_only_its_lanes_in_order() -> Result<()> {
 }
 
 #[test]
+fn the_extension_check_verifies_against_the_workflows_pin() -> Result<()> {
+    let pinned = r#"{"id":"aenkglomgaiikbngepnbfminfpfgmape","crx":"app.crx","update_url":"https://app.example.com/downloads/updates.xml"}"#;
+    assert_eq!(extension_pin(Some("null".into()))?, None);
+    assert_eq!(
+        extension_pin(Some(pinned.into()))?.map(|pin| pin.crx),
+        Some("app.crx".into())
+    );
+    for refused in [
+        None,
+        Some(""),
+        Some("{}"),
+        Some(
+            r#"{"id":"aenkglomgaiikbngepnbfminfpfgmape","crx":"app.crx","update_url":"http://app.example.com/downloads/updates.xml"}"#,
+        ),
+    ] {
+        assert!(
+            extension_pin(refused.map(Into::into)).is_err(),
+            "{refused:?}"
+        );
+    }
+    // The host runs the check for either lane that needs it, against the pin it
+    // read, never one a recipe names.
+    let base = repository();
+    let head = repository();
+    write(
+        head.path(),
+        "app/.chrome-extension/README.md",
+        b"# Changed\n",
+    );
+    let work = tempfile::tempdir()?;
+    let mut checked = session(head.path(), Some(base.path()), work.path())?;
+    assert_eq!(checked.step("route")?["extension"], true);
+    assert!(
+        format!("{:#}", checked.step("extension").unwrap_err())
+            .contains("remove .chrome-extension/"),
+        "an app without a pin has no extension source"
+    );
+    let mut checked = session(head.path(), Some(base.path()), work.path())?;
+    checked.step("route")?;
+    checked.pin = extension_pin(Some(pinned.into()))?;
+    assert!(
+        format!("{:#}", checked.step("extension").unwrap_err())
+            .contains("src/manifest.json is missing")
+    );
+    // With sources, the pinned check reaches the package: one that is not the
+    // pinned extension's release, here not a CRX3 at all, is refused.
+    write(
+        head.path(),
+        "app/.chrome-extension/src/manifest.json",
+        br#"{"manifest_version":3,"name":"App","version":"1"}"#,
+    );
+    write(
+        head.path(),
+        "app/public-downloads/app.crx",
+        b"not a package",
+    );
+    write(
+        head.path(),
+        "app/public-downloads/updates.xml",
+        b"<gupdate/>",
+    );
+    let mut checked = session(head.path(), Some(base.path()), work.path())?;
+    checked.step("route")?;
+    checked.pin = extension_pin(Some(pinned.into()))?;
+    assert!(format!("{:#}", checked.step("extension").unwrap_err()).contains("not a CRX3 package"));
+    fs::remove_dir_all(head.path().join("app/public-downloads"))?;
+    let mut checked = session(head.path(), Some(base.path()), work.path())?;
+    checked.step("route")?;
+    assert!(
+        checked.step("result").is_err(),
+        "the extension lane has not run"
+    );
+    let unchanged = repository();
+    fs::remove_dir_all(unchanged.path().join("app/.chrome-extension"))?;
+    let mut checked = session(unchanged.path(), Some(unchanged.path()), work.path())?;
+    checked.step("route")?;
+    assert_eq!(checked.step("extension")?, json!({"pinned": false}));
+    assert!(checked.step("extension").is_err(), "once");
+    Ok(())
+}
+
+#[test]
 fn minified_javascript_is_refused_as_unlintable() -> Result<()> {
     let head = repository();
     write(head.path(), "app/ui/vendor.min.js", b"var a=1;\n");
@@ -604,7 +686,7 @@ fn built(
     // The lanes the recipe ran before the artifact step.
     checked.javascript = Some(3);
     checked.format = Some(2);
-    checked.extension_verified(&app, &json!({ "declared": false }))?;
+    checked.extension = Some(false);
     Ok(checked)
 }
 
@@ -786,7 +868,7 @@ fn a_reused_result_is_verified_again_and_written_as_a_built_one() -> Result<()> 
     // The cheap lanes do; the recipe ran them before the artifact step.
     checked.javascript = Some(3);
     checked.format = Some(2);
-    checked.extension_verified(&app, &json!({ "declared": false }))?;
+    checked.extension = Some(false);
     assert_eq!(checked.step("artifact")?["artifact"], "reused");
     let report: Report = serde_json::from_value(checked.step("result")?)?;
     assert_eq!(
@@ -981,7 +1063,7 @@ fn a_reuse_miss_builds_as_always_and_reports_why() -> Result<()> {
     });
     checked.javascript = Some(3);
     checked.format = Some(2);
-    checked.extension_verified(&app, &json!({ "declared": false }))?;
+    checked.extension = Some(false);
     assert_eq!(checked.step("artifact")?["artifact"], "written");
     let report: Report = serde_json::from_value(checked.step("result")?)?;
     assert_eq!(report.artifact, "written");
@@ -1012,11 +1094,10 @@ pub(crate) fn reusing(
     platform: &Path,
     sdk: day2::sdk_release::BlobIdentity,
 ) -> Result<Session> {
-    let mut checked = Session::with_sdk(request, platform, Some(sdk))?;
+    let mut checked = Session::with_sdk(request, platform, Some(sdk), None)?;
     ensure!(checked.step("route")?["reused"] == true, "nothing reused");
     checked.javascript = Some(1);
     checked.format = Some(1);
-    let app = checked.app();
-    checked.extension_verified(&app, &json!({ "declared": false }))?;
+    checked.extension = Some(false);
     Ok(checked)
 }

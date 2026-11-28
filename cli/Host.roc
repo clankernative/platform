@@ -62,6 +62,17 @@ Host :: [].{
 		)
 	}
 
+	## `day2 instance extension <verb>`: the action fixes the mode; the request travels inline and the host validates it
+	## again.
+	instance_extension! : Str, Str => Try(Str, Str)
+	instance_extension! = |verb, request| call!(
+		Json.to_str({
+			protocol: 1.U32,
+			action: "instance-extension-${verb}",
+			input: request,
+		}),
+	)
+
 	instance_selection! : Str => Try(Str, Str)
 	instance_selection! = |request| call!(
 		Json.to_str({

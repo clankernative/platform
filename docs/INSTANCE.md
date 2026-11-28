@@ -154,7 +154,7 @@ Nothing below can be configured, restated or overridden.
 | App backups | `<project>-<id>-backups` |
 | App CI results | `<project>-<id>-ci`, where the required workflow's store step writes; in the app's `app-edge` root when `forge.oidc` is set |
 | App resources | from `size`: `standard` 512 MiB, `large` 2048 MiB; both 1000m CPU, 1024 processes, 4 concurrent requests, 30 s shutdown and a 5 GiB SQLite volume |
-| Extension downloads | `/downloads/<id>.crx` and `/downloads/updates.xml`, when `extension` is set: the app edge's `public_download_paths`, sorted, and the only download paths that bypass IAP |
+| Extension downloads | `/downloads/<id>.crx` (the CRX filename `<id>.crx`) and `/downloads/updates.xml`, when `extension` is set: the app edge's `public_download_paths`, sorted, and the only download paths that bypass IAP |
 | Extension update URL | `https://<id>.<domains.apps>/downloads/updates.xml`, when `extension` is set |
 | Extension signing key | Secret Manager secret `<id>-chrome-extension-signing-key`, when `extension` is set |
 
@@ -962,6 +962,22 @@ pins the fixture instance's file.
   github.repository }}` included: Gitea mints no OIDC token itself, and a
   value in a step's own `env:` is one an earlier step cannot replace through
   `$GITHUB_ENV`. Reuse also gets the `verification` cases, as check does.
+- **Extension.** The check step's `env:` holds `DAY2_CI_EXTENSION`, the app's
+  extension pin from the map: `null`, or its ID, CRX filename and update URL
+  (`${{ toJSON(<map>[github.repository].extension) }}`). Check verifies the
+  app's extension release against it, so the release's identity and names
+  come from `day2.json`, never from the app repository. An SDK that predates
+  the variable ignores it, so the workflow renders it for every app; an SDK
+  that reads it refuses a run without it, so render the workflow before any app
+  selects such an SDK.
+  - Such an SDK also refuses an extension source that still declares the
+    names it injects, and CI runs the SDK `apps.<id>.sdk` selects, which an
+    app pull request cannot change. Move an extension app in two steps: select
+    the SDK, then merge the app's change that drops `extension.json` and the
+    manifest's `key` and `update_url`, raises the version and packs the release
+    with `day2 instance extension pack`. In between, the app's CI fails, so
+    merge that change right after the selection; a deploy meanwhile still takes
+    the last checked main commit's stored artifact.
 - **Logic.** The check step passes `/tmp/day2-ci/base` for `pull_request` and
   `--reuse /tmp/day2-ci/reuse` otherwise, that is for the push run
   (`${{ github.event_name == 'pull_request' && '/tmp/day2-ci/base' || '--reuse
