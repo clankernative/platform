@@ -376,8 +376,10 @@ impl PendingPublication {
         }
     }
 
-    /// Pure state gate/owning move, with no check, allocation or cleanup. The
-    /// caller retains the entire success/error owner before final native posts.
+    /// Successful Prepared transition is only a state gate/owning move, with
+    /// no check, allocation or cleanup. Failure also performs the existing
+    /// creator-PID-fenced local refusal/CAS. The caller retains the entire
+    /// Ready/Failed outcome BEFORE final native posts on either branch.
     pub fn into_ready(mut self) -> Result<ReadyPublication, FailedPublication> {
         let inner = self.inner.take().expect("private pending attempt");
         if self.phase == AttemptState::Prepared {

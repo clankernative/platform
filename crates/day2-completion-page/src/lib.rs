@@ -472,6 +472,9 @@ mod tests {
         #[derive(Default)]
         struct Moves(bool);
         impl<'a> Visit<'a> for Moves {
+            fn visit_expr_assign(&mut self, _: &'a syn::ExprAssign) {
+                self.0 = true;
+            }
             fn visit_expr_method_call(&mut self, call: &'a syn::ExprMethodCall) {
                 if [
                     "take",
@@ -519,6 +522,16 @@ mod tests {
                 assert!(!borrowed_attempt_operation(&mutant, name, before, after));
             }
             assert!(!borrowed_attempt_operation(source, name, after, before));
+            // Mutate the ACTUAL caught bodies. A direct field assignment could
+            // otherwise drop Backing before the external native posts, even
+            // though no forbidden ownership method was called.
+            let boundary = "std::panic::AssertUnwindSafe(|| {";
+            assert!(source.contains(boundary));
+            let changed = source.replace(
+                boundary,
+                "std::panic::AssertUnwindSafe(|| { self.inner = None;",
+            );
+            assert!(!borrowed_attempt_operation(&changed, name, before, after));
         }
     }
 
