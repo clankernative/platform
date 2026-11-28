@@ -711,9 +711,13 @@ impl Job {
             self.commit()?,
         );
         let Some((bytes, generation)) = self.store.read(&uri)? else {
-            self.plan
-                .extend(["archive", "inputs", "controls", "cached"]);
-            return Ok(json!({"found": false}));
+            let verify_legacy_controls = self.instance.app_ci.is_none();
+            self.plan.extend(["archive", "inputs"]);
+            if verify_legacy_controls {
+                self.plan.push("controls");
+            }
+            self.plan.push("cached");
+            return Ok(json!({"found": false, "verify_legacy_controls": verify_legacy_controls}));
         };
         let value = record::decode(&bytes)?;
         record::check(&value, &self.app, &self.instance.scope())?;
@@ -726,7 +730,7 @@ impl Job {
         self.stored = Some(bytes);
         self.outcome = Some("stored");
         self.plan.push("record");
-        Ok(json!({"found": true}))
+        Ok(json!({"found": true, "verify_legacy_controls": false}))
     }
 
     /// Run one in-process source session to its end and take its effects back.
@@ -795,8 +799,8 @@ impl Job {
         Ok(json!({"source_inputs": inputs}))
     }
 
-    /// The archive's CI controls against the instance-approved contract and its
-    /// qualified release, before any cached result may be reused.
+    /// For repository-local CI, verify the archive's controls against the
+    /// approved contract and qualified release before reusing a cached result.
     fn controls(&mut self) -> Result<Value> {
         let archive = self.work()?.join("source.tar.gz");
         let receipt = self.source_session(

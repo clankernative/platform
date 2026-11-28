@@ -700,9 +700,10 @@ identity's credentials and the forge token of [`instance source`](#source).
 - **build.**
   - The stored candidate record for the binding and `COMMIT`, validated as
     `check` does and required to be this binding's and commit's, is the answer.
-  - Otherwise: the commit's archive and its source inputs (below); its CI
-    controls, verified as `verify-controls` verifies them, before any cached
-    result can be used; then the checked-inputs record. A cached result must be
+  - Otherwise: read the commit's archive and its source inputs (below).
+    For instances using repository-local CI, run `verify-controls` before
+    looking up the checked-inputs record. With `forge.oidc`, the source archive
+    can omit repository-local workflow files. A cached result must be
     for this binding and inputs and checked at its own commit. For its own
     commit it is the answer as it is; for another commit the answer is the same
     record with this commit and this commit's build log, which receives the
