@@ -248,6 +248,14 @@ impl FreshPage {
         })
     }
 
+    /// An owned copy of the already fixed PUBLIC envelope, including this
+    /// file's dev/ino. No state byte, resource handle or live observation is
+    /// returned. A native signer must take this DATA from its actual retained
+    /// page; a caller-supplied equal array proves neither creator nor authority.
+    pub fn pending_envelope_data(&self) -> [u8; FRAME_BYTES] {
+        self.inner.as_ref().expect("private fresh page").frame
+    }
+
     /// Exactly one fixed pending envelope and THIS read-only page descriptor.
     /// The actual caller owns socket authentication, waits and original/posts.
     /// No retry is performed, including after a consumed/ambiguous send.
@@ -589,6 +597,55 @@ mod tests {
         let (fd, frame) = packet(right.as_fd());
         let received = validate_received_data(fd, frame, binding()).unwrap();
         (pending, received)
+    }
+
+    #[cfg_attr(not(feature = "kernel-qualification"), test)]
+    fn owned_public_envelope_copy_matches_actual_send_and_refuses_equal_binding_substitution() {
+        let first = FreshPage::create(binding()).unwrap();
+        let second = FreshPage::create(binding()).unwrap();
+        // Only public mechanical DATA is copied here, not a signature or a
+        // fabricated native creator/receiver. Both real files stay alive.
+        let first_envelope = first.pending_envelope_data();
+        let second_envelope = second.pending_envelope_data();
+        assert_eq!(
+            &first_envelope[..HEADER_BYTES],
+            &second_envelope[..HEADER_BYTES]
+        );
+        assert_ne!(first_envelope, second_envelope);
+        let mut changed_copy = first_envelope;
+        changed_copy.fill(0xff);
+        assert_ne!(changed_copy, first_envelope);
+        assert_eq!(first.pending_envelope_data(), first_envelope);
+
+        let (left, right) = sockets();
+        let first_pending = first.send_pending(left.as_fd()).unwrap();
+        let (first_file, first_actual) = packet(right.as_fd());
+        assert_eq!(first_actual, first_envelope);
+        let first_received = validate_received_data(first_file, first_envelope, binding()).unwrap();
+        assert_eq!(first_received.state_data().unwrap(), StateData::Pending);
+
+        let second_pending = second.send_pending(left.as_fd()).unwrap();
+        let (second_file, second_actual) = packet(right.as_fd());
+        assert_eq!(second_actual, second_envelope);
+        let duplicate = rustix::io::fcntl_dupfd_cloexec(&second_file, 0).unwrap();
+        let second_received = validate_received_data(duplicate, second_actual, binding()).unwrap();
+        assert_eq!(second_received.state_data().unwrap(), StateData::Pending);
+        // A later native receiver must authenticate the FULL original
+        // envelope. Equal core Binding DATA does not select another file.
+        assert_eq!(
+            validate_received_data(second_file, first_envelope, binding())
+                .err()
+                .unwrap()
+                .kind,
+            FailureKind::Frame
+        );
+        let Publication::Known(mut known) = first_pending.prepare().unwrap().publish() else {
+            panic!("original page refused")
+        };
+        drop(second_pending);
+        assert_eq!(first_received.state_data().unwrap(), StateData::Known);
+        assert_eq!(second_received.state_data().unwrap(), StateData::Refused);
+        assert!(known.dispose().unmapped);
     }
 
     #[cfg_attr(not(feature = "kernel-qualification"), test)]
@@ -1249,7 +1306,7 @@ mod tests {
             "PASS actual_backend\nPASS published_cleanup\nPASS abandonment\nPASS competing_terminal\n",
             "PASS all_binding_fields\nPASS readonly_transfer\nPASS forged_known_data\nPASS seals_and_state\n",
             "PASS failed_send\nPASS twice_replay\nPASS foreign_reader\nPASS producer_death\n",
-            "PASS older_nonatomic_alias\nPASS descriptor_zero_cleanup\nCOMPLETE 14\n"
+            "PASS older_nonatomic_alias\nPASS descriptor_zero_cleanup\nPASS owned_envelope_data\nCOMPLETE 15\n"
         );
         assert_eq!(
             actual,
@@ -1308,7 +1365,7 @@ mod tests {
             file.write_all(bytes).unwrap();
             file.sync_all().unwrap();
         }
-        let cases: [(&str, fn()); 14] = [
+        let cases: [(&str, fn()); 15] = [
             (
                 "actual_backend",
                 actual_selected_rustix_backend_is_bound_to_its_build_script,
@@ -1365,15 +1422,19 @@ mod tests {
                 "descriptor_zero_cleanup",
                 isolated_descriptor_zero_and_repeated_cleanup_are_real_kernel_cases,
             ),
+            (
+                "owned_envelope_data",
+                owned_public_envelope_copy_matches_actual_send_and_refuses_equal_binding_substitution,
+            ),
         ];
         for (name, case) in cases {
             case();
             writeln!(report, "PASS {name}").unwrap();
             report.sync_all().unwrap();
         }
-        writeln!(report, "COMPLETE 14").unwrap();
+        writeln!(report, "COMPLETE 15").unwrap();
         report.sync_all().unwrap();
-        println!("COMPLETION_KERNEL_COMPLETE 14");
+        println!("COMPLETION_KERNEL_COMPLETE 15");
     }
 
     #[cfg_attr(not(feature = "kernel-qualification"), test)]
