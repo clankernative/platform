@@ -1098,7 +1098,6 @@ pub(crate) fn reusing(
     ensure!(checked.step("route")?["reused"] == true, "nothing reused");
     checked.javascript = Some(1);
     checked.format = Some(1);
-    let app = checked.app();
     checked.extension = Some(false);
     Ok(checked)
 }
