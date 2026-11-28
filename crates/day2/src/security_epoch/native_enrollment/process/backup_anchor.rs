@@ -103,6 +103,78 @@ impl ScheduledJobSender {
         checked
     }
 
+    /// Public commitment of this actual retained packet sender only, not a
+    /// process/descriptor getter or permission. Both native checks are real.
+    pub(in crate::security_epoch::native_enrollment) fn commitment_data(
+        &mut self,
+        original: &mut NativeAcquisition,
+    ) -> Result<Digest> {
+        let requested = (|| {
+            self.check(original)?;
+            Digest::of(&("day2-scheduled-backup-process-v1", &self.process.data))
+        })();
+        let checked = self.check(original);
+        if requested.is_err() || checked.is_err() {
+            self.refuse();
+            original.refuse();
+        }
+        let commitment = requested?;
+        checked?;
+        Ok(commitment)
+    }
+
+    /// The Hello and final Submit must be actual messages from the SAME actor
+    /// on the SAME accepted connection. Neither numeric PID nor equal DATA can
+    /// replace these retained kernel anchors. Both independent posts always run.
+    pub(in crate::security_epoch::native_enrollment) fn check_same_submit_actor(
+        &mut self,
+        other: &mut Self,
+        original: &mut NativeAcquisition,
+    ) -> Result<()> {
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+            self.check(original)?;
+            other.check(original)?;
+            ensure!(
+                Rc::ptr_eq(&self.socket, &other.socket) && self.cookie == other.cookie,
+                "backup_submit_connection_changed"
+            );
+            MessageProcess::check_same_actor(
+                &mut [
+                    &mut self.process,
+                    &mut self.connector,
+                    &mut other.process,
+                    &mut other.connector,
+                ],
+                original,
+                &HashCosts::disabled(),
+            )
+        }));
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check(original)));
+        let second =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| other.check(original)));
+        if !matches!(&requested, Ok(Ok(())))
+            || !matches!(&first, Ok(Ok(())))
+            || !matches!(&second, Ok(Ok(())))
+        {
+            self.refuse();
+            other.refuse();
+            original.refuse();
+        }
+        // All checks above are evaluated before the first primary is returned.
+        match requested {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(result) => result?,
+        }
+        match first {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(result) => result?,
+        }
+        match second {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(result) => result,
+        }
+    }
+
     /// Compare supplied historical DATA with the real retained message actor.
     /// This returns no actor/descriptor or native authority to the caller.
     pub(in crate::security_epoch::native_enrollment) fn require_process_data(

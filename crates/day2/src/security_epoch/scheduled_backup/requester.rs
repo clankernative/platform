@@ -28,6 +28,184 @@ enum SubmitData {
     Submit { intent: Intent },
 }
 
+// Public comparison handshake only. A successful codec never supplies the
+// actual socket, original, process, CREATE proof or admitted requester.
+pub(in crate::security_epoch) const MAX_HELLO_BYTES: usize = 512;
+pub(in crate::security_epoch) const MAX_OFFER_BYTES: usize = 1_024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum HelloData {
+    #[serde(rename = "hello_backup_v1")]
+    Hello { requester_nonce: Digest },
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::security_epoch) struct SubmitOfferData {
+    pub(in crate::security_epoch) controller: Digest,
+    pub(in crate::security_epoch) job: Digest,
+    pub(in crate::security_epoch) connection: Digest,
+    pub(in crate::security_epoch) requester_nonce: Digest,
+    pub(in crate::security_epoch) controller_nonce: Digest,
+    pub(in crate::security_epoch) original: Digest,
+}
+
+impl SubmitOfferData {
+    /// Endpoint-local cookie is comparison DATA, not authentication or a
+    /// cross-process socket-pair identity. Native callers retain the socket.
+    pub(in crate::security_epoch) fn new_data(
+        controller: Digest,
+        job: Digest,
+        cookie: u64,
+        nonces: (Digest, Digest),
+        original: Digest,
+    ) -> Result<Self> {
+        ensure!(
+            cookie != 0 && nonces.0 != nonces.1,
+            "backup_offer_binding_shape"
+        );
+        let connection =
+            Self::connection_data(cookie, &controller, &job, (&nonces.0, &nonces.1), &original)?;
+        Ok(Self {
+            controller,
+            job,
+            connection,
+            requester_nonce: nonces.0,
+            controller_nonce: nonces.1,
+            original,
+        })
+    }
+
+    fn connection_data(
+        cookie: u64,
+        controller: &Digest,
+        job: &Digest,
+        nonces: (&Digest, &Digest),
+        original: &Digest,
+    ) -> Result<Digest> {
+        Digest::of(&(
+            "day2-scheduled-backup-accepted-endpoint-v1",
+            cookie,
+            controller,
+            job,
+            nonces.0,
+            nonces.1,
+            original,
+        ))
+    }
+
+    pub(in crate::security_epoch) fn require_connection_data(&self, cookie: u64) -> Result<()> {
+        ensure!(
+            cookie != 0
+                && self.connection
+                    == Self::connection_data(
+                        cookie,
+                        &self.controller,
+                        &self.job,
+                        (&self.requester_nonce, &self.controller_nonce),
+                        &self.original
+                    )?,
+            "backup_offer_connection_changed"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum OfferData {
+    #[serde(rename = "offer_backup_v1")]
+    Offer { offer: SubmitOfferData },
+}
+
+pub(in crate::security_epoch) fn encode_hello_data(requester_nonce: Digest) -> Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(&HelloData::Hello { requester_nonce })?;
+    ensure!(bytes.len() <= MAX_HELLO_BYTES, "backup_hello_bound");
+    Ok(bytes)
+}
+
+pub(in crate::security_epoch) fn decode_hello_data(bytes: &[u8]) -> Result<Digest> {
+    ensure!(bytes.len() <= MAX_HELLO_BYTES, "backup_hello_bound");
+    let packet: HelloData =
+        crate::json::decode(bytes).map_err(|_| anyhow::anyhow!("backup_hello_encoding"))?;
+    ensure!(
+        serde_json::to_vec(&packet)? == bytes,
+        "backup_hello_noncanonical"
+    );
+    let HelloData::Hello { requester_nonce } = packet;
+    Ok(requester_nonce)
+}
+
+pub(in crate::security_epoch) fn encode_offer_data(offer: &SubmitOfferData) -> Result<Vec<u8>> {
+    ensure!(
+        offer.requester_nonce != offer.controller_nonce,
+        "backup_offer_reflected_nonce"
+    );
+    let bytes = serde_json::to_vec(&OfferData::Offer {
+        offer: offer.clone(),
+    })?;
+    ensure!(bytes.len() <= MAX_OFFER_BYTES, "backup_offer_bound");
+    Ok(bytes)
+}
+
+pub(in crate::security_epoch) fn decode_offer_data(bytes: &[u8]) -> Result<SubmitOfferData> {
+    ensure!(bytes.len() <= MAX_OFFER_BYTES, "backup_offer_bound");
+    let packet: OfferData =
+        crate::json::decode(bytes).map_err(|_| anyhow::anyhow!("backup_offer_encoding"))?;
+    ensure!(
+        serde_json::to_vec(&packet)? == bytes,
+        "backup_offer_noncanonical"
+    );
+    let OfferData::Offer { offer } = packet;
+    ensure!(
+        offer.requester_nonce != offer.controller_nonce,
+        "backup_offer_reflected_nonce"
+    );
+    Ok(offer)
+}
+
+/// Complete only public candidate DATA. Actual native admission independently
+/// requires the real accepted resources and every current authority boundary.
+pub(in crate::security_epoch) fn complete_offer_intent_data(
+    candidate: &[u8],
+    offer: &SubmitOfferData,
+) -> Result<Vec<u8>> {
+    ensure!(
+        offer.requester_nonce != offer.controller_nonce,
+        "backup_offer_reflected_nonce"
+    );
+    let mut intent = Intent::decode_data(candidate)?;
+    intent.requester.process = offer.job.clone();
+    intent.transport = super::Transport {
+        controller: offer.controller.clone(),
+        connection: offer.connection.clone(),
+        requester_nonce: offer.requester_nonce.clone(),
+        controller_nonce: offer.controller_nonce.clone(),
+        original: offer.original.clone(),
+    };
+    intent.validate_data()?;
+    Ok(serde_json::to_vec(&intent)?)
+}
+
+pub(in crate::security_epoch) fn require_submit_offer_data(
+    intent: &[u8],
+    offer: &SubmitOfferData,
+) -> Result<()> {
+    let intent = Intent::decode_data(intent)?;
+    ensure!(
+        offer.requester_nonce != offer.controller_nonce
+            && intent.requester.process == offer.job
+            && intent.transport.controller == offer.controller
+            && intent.transport.connection == offer.connection
+            && intent.transport.requester_nonce == offer.requester_nonce
+            && intent.transport.controller_nonce == offer.controller_nonce
+            && intent.transport.original == offer.original,
+        "backup_submit_offer_changed"
+    );
+    Ok(())
+}
+
 /// Closed wire DATA, not authenticated admission or an original constructor.
 pub(in crate::security_epoch) fn decode_submit_data(bytes: &[u8]) -> Result<Vec<u8>> {
     ensure!(
