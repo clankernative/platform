@@ -4,7 +4,7 @@
     {
       "source": "crates/day2-completion-page/src/linux.rs",
       "scope": "const",
-      "fingerprint": "sha256:11b323945464a7ff5cb26ab03b817537ae96bc19012cc372ca7d2286317fe7bb"
+      "fingerprint": "sha256:8801b3f25059a175768b65428c6bd8e663401d731eae2751ad35eed9b6403a36"
     },
     {
       "source": "crates/day2-control/src/release.rs",
@@ -375,12 +375,39 @@
     },
     {
       "source": "crates/day2-completion-page/src/linux.rs",
+      "type_name": "FailedPublication",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub fn dispose (& mut self) -> CleanupData",
+        "pub fn error_data (& self) -> Error"
+      ],
+      "factories": [
+        {
+          "owner": "PendingPublication",
+          "signature": "pub fn into_ready (mut self) -> Result < ReadyPublication , FailedPublication >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "FailedPublication",
+          "signature": "pub fn dispose (& mut self) -> CleanupData"
+        },
+        {
+          "owner": "FailedPublication",
+          "signature": "pub fn error_data (& self) -> Error"
+        }
+      ],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2-completion-page/src/linux.rs",
       "type_name": "FreshPage",
       "kind": "private_material",
       "consuming_methods": [],
       "methods": [
         "pub fn create (binding : Binding) -> Result < Self , Error >",
-        "pub fn send_pending (mut self , socket : BorrowedFd < '_ >) -> Result < PendingPublication , Error >"
+        "pub fn into_pending_attempt (mut self) -> PendingPublication"
       ],
       "factories": [
         {
@@ -391,7 +418,7 @@
       "material_uses": [
         {
           "owner": "FreshPage",
-          "signature": "pub fn send_pending (mut self , socket : BorrowedFd < '_ >) -> Result < PendingPublication , Error >"
+          "signature": "pub fn into_pending_attempt (mut self) -> PendingPublication"
         }
       ],
       "owning_children": [],
@@ -425,18 +452,38 @@
       "kind": "private_material",
       "consuming_methods": [],
       "methods": [
-        "pub fn prepare (mut self) -> Result < ReadyPublication , Error >"
+        "pub fn into_ready (mut self) -> Result < ReadyPublication , FailedPublication >",
+        "pub fn prepare (& mut self) -> Result < () , Error >",
+        "pub fn send_pending (& mut self , socket : BorrowedFd < '_ >) -> Result < () , Error >",
+        "fn settle_attempt (& mut self , requested : std :: thread :: Result < Result < () , Error > > , next : AttemptState) -> Result < () , Error >",
+        "fn spend (& mut self , expected : AttemptState) -> Result < () , Error >"
       ],
       "factories": [
         {
           "owner": "FreshPage",
-          "signature": "pub fn send_pending (mut self , socket : BorrowedFd < '_ >) -> Result < PendingPublication , Error >"
+          "signature": "pub fn into_pending_attempt (mut self) -> PendingPublication"
         }
       ],
       "material_uses": [
         {
           "owner": "PendingPublication",
-          "signature": "pub fn prepare (mut self) -> Result < ReadyPublication , Error >"
+          "signature": "fn settle_attempt (& mut self , requested : std :: thread :: Result < Result < () , Error > > , next : AttemptState) -> Result < () , Error >"
+        },
+        {
+          "owner": "PendingPublication",
+          "signature": "fn spend (& mut self , expected : AttemptState) -> Result < () , Error >"
+        },
+        {
+          "owner": "PendingPublication",
+          "signature": "pub fn into_ready (mut self) -> Result < ReadyPublication , FailedPublication >"
+        },
+        {
+          "owner": "PendingPublication",
+          "signature": "pub fn prepare (& mut self) -> Result < () , Error >"
+        },
+        {
+          "owner": "PendingPublication",
+          "signature": "pub fn send_pending (& mut self , socket : BorrowedFd < '_ >) -> Result < () , Error >"
         }
       ],
       "owning_children": [],
@@ -475,7 +522,7 @@
       "factories": [
         {
           "owner": "PendingPublication",
-          "signature": "pub fn prepare (mut self) -> Result < ReadyPublication , Error >"
+          "signature": "pub fn into_ready (mut self) -> Result < ReadyPublication , FailedPublication >"
         }
       ],
       "material_uses": [

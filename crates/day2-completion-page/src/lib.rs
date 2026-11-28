@@ -154,8 +154,8 @@ pub struct CleanupData {
 mod linux;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_has_atomic = "8"))]
 pub use linux::{
-    FreshPage, LocalRefusalData, PendingPublication, Publication, PublishedData, ReadyPublication,
-    ReceivedData, validate_received_data,
+    FailedPublication, FreshPage, LocalRefusalData, PendingPublication, Publication, PublishedData,
+    ReadyPublication, ReceivedData, validate_received_data,
 };
 
 // The explicit Bazel kernel target disables libtest. Its fixed main cannot
@@ -269,6 +269,7 @@ mod tests {
             ]
             && exports
                 == [
+                    "FailedPublication",
                     "FreshPage",
                     "LocalRefusalData",
                     "PendingPublication",
@@ -375,15 +376,320 @@ mod tests {
         functions.sort();
         functions
             == [
+                "FailedPublication::dispose",
+                "FailedPublication::error_data",
                 "FreshPage::create",
-                "FreshPage::send_pending",
+                "FreshPage::into_pending_attempt",
                 "LocalRefusalData::dispose",
+                "PendingPublication::into_ready",
                 "PendingPublication::prepare",
+                "PendingPublication::send_pending",
                 "PublishedData::dispose",
                 "ReadyPublication::publish",
                 "ReceivedData::state_data",
                 "validate_received_data",
             ]
+    }
+
+    fn borrowed_attempt_operation(source: &str, name: &str, expected: &str, next: &str) -> bool {
+        use syn::visit::Visit;
+        fn ident(expr: &syn::Expr, name: &str) -> bool {
+            matches!(expr,syn::Expr::Path(path) if path.path.is_ident(name))
+        }
+        fn phase(expr: &syn::Expr, name: &str) -> bool {
+            matches!(expr,syn::Expr::Path(path) if path.path.segments.len()==2 && path.path.segments[0].ident=="AttemptState" && path.path.segments[1].ident==name)
+        }
+        fn path(expr: &syn::Expr, parts: &[&str]) -> bool {
+            matches!(expr,syn::Expr::Path(path) if path.path.segments.iter().map(|p|p.ident.to_string()).eq(parts.iter().map(|p|(*p).to_owned())))
+        }
+        let file = syn::parse_file(source).unwrap();
+        let methods=file.items.into_iter().filter_map(|item|match item {
+            syn::Item::Impl(item) if matches!(&*item.self_ty,syn::Type::Path(p) if p.path.is_ident("PendingPublication"))=>Some(item),_=>None,
+        }).flat_map(|item|item.items).filter_map(|item|match item {syn::ImplItem::Fn(f) if f.sig.ident==name=>Some(f),_=>None}).collect::<Vec<_>>();
+        let [method] = methods.as_slice() else {
+            return false;
+        };
+        let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+            return false;
+        };
+        if receiver.mutability.is_none()
+            || !receiver
+                .reference
+                .as_ref()
+                .is_some_and(|(_, lifetime)| lifetime.is_none())
+            || method.sig.inputs.len() != if name == "send_pending" { 2 } else { 1 }
+            || !method.sig.generics.params.is_empty()
+            || method.sig.unsafety.is_some()
+            || method.sig.asyncness.is_some()
+        {
+            return false;
+        }
+        let [
+            syn::Stmt::Expr(syn::Expr::Try(spent), _),
+            syn::Stmt::Local(local),
+            syn::Stmt::Expr(syn::Expr::MethodCall(settle), None),
+        ] = method.block.stmts.as_slice()
+        else {
+            return false;
+        };
+        let syn::Expr::MethodCall(spend) = &*spent.expr else {
+            return false;
+        };
+        if !ident(&spend.receiver, "self")
+            || spend.method != "spend"
+            || spend.args.len() != 1
+            || !phase(&spend.args[0], expected)
+            || !ident(&settle.receiver, "self")
+            || settle.method != "settle_attempt"
+            || settle.args.len() != 2
+            || !ident(&settle.args[0], "requested")
+            || !phase(&settle.args[1], next)
+            || !matches!(&local.pat,syn::Pat::Ident(p) if p.ident=="requested")
+        {
+            return false;
+        }
+        let Some(init) = &local.init else {
+            return false;
+        };
+        let syn::Expr::Call(catch) = &*init.expr else {
+            return false;
+        };
+        if !path(&catch.func, &["std", "panic", "catch_unwind"]) || catch.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Call(safe) = &catch.args[0] else {
+            return false;
+        };
+        if !path(&safe.func, &["std", "panic", "AssertUnwindSafe"]) || safe.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Closure(body) = &safe.args[0] else {
+            return false;
+        };
+        if !body.inputs.is_empty() || body.capture.is_some() || body.asyncness.is_some() {
+            return false;
+        }
+        #[derive(Default)]
+        struct Moves(bool);
+        impl<'a> Visit<'a> for Moves {
+            fn visit_expr_assign(&mut self, _: &'a syn::ExprAssign) {
+                self.0 = true;
+            }
+            fn visit_expr_method_call(&mut self, call: &'a syn::ExprMethodCall) {
+                if [
+                    "take",
+                    "replace",
+                    "dispose",
+                    "into_ready",
+                    "publish",
+                    "into_raw_fd",
+                ]
+                .iter()
+                .any(|n| call.method == *n)
+                {
+                    self.0 = true;
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+            fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
+                if matches!(&*call.func,syn::Expr::Path(p) if p.path.segments.last().is_some_and(|p|["take","replace","drop","forget","munmap","try_close"].iter().any(|n|p.ident==*n)))
+                {
+                    self.0 = true;
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+        }
+        let mut moved = Moves::default();
+        moved.visit_expr(&body.body);
+        !moved.0
+    }
+
+    #[test]
+    fn actual_fallible_operations_borrow_the_preinstalled_spent_owner_through_unwind() {
+        let source = include_str!("linux.rs");
+        for (name, before, after) in [
+            ("send_pending", "Fresh", "Sent"),
+            ("prepare", "Sent", "Prepared"),
+        ] {
+            assert!(borrowed_attempt_operation(source, name, before, after));
+            for (old, new) in [
+                ("self.spend(AttemptState::", "self.bypass(AttemptState::"),
+                ("std::panic::catch_unwind", "std::panic::bypass"),
+                ("self.settle_attempt(requested", "self.bypass(requested"),
+            ] {
+                assert!(source.contains(old));
+                let mutant = source.replace(old, new);
+                assert!(!borrowed_attempt_operation(&mutant, name, before, after));
+            }
+            assert!(!borrowed_attempt_operation(source, name, after, before));
+            // Mutate the ACTUAL caught bodies. A direct field assignment could
+            // otherwise drop Backing before the external native posts, even
+            // though no forbidden ownership method was called.
+            let boundary = "std::panic::AssertUnwindSafe(|| {";
+            assert!(source.contains(boundary));
+            let changed = source.replace(
+                boundary,
+                "std::panic::AssertUnwindSafe(|| { self.inner = None;",
+            );
+            assert!(!borrowed_attempt_operation(&changed, name, before, after));
+        }
+    }
+
+    fn retained_allocation(source: &str) -> bool {
+        use syn::visit::Visit;
+        #[derive(Default)]
+        struct Allocation {
+            constructors: usize,
+            unboxed: bool,
+        }
+        impl<'a> Visit<'a> for Allocation {
+            fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func
+                    && path.path.segments.iter().any(|p| p.ident == "Box")
+                {
+                    if path.path.segments.last().is_some_and(|p| p.ident == "new") {
+                        self.constructors += 1;
+                    } else {
+                        self.unboxed = true;
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+
+            fn visit_expr_unary(&mut self, unary: &'a syn::ExprUnary) {
+                if matches!(unary.op, syn::UnOp::Deref(_))
+                    && matches!(&*unary.expr, syn::Expr::Path(p) if p.path.is_ident("inner"))
+                {
+                    self.unboxed = true;
+                }
+                syn::visit::visit_expr_unary(self, unary);
+            }
+        }
+        fn container(ty: &syn::Type, name: &str) -> Option<syn::Type> {
+            let syn::Type::Path(path) = ty else {
+                return None;
+            };
+            if path.path.segments.len() != 1 {
+                return None;
+            }
+            let segment = path.path.segments.first()?;
+            if segment.ident != name {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                return None;
+            };
+            if args.args.len() != 1 {
+                return None;
+            }
+            let syn::GenericArgument::Type(inner) = args.args.first()? else {
+                return None;
+            };
+            Some(inner.clone())
+        }
+        let Ok(file) = syn::parse_file(source) else {
+            return false;
+        };
+        let mut allocations = Vec::new();
+        let mut owners = Vec::new();
+        for item in &file.items {
+            if let syn::Item::Struct(item) = item {
+                let name = item.ident.to_string();
+                let optional = ["FreshPage", "PendingPublication", "ReadyPublication"]
+                    .contains(&name.as_str());
+                if optional
+                    || ["FailedPublication", "PublishedData", "LocalRefusalData"]
+                        .contains(&name.as_str())
+                {
+                    let fields = item
+                        .fields
+                        .iter()
+                        .filter(|f| f.ident.as_ref().is_some_and(|i| i == "inner"))
+                        .collect::<Vec<_>>();
+                    let [field] = fields.as_slice() else {
+                        return false;
+                    };
+                    let ty = if optional {
+                        container(&field.ty, "Option")
+                    } else {
+                        Some(field.ty.clone())
+                    };
+                    if !ty.and_then(|ty| container(&ty, "Box")).is_some_and(
+                        |ty| matches!(ty,syn::Type::Path(p) if p.path.is_ident("Backing")),
+                    ) {
+                        return false;
+                    }
+                    owners.push(name);
+                }
+            }
+            if let syn::Item::Impl(item) = item {
+                let syn::Type::Path(owner) = &*item.self_ty else {
+                    return false;
+                };
+                for member in &item.items {
+                    if let syn::ImplItem::Fn(method) = member {
+                        let mut observed = Allocation::default();
+                        observed.visit_block(&method.block);
+                        if observed.unboxed {
+                            return false;
+                        }
+                        if observed.constructors != 0 {
+                            allocations.push((
+                                owner.path.is_ident("FreshPage"),
+                                method.sig.ident == "create",
+                                observed.constructors,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        owners.sort();
+        allocations == [(true, true, 1)]
+            && owners
+                == [
+                    "FailedPublication",
+                    "FreshPage",
+                    "LocalRefusalData",
+                    "PendingPublication",
+                    "PublishedData",
+                    "ReadyPublication",
+                ]
+    }
+
+    #[test]
+    fn actual_backing_is_boxed_only_at_creation_and_never_unboxed_in_transitions() {
+        let source = include_str!("linux.rs");
+        assert!(retained_allocation(source));
+        for (old, new) in [
+            (
+                "Some(Box::new(backing))",
+                "Some(Box::new(*Box::new(backing)))",
+            ),
+            (
+                "PublishedData { inner }",
+                "PublishedData { inner: Box::new(*inner) }",
+            ),
+            (
+                "LocalRefusalData { inner }",
+                "LocalRefusalData { inner: *inner }",
+            ),
+            (
+                "inner,\n                error:",
+                "inner: Box::new(*inner),\n                error:",
+            ),
+            (
+                "PublishedData { inner }",
+                "PublishedData { inner: Box::into_inner(inner) }",
+            ),
+            (
+                "pub struct FailedPublication {\n    inner: Box<Backing>",
+                "pub struct FailedPublication {\n    inner: Backing",
+            ),
+        ] {
+            assert_eq!(source.matches(old).count(), 1);
+            assert!(!retained_allocation(&source.replacen(old, new, 1)));
+        }
     }
 
     #[test]
