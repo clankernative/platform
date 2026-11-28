@@ -8,7 +8,7 @@ fn digest(text: &str) -> Digest {
     Digest::new(text.as_bytes())
 }
 
-fn binding() -> RootBindingData {
+pub(super) fn binding() -> RootBindingData {
     RootBindingData {
         scope: AuthorityScope {
             installation: "fixture".to_owned().try_into().unwrap(),
@@ -24,7 +24,7 @@ fn binding() -> RootBindingData {
     }
 }
 
-fn intent(minute: u8, revision: u8) -> Intent {
+pub(super) fn intent(minute: u8, revision: u8) -> Intent {
     let root = binding();
     let uid = |index: u8| {
         format!("00000000-0000-0000-0000-{index:012}")
@@ -398,7 +398,7 @@ struct Bundle {
     second: Run,
 }
 
-fn source() -> Result<Digest> {
+pub(super) fn source() -> Result<Digest> {
     let inputs: &[(&str, &[u8])] = &[
         ("journal.rs", include_bytes!("../journal.rs")),
         ("journal/birth.rs", include_bytes!("birth.rs")),
@@ -413,6 +413,10 @@ fn source() -> Result<Digest> {
             include_bytes!("../../storage_authority/native_volume/scheduled_backup.rs"),
         ),
         ("reservation.rs", include_bytes!("../reservation.rs")),
+        (
+            "reservation/tests.rs",
+            include_bytes!("../reservation/tests.rs"),
+        ),
         ("tests.rs", include_bytes!("tests.rs")),
         (
             "scheduled_backup.rs",

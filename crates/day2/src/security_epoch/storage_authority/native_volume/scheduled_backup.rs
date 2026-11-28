@@ -52,6 +52,7 @@ impl PendingBackupRoot {
 
     pub(in crate::security_epoch) fn refuse(&mut self) {
         self.refused = true;
+        self.files.refuse();
         if let Some(birth) = &mut self.birth {
             birth.lose_data();
         }

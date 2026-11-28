@@ -28,7 +28,7 @@ fn name(value: &str) -> Name {
     value.to_owned().try_into().unwrap()
 }
 
-fn selection() -> EpochStore {
+pub(in crate::security_epoch::scheduled_backup) fn selection() -> EpochStore {
     EpochStore {
         scope: AuthorityScope {
             installation: name("fixture"),
@@ -94,7 +94,7 @@ fn intent(selected: &EpochStore) -> Intent {
     }
 }
 
-fn ack() -> Vec<u8> {
+pub(in crate::security_epoch::scheduled_backup) fn ack() -> Vec<u8> {
     serde_json::to_vec(&json!({"writeResults":[{"updateTime":"2026-11-22T17:00:01.000001Z"}],"commitTime":"2026-11-22T17:00:01.000001Z"})).unwrap()
 }
 
