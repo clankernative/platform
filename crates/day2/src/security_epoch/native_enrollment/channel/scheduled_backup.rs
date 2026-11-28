@@ -22,6 +22,8 @@ use rustix::{
 };
 use std::{cell::Cell, fs::File, io::IoSliceMut, os::unix::fs::MetadataExt, rc::Rc};
 
+mod outer_request;
+
 const PATH: &str = "/run/day2-native-enrollment/scheduled-backup/request.sock";
 const MAX_SUBMIT: usize = crate::security_epoch::scheduled_backup::requester::MAX_SUBMIT_BYTES;
 
@@ -174,6 +176,16 @@ impl ScheduledBackupSocketName {
 }
 
 impl ScheduledBackupSocketListener {
+    /// One actual ready-action entry. Capture before accept/authentication;
+    /// return only the same whole saved request if genuine CREATE admits it.
+    pub(in crate::security_epoch::native_enrollment) fn admit_action<'controller>(
+        &mut self,
+        controller: &'controller mut crate::security_epoch::native_enrollment::EnrolledProcessRoleOwner,
+    ) -> Result<outer_request::RetainedScheduledBackupAction<'controller>> {
+        let pending = outer_request::capture_scheduled_backup_action(controller)?;
+        pending.receive(self)
+    }
+
     pub(in crate::security_epoch::native_enrollment) fn bind(
         stage: &mut EnrolledRoleStage<'_>,
         original: &mut NativeAcquisition,

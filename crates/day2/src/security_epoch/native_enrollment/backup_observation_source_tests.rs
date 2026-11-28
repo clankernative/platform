@@ -1409,3 +1409,607 @@ fn actual_observer_projection_and_signer_use_only_this_checked_controller_and_fi
         assert!(!fixed_observer_data_contract(&identity, &changed));
     }
 }
+
+fn outer_selected_method(source: &str, owner: &str, name: &str) -> syn::ImplItemFn {
+    let file = syn::parse_file(source).unwrap();
+    let selected = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) if item.self_ty.to_token_stream().to_string() == owner => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(selected.len(), 1);
+    selected.into_iter().next().unwrap()
+}
+
+fn outer_selected_function(source: &str, name: &str) -> syn::ItemFn {
+    let file = syn::parse_file(source).unwrap();
+    let selected = file
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == name => Some(function),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(selected.len(), 1);
+    selected.into_iter().next().unwrap()
+}
+
+fn outer_mutate_method(source: &str, owner: &str, name: &str, from: &str, to: &str) -> String {
+    let mut file = syn::parse_file(source).unwrap();
+    let mut count = 0;
+    for item in &mut file.items {
+        if let syn::Item::Impl(item) = item
+            && item.self_ty.to_token_stream().to_string() == owner
+        {
+            for item in &mut item.items {
+                if let syn::ImplItem::Fn(method) = item
+                    && method.sig.ident == name
+                {
+                    let from: proc_macro2::TokenStream = from.parse().unwrap();
+                    let to: proc_macro2::TokenStream = to.parse().unwrap();
+                    let mut targets = 0;
+                    let changed =
+                        outer_replace_tokens(method.to_token_stream(), &from, &to, &mut targets);
+                    assert_eq!(targets, 1, "{owner}::{name}: {from}");
+                    *method = syn::parse2(changed).unwrap();
+                    count += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(count, 1);
+    file.to_token_stream().to_string()
+}
+
+// syn reconstructs operator spacing while macro bodies retain source spacing.
+// Compare actual lexical tokens, retaining every delimiter/comma/literal, and
+// ignore only Punct::spacing. Never remove commas and reparse the result.
+fn outer_replace_tokens(
+    source: proc_macro2::TokenStream,
+    from: &proc_macro2::TokenStream,
+    to: &proc_macro2::TokenStream,
+    targets: &mut usize,
+) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, TokenTree};
+    fn equal(left: &TokenTree, right: &TokenTree) -> bool {
+        match (left, right) {
+            (TokenTree::Group(a), TokenTree::Group(b)) => {
+                let a_tokens = a.stream().into_iter().collect::<Vec<_>>();
+                let b_tokens = b.stream().into_iter().collect::<Vec<_>>();
+                a.delimiter() == b.delimiter()
+                    && a_tokens.len() == b_tokens.len()
+                    && a_tokens.iter().zip(&b_tokens).all(|(a, b)| equal(a, b))
+            }
+            (TokenTree::Punct(a), TokenTree::Punct(b)) => a.as_char() == b.as_char(),
+            (TokenTree::Ident(a), TokenTree::Ident(b)) => a == b,
+            (TokenTree::Literal(a), TokenTree::Literal(b)) => a.to_string() == b.to_string(),
+            _ => false,
+        }
+    }
+    let source = source.into_iter().collect::<Vec<_>>();
+    let pattern = from.clone().into_iter().collect::<Vec<_>>();
+    assert!(!pattern.is_empty());
+    let mut result = proc_macro2::TokenStream::new();
+    let mut index = 0;
+    while index < source.len() {
+        if source[index..].len() >= pattern.len()
+            && source[index..index + pattern.len()]
+                .iter()
+                .zip(&pattern)
+                .all(|(a, b)| equal(a, b))
+        {
+            result.extend(to.clone());
+            *targets += 1;
+            index += pattern.len();
+            continue;
+        }
+        let token = match &source[index] {
+            TokenTree::Group(group) => {
+                let mut replacement = Group::new(
+                    group.delimiter(),
+                    outer_replace_tokens(group.stream(), from, to, targets),
+                );
+                replacement.set_span(group.span());
+                TokenTree::Group(replacement)
+            }
+            token => token.clone(),
+        };
+        result.extend([token]);
+        index += 1;
+    }
+    result
+}
+
+fn outer_caught_expression<'a>(statement: &'a syn::Stmt, name: &str) -> Option<&'a syn::Expr> {
+    let syn::Stmt::Local(local) = statement else {
+        return None;
+    };
+    let syn::Pat::Ident(binding) = &local.pat else {
+        return None;
+    };
+    if binding.ident != name {
+        return None;
+    }
+    let syn::Expr::Call(caught) = &*local.init.as_ref()?.expr else {
+        return None;
+    };
+    if caught.func.to_token_stream().to_string() != "std :: panic :: catch_unwind"
+        || caught.args.len() != 1
+    {
+        return None;
+    }
+    let syn::Expr::Call(safe) = caught.args.first()? else {
+        return None;
+    };
+    if safe.func.to_token_stream().to_string() != "std :: panic :: AssertUnwindSafe"
+        || safe.args.len() != 1
+    {
+        return None;
+    }
+    let syn::Expr::Closure(closure) = safe.args.first()? else {
+        return None;
+    };
+    if !closure.inputs.is_empty() || closure.asyncness.is_some() {
+        return None;
+    }
+    Some(&closure.body)
+}
+
+fn outer_post_contract(source: &str, owner: &str, name: &str, post: &str, unit: bool) -> bool {
+    let method = outer_selected_method(source, owner, name);
+    let Some(primary) = method
+        .block
+        .stmts
+        .first()
+        .and_then(|s| outer_caught_expression(s, "requested"))
+    else {
+        return false;
+    };
+    if !matches!(primary, syn::Expr::Block(_)) {
+        return false;
+    }
+    let Some(observed) = method
+        .block
+        .stmts
+        .get(1)
+        .and_then(|s| outer_caught_expression(s, "checked"))
+    else {
+        return false;
+    };
+    if canonical(observed.to_token_stream()).to_string() != fragment(post) {
+        return false;
+    }
+    let expected = if unit {
+        "if !matches!(&requested,Ok(Ok(()))) || !matches!(&checked,Ok(Ok(()))) {self.refuse();}"
+    } else {
+        "if !matches!(&requested,Ok(Ok(_))) || !matches!(&checked,Ok(Ok(()))) {self.refuse();}"
+    };
+    method
+        .block
+        .stmts
+        .get(2)
+        .is_some_and(|s| canonical(s.to_token_stream()).to_string() == fragment(expected))
+}
+
+fn outer_retained_contract(source: &str) -> bool {
+    let owner = "RetainedScheduledBackupAction < '_ >";
+    if !outer_post_contract(source, owner, "check", "self.parent.check_native()", true) {
+        return false;
+    }
+    let method = outer_selected_method(source, owner, "check");
+    let primary = outer_caught_expression(&method.block.stmts[0], "requested").unwrap();
+    canonical(primary.to_token_stream()).to_string()
+        == fragment(
+            "{self.parent.check()?;let mut stage=self.parent.controller.borrow_current_request(&mut self.parent.request)?;self.requester.check(&mut stage,&mut self.parent.original)}",
+        )
+        && canonical(method.block.stmts.last().unwrap().to_token_stream()).to_string()
+            == fragment("settle(requested,checked)")
+}
+
+fn outer_bypass_primary_catch(source: &str, owner: &str, name: &str) -> String {
+    let mut file = syn::parse_file(source).unwrap();
+    let mut count = 0;
+    for item in &mut file.items {
+        if let syn::Item::Impl(item) = item
+            && item.self_ty.to_token_stream().to_string() == owner
+        {
+            for item in &mut item.items {
+                if let syn::ImplItem::Fn(method) = item
+                    && method.sig.ident == name
+                {
+                    let body = outer_caught_expression(&method.block.stmts[0], "requested")
+                        .unwrap()
+                        .clone();
+                    let syn::Stmt::Local(local) = &mut method.block.stmts[0] else {
+                        unreachable!();
+                    };
+                    *local.init.as_mut().unwrap().expr = syn::parse_quote!(Ok((||#body)()));
+                    count += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(count, 1);
+    file.to_token_stream().to_string()
+}
+
+fn retained_action_contract(source: &str) -> bool {
+    if !outer_post_contract(
+        source,
+        "PendingScheduledBackupAction < 'controller >",
+        "receive",
+        "self.check_native()",
+        false,
+    ) {
+        return false;
+    }
+    let file = syn::parse_file(source).unwrap();
+    let fields = |name: &str| {
+        file.items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == name => Some(
+                    item.fields
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.ident.as_ref().unwrap().to_string(),
+                                field.ty.to_token_stream().to_string(),
+                                matches!(field.vis, syn::Visibility::Inherited),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .unwrap()
+    };
+    if fields("PendingScheduledBackupAction")
+        != [
+            (
+                "controller".into(),
+                "& 'controller mut EnrolledProcessRoleOwner".into(),
+                true,
+            ),
+            ("request".into(), "EnrolledCurrentRequest".into(), true),
+            ("original".into(), "NativeAcquisition".into(), true),
+            ("scope".into(), "AuthorityScope".into(), true),
+            ("refused".into(), "bool".into(), true),
+        ]
+        || fields("RetainedScheduledBackupAction")
+            != [
+                (
+                    "parent".into(),
+                    "PendingScheduledBackupAction < 'controller >".into(),
+                    true,
+                ),
+                (
+                    "requester".into(),
+                    "AdmittedScheduledBackupRequest".into(),
+                    true,
+                ),
+            ]
+    {
+        return false;
+    }
+    let capture_method = outer_selected_function(source, "capture_scheduled_backup_action");
+    if canonical(capture_method.block.stmts[0].to_token_stream()).to_string()
+        != fragment("let mut request=controller.begin_current_request()?;")
+    {
+        return false;
+    }
+    let capture = canonical(capture_method.block.to_token_stream()).to_string();
+    let receive = canonical(
+        outer_selected_method(
+            source,
+            "PendingScheduledBackupAction < 'controller >",
+            "receive",
+        )
+        .block
+        .to_token_stream(),
+    )
+    .to_string();
+    let ordered = |body: &str, fragments: &[&str]| {
+        let mut offset = 0;
+        for statement in fragments {
+            let selected = fragment(statement);
+            let Some(index) = body[offset..].find(&selected) else {
+                return false;
+            };
+            offset += index + selected.len();
+        }
+        true
+    };
+    ordered(
+        &capture,
+        &[
+            "let mut request = controller.begin_current_request()?;",
+            "let mut stage = controller.borrow_current_request(&mut request)?;",
+            "let scope=stage.storage()?.scheduled_backup_root_selection()?.scope;",
+            "stage.check_for(&scope,NativeRole::EpochController)?;",
+            "let original=stage.narrow_io_acquisition(5)?;",
+            "let mut pending=PendingScheduledBackupAction { controller,request,original,scope,refused:false };",
+            "pending.check()?;",
+            "Ok(pending)",
+        ],
+    ) && capture.matches("begin_current_request").count() == 1
+        && capture.matches("narrow_io_acquisition").count() == 1
+        && ordered(
+            &receive,
+            &[
+                "self.check()?;",
+                "self.controller.borrow_current_request(&mut self.request)?;",
+                "listener.accept(&mut stage,&mut self.original)?;",
+                "connection.receive_submit(&mut stage,&mut self.original)?;",
+                "submitted.observe_issuer(&mut stage,&mut self.original)?;",
+                "observed.try_admit_request(&mut stage,&mut self.original)",
+                "let checked=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||self.check_native()));",
+                "if !matches!(&requested,Ok(Ok(_))) || !matches!(&checked,Ok(Ok(()))) {self.refuse();}",
+                "settle(requested,checked)?;",
+                "parent:self",
+                "retained.check()?;",
+                "Ok(retained)",
+            ],
+        )
+        && receive.matches(&fragment("self.check()")).count() == 1
+        && receive.matches(&fragment("self.check_native()")).count() == 1
+        && receive.matches("borrow_current_request").count() == 1
+        && ![
+            "begin_current",
+            "NativeAcquisition ::",
+            "finish",
+            "Known",
+            "source",
+            "upload",
+        ]
+        .iter()
+        .any(|name| receive.contains(name))
+}
+
+#[test]
+fn actual_outer_backup_action_retains_the_saved_request_before_accept_and_never_renews_it() {
+    let source = include_str!("channel/scheduled_backup/outer_request.rs");
+    assert!(retained_action_contract(source));
+    for (from, to) in [
+        (
+            "request: EnrolledCurrentRequest,",
+            "request: NativeOriginalRefusal,",
+        ),
+        (
+            "let mut request = controller.begin_current_request()?;",
+            "let mut request = controller.begin_current_stage()?;",
+        ),
+        (
+            "stage.narrow_io_acquisition(5)?",
+            "stage.narrow_io_acquisition(10)?",
+        ),
+        (
+            "listener.accept(&mut stage, &mut self.original)?",
+            "listener.accept(&mut stage, &mut NativeAcquisition::capture()?)?",
+        ),
+        (
+            "observed.try_admit_request(&mut stage, &mut self.original)",
+            "observed.copy_receipt_data()",
+        ),
+        (
+            "let requester = settle(requested, checked)?;",
+            "let requester = unguarded(requested)?;",
+        ),
+    ] {
+        assert_eq!(source.matches(from).count(), 1, "mutation target {from}");
+        assert!(
+            !retained_action_contract(&source.replacen(from, to, 1)),
+            "accepted {from}"
+        );
+    }
+    let replaced = outer_mutate_method(
+        source,
+        "PendingScheduledBackupAction < 'controller >",
+        "receive",
+        "self.controller.borrow_current_request(&mut self.request)?",
+        "self.controller.borrow_current_request(&mut self.controller.begin_current_request()?)?",
+    );
+    assert!(!retained_action_contract(&replaced));
+    let post = outer_mutate_method(
+        source,
+        "PendingScheduledBackupAction < 'controller >",
+        "receive",
+        "|| !matches!(&checked, Ok(Ok(())))",
+        "|| false",
+    );
+    assert!(!retained_action_contract(&post));
+    let injected = source.replacen(
+        "let connection = listener.accept",
+        "self.request = self.controller.begin_current_request()?; let connection = listener.accept",
+        1,
+    );
+    assert_ne!(injected, source);
+    assert!(!retained_action_contract(&injected));
+}
+
+#[test]
+fn actual_outer_backup_action_drop_refuses_real_shared_inputs_and_exposes_no_finish_or_getter() {
+    let source = include_str!("channel/scheduled_backup/outer_request.rs");
+    let pending = selected_method(
+        source,
+        "PendingScheduledBackupAction < 'controller >",
+        "refuse",
+    );
+    assert!(pending.contains(&fragment(
+        "self.refused=true; self.original.refuse(); self.request.refuse();"
+    )));
+    let retained = selected_method(source, "RetainedScheduledBackupAction < '_ >", "refuse");
+    assert!(retained.contains(&fragment("self.requester.refuse(); self.parent.refuse();")));
+    for owner in [
+        "PendingScheduledBackupAction < '_ >",
+        "RetainedScheduledBackupAction < '_ >",
+    ] {
+        let function = outer_selected_method(source, owner, "drop");
+        assert_eq!(
+            canonical(function.block.to_token_stream()).to_string(),
+            fragment("{self.refuse();}")
+        );
+    }
+    let post = outer_selected_method(
+        source,
+        "PendingScheduledBackupAction < 'controller >",
+        "check_native",
+    );
+    assert_eq!(
+        canonical(post.block.to_token_stream()).to_string(),
+        fragment(
+            "{let mut stage=self.controller.borrow_current_request(&mut self.request)?;stage.check_for(&self.scope,NativeRole::EpochController)?;stage.check_serving_acquisition(&mut self.original)}"
+        )
+    );
+    let retained_check = canonical(
+        outer_selected_method(source, "RetainedScheduledBackupAction < '_ >", "check")
+            .block
+            .to_token_stream(),
+    )
+    .to_string();
+    assert!(retained_check.contains(&fragment("let checked=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||self.parent.check_native()));")));
+    let file = syn::parse_file(source).unwrap();
+    let mut public = Vec::new();
+    for item in &file.items {
+        if let syn::Item::Impl(item) = item {
+            for item in &item.items {
+                if let syn::ImplItem::Fn(method) = item
+                    && !matches!(method.vis, syn::Visibility::Inherited)
+                {
+                    public.push(method.sig.ident.to_string());
+                }
+            }
+        }
+    }
+    assert_eq!(public, ["receive", "check"]);
+    let public_functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if !matches!(function.vis, syn::Visibility::Inherited) => {
+                Some(function.sig.ident.to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(public_functions, ["capture_scheduled_backup_action"]);
+    assert!(!source.contains("unsafe"));
+    assert!(!source.contains(".finish("));
+}
+
+#[test]
+fn actual_outer_backup_primary_panic_cannot_skip_either_independent_native_post() {
+    let source = include_str!("channel/scheduled_backup/outer_request.rs");
+    for (owner, name, post, unit) in [
+        (
+            "PendingScheduledBackupAction < 'controller >",
+            "receive",
+            "self.check_native()",
+            false,
+        ),
+        (
+            "RetainedScheduledBackupAction < '_ >",
+            "check",
+            "self.parent.check_native()",
+            true,
+        ),
+    ] {
+        assert!(outer_post_contract(source, owner, name, post, unit));
+        assert!(!outer_post_contract(
+            &outer_bypass_primary_catch(source, owner, name),
+            owner,
+            name,
+            post,
+            unit
+        ));
+        let removed = outer_mutate_method(source, owner, name, post, "Ok(())");
+        assert!(!outer_post_contract(&removed, owner, name, post, unit));
+        let guard = outer_mutate_method(
+            source,
+            owner,
+            name,
+            "|| !matches!(&checked, Ok(Ok(())))",
+            "|| false",
+        );
+        assert!(!outer_post_contract(&guard, owner, name, post, unit));
+    }
+    assert!(outer_retained_contract(source));
+    let retained = outer_selected_method(source, "RetainedScheduledBackupAction < '_ >", "check");
+    let body = outer_caught_expression(&retained.block.stmts[0], "requested").unwrap();
+    assert_eq!(
+        canonical(body.to_token_stream()).to_string(),
+        fragment(
+            "{self.parent.check()?;let mut stage=self.parent.controller.borrow_current_request(&mut self.parent.request)?;self.requester.check(&mut stage,&mut self.parent.original)}"
+        )
+    );
+    assert_eq!(
+        canonical(retained.block.stmts.last().unwrap().to_token_stream()).to_string(),
+        fragment("settle(requested,checked)")
+    );
+    let removed = outer_mutate_method(
+        source,
+        "RetainedScheduledBackupAction < '_ >",
+        "check",
+        "self.requester.check(&mut stage,&mut self.parent.original)",
+        "Ok(())",
+    );
+    assert!(!outer_retained_contract(&removed));
+    let settlement = outer_mutate_method(
+        source,
+        "RetainedScheduledBackupAction < '_ >",
+        "check",
+        "settle(requested,checked)",
+        "Ok(())",
+    );
+    assert!(!outer_retained_contract(&settlement));
+    let actual = outer_selected_method(&removed, "RetainedScheduledBackupAction < '_ >", "check");
+    assert_ne!(
+        canonical(
+            outer_caught_expression(&actual.block.stmts[0], "requested")
+                .unwrap()
+                .to_token_stream()
+        )
+        .to_string(),
+        canonical(body.to_token_stream()).to_string()
+    );
+}
+
+#[test]
+fn actual_backup_listener_captures_the_saved_action_before_accept_and_forwards_same_resource() {
+    let source = include_str!("channel/scheduled_backup.rs");
+    let method = outer_selected_method(source, "ScheduledBackupSocketListener", "admit_action");
+    let expected = fragment(
+        "{let pending=outer_request::capture_scheduled_backup_action(controller)?;pending.receive(self)}",
+    );
+    assert_eq!(
+        canonical(method.block.to_token_stream()).to_string(),
+        expected
+    );
+    let changed = outer_mutate_method(
+        source,
+        "ScheduledBackupSocketListener",
+        "admit_action",
+        "pending.receive(self)",
+        "pending.receive(foreign)",
+    );
+    assert_ne!(
+        canonical(
+            outer_selected_method(&changed, "ScheduledBackupSocketListener", "admit_action")
+                .block
+                .to_token_stream()
+        )
+        .to_string(),
+        expected
+    );
+}
