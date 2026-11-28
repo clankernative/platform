@@ -6,7 +6,7 @@ use crate::{
         ACCESS, AUDIENCE_URL, BUCKET_NAME, HEAD, JOB_TOKEN, SUBJECT, Servers, WORKFLOW,
         distribution, sdk,
     },
-    instance_source::tests::{Fake, TOKEN as FORGE_TOKEN, ok, status},
+    instance_source::tests::{Fake, TOKEN as FORGE_TOKEN, bytes, ok, status},
 };
 use day2::sdk_release::BlobIdentity;
 use std::collections::BTreeMap;
@@ -18,6 +18,18 @@ const STARTED: &str = "2026-11-25T18:00:00Z";
 const COMPLETED: &str = "2026-11-25T18:20:00Z";
 const CREATED: &str = "2026-11-25T18:15:00.250Z";
 const GOLDEN_REPORT: &str = include_str!("../../../../cli/fixtures/ci-reuse-report.json");
+/// The fetched head's `app/App.roc`, which an earlier commit with the same
+/// `app/` also has.
+const APP: &[u8] = b"App :: [].{}\n";
+/// A stored attempt's custody steps, in the recipe's order.
+const CUSTODY: [&str; 6] = [
+    "candidate",
+    "source",
+    "receipt",
+    "artifact",
+    "download",
+    "attempt",
+];
 
 fn event(kind: &str) -> Event {
     let pull = kind == "pull_request";
@@ -45,6 +57,21 @@ fn record(id: u64, attempt: u64, head: &str, status: &str) -> Value {
         "run_attempt": attempt, "status": status,
         "conclusion": if status == "completed" { json!("success") } else { Value::Null },
         "started_at": STARTED, "completed_at": COMPLETED})
+}
+
+/// The forge's archive of a commit whose `app/App.roc` is `app`, as Gitea
+/// writes one: everything below one root directory.
+fn forge_archive(app: &[u8]) -> Vec<u8> {
+    crate::ci_fetch::tests::archive(&[
+        ("links/", b'5', 0o775, b""),
+        ("links/README.md", b'0', 0o664, b"# Links\n"),
+        ("links/app/", b'5', 0o775, b""),
+        ("links/app/App.roc", b'0', 0o664, app),
+    ])
+}
+
+fn archive_url(commit: &str) -> String {
+    format!("{PREFIX}/archive/{commit}.tar.gz")
 }
 
 fn metadata(run: u64, attempt: u64, head: &str) -> BTreeMap<String, String> {
@@ -96,7 +123,8 @@ struct Run {
     inputs: String,
     /// Variables left out of the step's environment.
     unset: Vec<&'static str>,
-    /// A storage call that fails: `list`, `object` or `media`.
+    /// A storage call GCS refuses (`list`, `object`, `media`) or that stays
+    /// transient (`transient-list`, `transient-media`).
     failing: Option<&'static str>,
 }
 
@@ -105,7 +133,7 @@ impl Run {
         let directory = tempfile::tempdir().unwrap();
         let ci = directory.path().join("ci");
         fs::create_dir_all(ci.join("head/app")).unwrap();
-        fs::write(ci.join("head/app/App.roc"), b"App :: [].{}\n").unwrap();
+        fs::write(ci.join("head/app/App.roc"), APP).unwrap();
         let inputs = crate::ci_check::source_inputs(&ci.join("head/app")).unwrap();
         let event = event(kind);
         fs::write(
@@ -123,6 +151,7 @@ impl Run {
             &format!("{PREFIX}/actions/runs/41"),
             vec![ok(record(41, 2, HEAD, "in_progress"))],
         );
+        fake.route(&archive_url(EARLIER), vec![bytes(forge_archive(APP))]);
         Self {
             servers: Servers::start(),
             fake,
@@ -144,7 +173,7 @@ impl Run {
     }
 
     /// Store an attempt's objects as `ci store` wrote them, and the forge's
-    /// record of its run.
+    /// record of its run, of the commit `EARLIER`.
     fn stored(&self, run: u64, attempt: u64) {
         self.store_with(
             run,
@@ -253,31 +282,43 @@ impl Run {
         Session::prepare(&self.directory.path().join("request.json"), self.effects())
     }
 
-    /// The recipe's order: the plan, then run, mint, exchange and list, then
-    /// each candidate until one is accepted or the lookup missed, then the
-    /// result. The step replies the recipe read are kept.
-    fn reuse(&self) -> Result<(Report, Vec<Value>)> {
+    /// The recipe's order: the plan; run, mint, exchange and list; each stored
+    /// attempt's custody steps until one refuses it, the last accepting it;
+    /// until an attempt is accepted or a step misses; then the result. Each
+    /// step's reply is kept by name.
+    fn reuse(&self) -> Result<(Report, Vec<(String, Value)>)> {
         let mut session = self.session()?;
         let mut replies = Vec::new();
+        let mut step = |session: &mut Session, name: &str| -> Result<Value> {
+            let reply = session.step(name)?;
+            replies.push((name.to_owned(), reply.clone()));
+            Ok(reply)
+        };
         if session.plan()["lookup"] == true {
             'lookup: {
                 for name in ["run", "mint", "exchange"] {
-                    let reply = session.step(name)?;
-                    replies.push(reply.clone());
-                    if reply["missed"] == true {
+                    if step(&mut session, name)?["missed"] == true {
                         break 'lookup;
                     }
                 }
-                let listed = session.step("list")?;
-                replies.push(listed.clone());
+                let listed = step(&mut session, "list")?;
                 if listed["missed"] == true {
                     break 'lookup;
                 }
                 for _ in listed["candidates"].as_array().unwrap() {
-                    let tried = session.step("candidate")?;
-                    replies.push(tried.clone());
-                    if tried["missed"] == true || tried["accepted"] == true {
-                        break;
+                    let mut refused = false;
+                    for name in CUSTODY {
+                        let custody = step(&mut session, name)?;
+                        if custody["missed"] == true {
+                            break 'lookup;
+                        }
+                        if custody["refused"] == true {
+                            refused = true;
+                            break;
+                        }
+                    }
+                    if !refused {
+                        break 'lookup;
                     }
                 }
             }
@@ -314,31 +355,68 @@ impl Run {
             .and_then(|tried| tried.reason.clone())
             .unwrap_or_else(|| report.reason.clone().unwrap_or_default())
     }
+
+    /// A lookup that fails the command: its error, which shows no token,
+    /// after checking that nothing was written for check.
+    fn failed(&self) -> String {
+        let error = format!("{:#}", self.reuse().expect_err("the command fails"));
+        for secret in [JOB_TOKEN, SUBJECT, ACCESS, FORGE_TOKEN] {
+            assert!(!error.contains(secret), "{error} shows a token");
+        }
+        assert!(!self.ci().join(REUSE).exists(), "{error}");
+        error
+    }
 }
 
-/// The fake bucket, with one kind of call refused as GCS refuses a request.
+/// The fake bucket, with one kind of call refused as GCS refuses a request,
+/// or failing transiently every time.
 struct Flaky {
     fake: Fake,
     failing: Option<&'static str>,
 }
 
-impl Storage for Flaky {
-    fn object(&mut self, bucket: &str, name: &str) -> Result<Option<Stored>> {
-        ensure!(self.failing != Some("object"), "app_ci_results_http_403");
-        self.fake.object(bucket, name)
-    }
-
-    fn media(&mut self, bucket: &str, name: &str, generation: &str, size: u64) -> Result<Vec<u8>> {
-        ensure!(self.failing != Some("media"), "app_ci_results_http_403");
-        self.fake.media(bucket, name, generation, size)
-    }
-
-    fn list(&mut self, bucket: &str, prefix: &str, page: Option<&str>) -> Result<Listing> {
-        ensure!(self.failing != Some("list"), "app_ci_results_http_403");
-        if self.failing == Some("transient") {
+impl Flaky {
+    fn fails(&self, call: &str) -> Result<()> {
+        if self.failing == Some(&format!("transient-{call}")) {
             bail!(instance_source::Retryable(instance_source::TEMPORARY));
         }
-        self.fake.list(bucket, prefix, page)
+        ensure!(self.failing != Some(call), "app_ci_results_http_403");
+        Ok(())
+    }
+}
+
+impl Storage for Flaky {
+    fn object(
+        &mut self,
+        bucket: &str,
+        name: &str,
+        within: Option<Duration>,
+    ) -> Result<Option<Stored>> {
+        self.fails("object")?;
+        self.fake.object(bucket, name, within)
+    }
+
+    fn media(
+        &mut self,
+        bucket: &str,
+        name: &str,
+        generation: &str,
+        size: u64,
+        within: Option<Duration>,
+    ) -> Result<Vec<u8>> {
+        self.fails("media")?;
+        self.fake.media(bucket, name, generation, size, within)
+    }
+
+    fn list(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        page: Option<&str>,
+        within: Option<Duration>,
+    ) -> Result<Listing> {
+        self.fails("list")?;
+        self.fake.list(bucket, prefix, page, within)
     }
 }
 
@@ -364,19 +442,25 @@ fn a_pull_request_run_never_reuses_and_reaches_nothing() -> Result<()> {
 }
 
 #[test]
-fn an_earlier_main_runs_result_under_the_key_is_reused() -> Result<()> {
+fn an_earlier_main_runs_result_bound_to_its_own_commit_is_reused() -> Result<()> {
     let run = Run::new("push");
     run.stored(40, 1);
     let (report, replies) = run.reuse()?;
+    let passed = json!({"missed": false, "refused": false});
     assert_eq!(
         replies,
         [
-            json!({"missed": false}),
-            json!({"missed": false}),
-            json!({"missed": false}),
-            json!({"missed": false, "candidates": [{"run": 40, "attempt": 1}]}),
-            json!({"missed": false, "accepted": true}),
+            ("run".to_owned(), json!({"missed": false})),
+            ("mint".to_owned(), json!({"missed": false})),
+            ("exchange".to_owned(), json!({"missed": false})),
+            (
+                "list".to_owned(),
+                json!({"missed": false, "candidates": [{"run": 40, "attempt": 1}]})
+            ),
         ]
+        .into_iter()
+        .chain(CUSTODY.map(|name| (name.to_owned(), passed.clone())))
+        .collect::<Vec<_>>()
     );
     let key = run.key();
     let source = report.source.clone().context("source")?;
@@ -424,14 +508,25 @@ fn an_earlier_main_runs_result_under_the_key_is_reused() -> Result<()> {
             source: Some(source),
         }
     );
-    // The forge with the job token: this run, then the candidate twice.
+    // The forge with the job token: this run, the candidate's run, the
+    // archive of the candidate's own commit, the candidate's run again. Each
+    // request is bounded by the lookup's time left.
     assert_eq!(
         run.fake.calls(),
         [
             (format!("{PREFIX}/actions/runs/41"), true),
             (format!("{PREFIX}/actions/runs/40"), true),
+            (archive_url(EARLIER), true),
             (format!("{PREFIX}/actions/runs/40"), true),
         ]
+    );
+    assert!(
+        run.fake
+            .0
+            .borrow()
+            .withins
+            .iter()
+            .all(|within| within.is_some_and(|within| within <= BUDGET))
     );
     // git-oidc for the audience, then STS for read access only.
     let seen = run.servers.seen();
@@ -612,9 +707,9 @@ fn only_the_newest_attempts_are_tried_and_a_full_key_is_never_truncated() -> Res
 
 #[test]
 fn every_custody_check_refuses_the_candidate() {
-    type Change = Box<dyn Fn(&Run)>;
+    type Change = Box<dyn Fn(&mut Run)>;
     let forge = |change: fn(&mut Value)| -> Change {
-        Box::new(move |run: &Run| {
+        Box::new(move |run: &mut Run| {
             let mut value = record(40, 1, EARLIER, "completed");
             change(&mut value);
             run.fake
@@ -622,11 +717,14 @@ fn every_custody_check_refuses_the_candidate() {
         })
     };
     let rewritten = |change: fn(&mut Receipt)| -> Change {
-        Box::new(move |run: &Run| {
+        Box::new(move |run: &mut Run| {
             let mut changed = receipt(&run.inputs, &artifact());
             change(&mut changed);
             run.store_with(40, 1, &changed, artifact());
         })
+    };
+    let archived = |archive: fn() -> Option<crate::instance_source::Response>| -> Change {
+        Box::new(move |run: &mut Run| run.fake.route(&archive_url(EARLIER), vec![archive()]))
     };
     let identity = "not app CI's scoped verification run of a push to main";
     let cases: Vec<(&str, Change, &str)> = vec![
@@ -686,8 +784,38 @@ fn every_custody_check_refuses_the_candidate() {
             "did not succeed",
         ),
         (
+            "a run the forge no longer has",
+            Box::new(|run: &mut Run| {
+                run.fake
+                    .route(&format!("{PREFIX}/actions/runs/40"), vec![status(404)])
+            }),
+            "source_http_404",
+        ),
+        // The key and the receipt are the stored run's own claims; the forge's
+        // archive of its commit decides which source it checked.
+        (
+            "its commit's app/ has other source inputs",
+            archived(|| bytes(forge_archive(b"App :: [].{ planted = 1 }\n"))),
+            "has other app/ source inputs than this run's",
+        ),
+        (
+            "its commit's archive is unreadable",
+            archived(|| bytes(b"not a gzip archive".to_vec())),
+            "the forge's archive of the run's commit",
+        ),
+        (
+            "its commit's archive is too large",
+            archived(|| bytes(vec![0; crate::instance_source::ARCHIVE_LIMIT as usize + 1])),
+            "source_response_byte_limit",
+        ),
+        (
+            "its commit's archive is not served",
+            archived(|| status(404)),
+            "source_archive_http_404",
+        ),
+        (
             "another head in the metadata",
-            Box::new(|run: &Run| {
+            Box::new(|run: &mut Run| {
                 run.restore(40, 1, "receipt.json", |stored| {
                     stored.metadata.insert("head".into(), HEAD.into());
                 })
@@ -696,7 +824,7 @@ fn every_custody_check_refuses_the_candidate() {
         ),
         (
             "another workflow commit in the metadata",
-            Box::new(|run: &Run| {
+            Box::new(|run: &mut Run| {
                 run.restore(40, 1, "artifact.tar.gz", |stored| {
                     stored
                         .metadata
@@ -707,7 +835,7 @@ fn every_custody_check_refuses_the_candidate() {
         ),
         (
             "extra metadata",
-            Box::new(|run: &Run| {
+            Box::new(|run: &mut Run| {
                 run.restore(40, 1, "receipt.json", |stored| {
                     stored.metadata.insert("reused_from".into(), "39".into());
                 })
@@ -716,7 +844,7 @@ fn every_custody_check_refuses_the_candidate() {
         ),
         (
             "a receipt created before the attempt",
-            Box::new(|run: &Run| {
+            Box::new(|run: &mut Run| {
                 run.restore(40, 1, "receipt.json", |stored| {
                     stored.time_created = "2026-11-25T17:59:59.999Z".into();
                 })
@@ -725,7 +853,7 @@ fn every_custody_check_refuses_the_candidate() {
         ),
         (
             "an artifact created after the attempt",
-            Box::new(|run: &Run| {
+            Box::new(|run: &mut Run| {
                 run.restore(40, 1, "artifact.tar.gz", |stored| {
                     stored.time_created = "2026-11-25T18:20:01Z".into();
                 })
@@ -762,8 +890,13 @@ fn every_custody_check_refuses_the_candidate() {
             "invalid ci check receipt",
         ),
         (
+            "a receipt GCS refuses to read",
+            Box::new(|run: &mut Run| run.failing = Some("object")),
+            "app_ci_results_http_403",
+        ),
+        (
             "an archive of another digest",
-            Box::new(|run: &Run| {
+            Box::new(|run: &mut Run| {
                 let mut other = artifact();
                 other[0] ^= 1;
                 run.store_with(40, 1, &receipt(&run.inputs, &artifact()), other);
@@ -772,7 +905,7 @@ fn every_custody_check_refuses_the_candidate() {
         ),
         (
             "an archive of another size",
-            Box::new(|run: &Run| {
+            Box::new(|run: &mut Run| {
                 let mut other = artifact();
                 other.push(0);
                 run.store_with(40, 1, &receipt(&run.inputs, &artifact()), other);
@@ -781,7 +914,7 @@ fn every_custody_check_refuses_the_candidate() {
         ),
         (
             "an artifact no longer stored",
-            Box::new(|run: &Run| {
+            Box::new(|run: &mut Run| {
                 let name = format!("{}40/1/artifact.tar.gz", run.key());
                 run.fake
                     .0
@@ -792,8 +925,13 @@ fn every_custody_check_refuses_the_candidate() {
             "its artifact is no longer stored",
         ),
         (
+            "a download GCS refuses",
+            Box::new(|run: &mut Run| run.failing = Some("media")),
+            "app_ci_results_http_403",
+        ),
+        (
             "a rerun during the download",
-            Box::new(|run: &Run| {
+            Box::new(|run: &mut Run| {
                 run.fake.route(
                     &format!("{PREFIX}/actions/runs/40"),
                     vec![
@@ -806,9 +944,9 @@ fn every_custody_check_refuses_the_candidate() {
         ),
     ];
     for (what, change, expected) in cases {
-        let run = Run::new("push");
+        let mut run = Run::new("push");
         run.stored(40, 1);
-        change(&run);
+        change(&mut run);
         let reason = run.refused();
         assert!(reason.contains(expected), "{what}: {reason}");
         assert!(!run.ci().join(REUSE).join(ARCHIVE).exists(), "{what}");
@@ -820,44 +958,96 @@ fn every_custody_check_refuses_the_candidate() {
 }
 
 #[test]
-fn a_failed_read_or_input_falls_back_to_a_build() {
+fn a_planted_result_is_never_reused_and_its_commit_is_never_downloaded_past() -> Result<()> {
+    // Run 40 checked a commit whose app/ differs, yet stored its result under
+    // this run's key; run 39 checked a commit with this run's app/.
+    let run = Run::new("push");
+    let planted = "5555555555555555555555555555555555555555";
+    run.stored(40, 1);
+    run.fake.route(
+        &format!("{PREFIX}/actions/runs/40"),
+        vec![ok(record(40, 1, planted, "completed"))],
+    );
+    for file in ["receipt.json", "artifact.tar.gz"] {
+        run.restore(40, 1, file, |stored| {
+            stored.metadata.insert("head".into(), planted.into());
+        });
+    }
+    run.fake.route(
+        &archive_url(planted),
+        vec![bytes(forge_archive(b"App :: [].{ planted = 1 }\n"))],
+    );
+    run.stored(39, 1);
+    let (report, _) = run.reuse()?;
+    assert_eq!(
+        report
+            .tried
+            .iter()
+            .map(|tried| (tried.run, tried.accepted))
+            .collect::<Vec<_>>(),
+        [(40, false), (39, true)]
+    );
+    // The planted attempt was refused before any of its objects was read.
+    let key = run.key();
+    assert!(
+        run.fake
+            .0
+            .borrow()
+            .reads
+            .iter()
+            .all(|(_, name, _)| !name.starts_with(&format!("{key}40/")))
+    );
+    Ok(())
+}
+
+#[test]
+fn one_candidates_missing_run_refuses_only_that_candidate() -> Result<()> {
+    let run = Run::new("push");
+    run.stored(40, 1);
+    run.stored(39, 1);
+    run.fake
+        .route(&format!("{PREFIX}/actions/runs/40"), vec![status(404)]);
+    let (report, _) = run.reuse()?;
+    assert!(report.reused, "{report:?}");
+    assert_eq!(
+        report
+            .tried
+            .iter()
+            .map(|tried| (tried.run, tried.accepted, tried.reason.clone()))
+            .collect::<Vec<_>>(),
+        [
+            (40, false, Some("source_http_404".to_owned())),
+            (39, true, None)
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_transient_read_or_a_refused_credential_falls_back_to_a_build() {
     // Each, by what it breaks: the lookup ends at once, the run succeeds.
     let check = |what: &str, change: &dyn Fn(&mut Run), expected: &str| {
         let mut run = Run::new("push");
         run.stored(40, 1);
+        run.stored(39, 1);
         change(&mut run);
         let report = run.missed();
         let reason = report.reason.clone().unwrap_or_default();
         assert!(reason.contains(expected), "{what}: {reason}");
+        report
     };
     check(
-        "the listing",
-        &|run| run.failing = Some("list"),
-        "app_ci_results_http_403",
-    );
-    check(
         "a listing that stays transient",
-        &|run| run.failing = Some("transient"),
+        &|run| run.failing = Some("transient-list"),
         "a results listing did not succeed within 120s",
     );
-    check(
-        "an object read",
-        &|run| run.failing = Some("object"),
-        "app_ci_results_http_403",
+    // A stored attempt's transient read ends the lookup: the next is not tried.
+    let report = check(
+        "a download that stays transient",
+        &|run| run.failing = Some("transient-media"),
+        "a results download did not succeed within 120s",
     );
-    check(
-        "a download",
-        &|run| run.failing = Some("media"),
-        "app_ci_results_http_403",
-    );
-    check(
-        "the candidate's run",
-        &|run| {
-            run.fake
-                .route(&format!("{PREFIX}/actions/runs/40"), vec![status(404)])
-        },
-        "source_http_404",
-    );
+    assert_eq!(report.tried.len(), 1);
     check(
         "a forge that stays unreachable",
         &|run| {
@@ -867,12 +1057,56 @@ fn a_failed_read_or_input_falls_back_to_a_build() {
         "a forge read did not succeed within 120s",
     );
     check(
-        "this run's record",
+        "this run's record, transiently",
+        &|run| {
+            run.fake
+                .route(&format!("{PREFIX}/actions/runs/41"), vec![status(503)])
+        },
+        "a forge read did not succeed within 120s",
+    );
+    // Store fails on a refused mint or exchange itself.
+    check(
+        "git-oidc",
+        &|run| {
+            run.servers.script.lock().unwrap().mint = [(403, "{}".to_owned())].into();
+        },
+        "git-oidc refused the token request with HTTP 403",
+    );
+    check(
+        "Google STS",
+        &|run| {
+            run.servers.script.lock().unwrap().sts =
+                Some((400, json!({"error": "invalid_grant"}).to_string()));
+        },
+        "Google STS refused the token exchange with HTTP 400: invalid_grant",
+    );
+}
+
+#[test]
+fn misconfiguration_fails_the_command() {
+    let check = |what: &str, change: &dyn Fn(&mut Run), expected: &str| {
+        let mut run = Run::new("push");
+        run.stored(40, 1);
+        change(&mut run);
+        let error = run.failed();
+        assert!(error.contains(expected), "{what}: {error}");
+    };
+    let own = "ci reuse could not bind this run's own forge record";
+    check(
+        "this run's record refused",
         &|run| {
             run.fake
                 .route(&format!("{PREFIX}/actions/runs/41"), vec![status(403)])
         },
-        "source_http_403",
+        own,
+    );
+    check(
+        "this run's record missing",
+        &|run| {
+            run.fake
+                .route(&format!("{PREFIX}/actions/runs/41"), vec![status(404)])
+        },
+        "source_http_404",
     );
     check(
         "this run's record names another commit",
@@ -895,19 +1129,10 @@ fn a_failed_read_or_input_falls_back_to_a_build() {
         "not app CI's scoped verification run",
     );
     check(
-        "git-oidc",
-        &|run| {
-            run.servers.script.lock().unwrap().mint = [(403, "{}".to_owned())].into();
-        },
-        "git-oidc refused the token request with HTTP 403",
-    );
-    check(
-        "Google STS",
-        &|run| {
-            run.servers.script.lock().unwrap().sts =
-                Some((400, json!({"error": "invalid_grant"}).to_string()));
-        },
-        "Google STS refused the token exchange with HTTP 400: invalid_grant",
+        "the listing refused",
+        &|run| run.failing = Some("list"),
+        "ci reuse could not list its key in the results bucket: the push identity's read \
+         access or the bucket is misconfigured: app_ci_results_http_403",
     );
     check(
         "no job token",
@@ -919,20 +1144,83 @@ fn a_failed_read_or_input_falls_back_to_a_build() {
         &|run| run.unset.push(ci_store::BUCKET),
         "DAY2_CI_BUCKET is required to reuse a stored result",
     );
-    // The lookup's budget: a step that would begin later misses.
+}
+
+#[test]
+fn the_lookup_ends_at_its_deadline_even_mid_read() -> Result<()> {
+    // This run's record and the candidate's take 100 s each, within their own
+    // 120 s; the candidate's commit archive would take 400 s: its request is
+    // bounded by the 100 s left, times out at the deadline, and the lookup
+    // misses.
+    let slowly = |run: &Run| {
+        let mut world = run.fake.0.borrow_mut();
+        for id in [41, 40] {
+            world.slow.insert(
+                format!("{PREFIX}/actions/runs/{id}"),
+                Duration::from_secs(100),
+            );
+        }
+    };
     let run = Run::new("push");
     run.stored(40, 1);
-    let mut session = run.session().unwrap();
-    session.step("run").unwrap();
+    slowly(&run);
+    run.fake
+        .0
+        .borrow_mut()
+        .slow
+        .insert(archive_url(EARLIER), Duration::from_secs(400));
+    let report = run.missed();
+    let reason = report.reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("the lookup's 300 s deadline passed during source"),
+        "{reason}"
+    );
+    assert_eq!(
+        report
+            .tried
+            .iter()
+            .map(|tried| (tried.run, tried.accepted))
+            .collect::<Vec<_>>(),
+        [(40, false)]
+    );
+    let world = run.fake.0.borrow();
+    assert!(world.now <= BUDGET, "{:?}", world.now);
+    assert!(
+        world
+            .withins
+            .iter()
+            .all(|within| within.is_some_and(|within| within <= BUDGET))
+    );
+    drop(world);
+    // A slow download is bounded the same way.
+    let run = Run::new("push");
+    run.stored(40, 1);
+    slowly(&run);
+    run.fake.0.borrow_mut().slow.insert(
+        format!("media:{}40/1/artifact.tar.gz", run.key()),
+        Duration::from_secs(400),
+    );
+    let reason = run.missed().reason.unwrap_or_default();
+    assert!(
+        reason.contains("the lookup's 300 s deadline passed during download"),
+        "{reason}"
+    );
+    assert!(run.fake.0.borrow().now <= BUDGET);
+    // A step that would begin after the deadline misses without a request.
+    let run = Run::new("push");
+    run.stored(40, 1);
+    let mut session = run.session()?;
+    session.step("run")?;
     run.fake.0.borrow_mut().now += BUDGET;
-    assert_eq!(session.step("mint").unwrap(), json!({"missed": true}));
+    assert_eq!(session.step("mint")?, json!({"missed": true}));
     assert!(run.servers.seen().is_empty());
-    let report: Report = serde_json::from_value(session.step("result").unwrap()).unwrap();
+    let report: Report = serde_json::from_value(session.step("result")?)?;
     assert!(
         report
             .reason
-            .is_some_and(|reason| reason.contains("300 s budget"))
+            .is_some_and(|reason| reason.contains("deadline passed before mint"))
     );
+    Ok(())
 }
 
 #[test]
@@ -950,7 +1238,23 @@ fn steps_run_only_in_the_recipes_order() -> Result<()> {
     session.step("exchange")?;
     session.step("list")?;
     assert!(session.step("list").is_err(), "once");
+    assert!(
+        session.step("receipt").is_err(),
+        "the candidate's run first"
+    );
     session.step("candidate")?;
+    assert!(
+        session.step("receipt").is_err(),
+        "its commit's source first"
+    );
+    for name in ["source", "receipt", "artifact", "download"] {
+        session.step(name)?;
+    }
+    assert!(
+        session.step("candidate").is_err(),
+        "the attempt is not done"
+    );
+    session.step("attempt")?;
     assert!(session.step("candidate").is_err(), "the lookup ended");
     session.step("result")?;
     assert!(session.step("result").is_err(), "once");

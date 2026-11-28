@@ -11,9 +11,11 @@
 //! receipt binds the source inputs, the verification profile and the SDK's
 //! tooling distribution. Without `forge.oidc` none of this runs.
 //!
-//! `ci reuse` (crate::ci_reuse) accepts an earlier main run's stored result
-//! only through these same checks, so a reused result is one a deploy of that
-//! run's commit would have trusted.
+//! `ci reuse` (crate::ci_reuse) applies these run, object, receipt, archive and
+//! re-read checks to an earlier main run's stored result too, after binding
+//! that run's own commit archive to the key's source inputs as a deploy binds
+//! its commit's. It selects differently: any current, successful attempt
+//! under the key, not only the newest run of one commit.
 use crate::ci_check::{RECEIPT_LIMIT, Receipt as Checked};
 use crate::ci_results::{Stored, decimal};
 use crate::instance_source::{
@@ -311,8 +313,8 @@ fn stored_by(stored: &Stored, run: &Run, commit: &str, what: &str) -> Result<()>
 }
 
 // The custody checks below are the deploy reader's, in its order. `ci reuse`
-// applies exactly these to an earlier main run's stored result, so the two
-// readers trust the same objects.
+// applies the same functions to an earlier main run's stored result, once the
+// forge's archive of that run's commit binds its source inputs.
 
 /// The attempt's receipt object, before its bytes are read: this run's,
 /// created during its attempt, within the receipt budget.
@@ -606,7 +608,7 @@ impl Session {
     /// One object of the attempt, waiting while it is absent.
     fn ci_object(&mut self, bucket: &str, name: &str) -> Result<Stored> {
         loop {
-            if let Some(stored) = self.effects.storage.object(bucket, name)? {
+            if let Some(stored) = self.effects.storage.object(bucket, name, None)? {
                 return Ok(stored);
             }
             self.pause()?;
@@ -626,10 +628,10 @@ impl Session {
         let name = object_name(&binding, &inputs, &run, RECEIPT);
         let stored = self.ci_object(&bucket, &name)?;
         receipt_object(&stored, &run, &commit)?;
-        let bytes = self
-            .effects
-            .storage
-            .media(&bucket, &name, &stored.generation, stored.size)?;
+        let bytes =
+            self.effects
+                .storage
+                .media(&bucket, &name, &stored.generation, stored.size, None)?;
         let checked = decoded_receipt(&bytes)?;
         let release = self.release()?;
         binds(&checked, &inputs, &binding.verification)?;
@@ -677,10 +679,10 @@ impl Session {
         let stored = found.artifact.clone().context("app CI artifact")?;
         let (bucket, expected) = (found.bucket.clone(), found.receipt.1.archive.clone());
         let name = object_name(&binding, &inputs, &run, ARTIFACT);
-        let data = self
-            .effects
-            .storage
-            .media(&bucket, &name, &stored.generation, stored.size)?;
+        let data =
+            self.effects
+                .storage
+                .media(&bucket, &name, &stored.generation, stored.size, None)?;
         archive(&data, &expected)?;
         self.data = Some(data);
         Ok(json!({"digest": expected.digest, "bytes": expected.bytes}))

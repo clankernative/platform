@@ -78,7 +78,8 @@ CiReuse :: [].{
 		}
 	}
 
-	## A failed reuse exits 6 with the host's message. A lookup that found nothing, or failed, is a success that says why.
+	## A failed reuse, which is misconfiguration, exits 6 with the host's message. A lookup that found nothing, read
+	## transiently or ran out of time is a success that says why.
 	problem : Str -> Problem
 	problem = |error| Problem.CiReuseFailed(error)
 }

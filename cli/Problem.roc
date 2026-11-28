@@ -215,7 +215,7 @@ Problem := [
 		) => "A forge read failed transiently for 120 s: a 408, 429 or 5xx, a dropped connection, a short body or a timeout. Nothing was checked; rerun the job."
 		CiReuseFailed(
 			_,
-		) => "Run in the org-scoped app CI workflow after ci fetch, which wrote the run's directory. A lookup that finds nothing, or fails, is not a failure: only an unusable request, run record or directory is."
+		) => "Run in the org-scoped app CI workflow after ci fetch, which wrote the run's directory, with the rendered GITHUB_TOKEN and store inputs. A lookup that finds nothing, or reads transiently, is not a failure; this run's own forge record or the bucket listing refused is misconfiguration to fix, not a reason to rebuild."
 		CiStoreFailed(
 			_,
 		) => "Run in the org-scoped app CI workflow after ci fetch and ci check, which sets the git-oidc request token and the app's bucket, audience and SDK for this step. Objects are never replaced: rerun the job as a new attempt."

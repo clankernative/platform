@@ -59,17 +59,41 @@ pub struct Stored {
     pub metadata: BTreeMap<String, String>,
 }
 
-/// The results bucket. Tests substitute a fake.
+/// The results bucket. Tests substitute a fake. Given `within`, a read must
+/// finish within the lesser of it and its own deadline.
 pub trait Storage {
     /// The object's projected metadata, or nothing when it does not exist.
-    fn object(&mut self, bucket: &str, name: &str) -> Result<Option<Stored>>;
+    fn object(
+        &mut self,
+        bucket: &str,
+        name: &str,
+        within: Option<Duration>,
+    ) -> Result<Option<Stored>>;
     /// The object's bytes at exactly `generation`, which must be exactly
     /// `size` bytes.
-    fn media(&mut self, bucket: &str, name: &str, generation: &str, size: u64) -> Result<Vec<u8>>;
+    fn media(
+        &mut self,
+        bucket: &str,
+        name: &str,
+        generation: &str,
+        size: u64,
+        within: Option<Duration>,
+    ) -> Result<Vec<u8>>;
     /// One page of at most [`PAGE`] names below `prefix`, after the page
     /// `page` names. Every name starts with `prefix`; the caller bounds the
     /// pages it reads.
-    fn list(&mut self, bucket: &str, prefix: &str, page: Option<&str>) -> Result<Listing>;
+    fn list(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        page: Option<&str>,
+        within: Option<Duration>,
+    ) -> Result<Listing>;
+}
+
+/// A read's deadline: its own, or the caller's bound when that is sooner.
+fn bounded(own: Duration, within: Option<Duration>) -> Duration {
+    within.map_or(own, |within| within.min(own))
 }
 
 /// The JSON API over rustls, HTTPS only, no redirects, no proxy, with the
@@ -244,10 +268,15 @@ fn body(response: reqwest::blocking::Response, limit: u64) -> Result<Vec<u8>> {
 }
 
 impl Storage for Gcs {
-    fn object(&mut self, bucket: &str, name: &str) -> Result<Option<Stored>> {
+    fn object(
+        &mut self,
+        bucket: &str,
+        name: &str,
+        within: Option<Duration>,
+    ) -> Result<Option<Stored>> {
         let mut url = self.url(bucket, name)?;
         url.query_pairs_mut().append_pair("fields", FIELDS);
-        let response = self.get(url, self.describe)?;
+        let response = self.get(url, bounded(self.describe, within))?;
         match response.status().as_u16() {
             200 => {}
             404 => return Ok(None),
@@ -276,12 +305,19 @@ impl Storage for Gcs {
         }))
     }
 
-    fn media(&mut self, bucket: &str, name: &str, generation: &str, size: u64) -> Result<Vec<u8>> {
+    fn media(
+        &mut self,
+        bucket: &str,
+        name: &str,
+        generation: &str,
+        size: u64,
+        within: Option<Duration>,
+    ) -> Result<Vec<u8>> {
         let mut url = self.url(bucket, name)?;
         url.query_pairs_mut()
             .append_pair("alt", "media")
             .append_pair("generation", generation);
-        let response = self.get(url, self.download)?;
+        let response = self.get(url, bounded(self.download, within))?;
         match response.status().as_u16() {
             200 => {}
             status => return Err(refused(status)),
@@ -293,7 +329,13 @@ impl Storage for Gcs {
         Ok(bytes)
     }
 
-    fn list(&mut self, bucket: &str, prefix: &str, page: Option<&str>) -> Result<Listing> {
+    fn list(
+        &mut self,
+        bucket: &str,
+        prefix: &str,
+        page: Option<&str>,
+        within: Option<Duration>,
+    ) -> Result<Listing> {
         ensure!(
             !prefix.is_empty() && page.is_none_or(page_token),
             "invalid app CI results listing"
@@ -309,7 +351,7 @@ impl Storage for Gcs {
         if let Some(page) = page {
             url.query_pairs_mut().append_pair("pageToken", page);
         }
-        let response = self.get(url, self.describe)?;
+        let response = self.get(url, bounded(self.describe, within))?;
         match response.status().as_u16() {
             200 => {}
             status => return Err(refused(status)),

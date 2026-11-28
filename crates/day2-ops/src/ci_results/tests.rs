@@ -79,7 +79,7 @@ fn an_object_is_its_exact_projection_read_with_the_apply_identitys_token() {
         }
     });
     let mut storage = gcs(&base);
-    let stored = storage.object(BUCKET, NAME).unwrap().unwrap();
+    let stored = storage.object(BUCKET, NAME, None).unwrap().unwrap();
     assert_eq!(
         stored,
         Stored {
@@ -93,7 +93,9 @@ fn an_object_is_its_exact_projection_read_with_the_apply_identitys_token() {
         }
     );
     assert_eq!(
-        storage.media(BUCKET, NAME, "1700000000000001", 7).unwrap(),
+        storage
+            .media(BUCKET, NAME, "1700000000000001", 7, None)
+            .unwrap(),
         b"receipt"
     );
     let seen = seen.lock().unwrap();
@@ -116,7 +118,7 @@ fn an_object_is_its_exact_projection_read_with_the_apply_identitys_token() {
 #[test]
 fn absence_is_absence_and_every_other_answer_is_closed() {
     let (base, _) = serve(|_| (404, b"{\"error\":\"not-a-secret\"}".to_vec()));
-    assert_eq!(gcs(&base).object(BUCKET, NAME).unwrap(), None);
+    assert_eq!(gcs(&base).object(BUCKET, NAME, None).unwrap(), None);
     for (status, body, retryable) in [
         (503_u16, b"not-a-secret".to_vec(), true),
         (429, Vec::new(), true),
@@ -160,7 +162,7 @@ fn absence_is_absence_and_every_other_answer_is_closed() {
                 let _ = stream.write_all(&reply);
             }
         });
-        let error = gcs(&base).object(BUCKET, NAME).unwrap_err();
+        let error = gcs(&base).object(BUCKET, NAME, None).unwrap_err();
         let shown = format!("{error:#} {error:?}");
         assert!(!shown.contains("not-a-secret"), "{shown}");
         assert!(!shown.contains(TOKEN), "{shown}");
@@ -175,13 +177,16 @@ fn absence_is_absence_and_every_other_answer_is_closed() {
 #[test]
 fn a_download_is_exactly_the_size_asked_for() {
     let (base, _) = serve(|_| (200, b"receipt".to_vec()));
-    let error = gcs(&base).media(BUCKET, NAME, "1", 6).unwrap_err();
+    let error = gcs(&base).media(BUCKET, NAME, "1", 6, None).unwrap_err();
     assert_eq!(format!("{error:#}"), "app_ci_results_reply_too_large");
-    let error = gcs(&base).media(BUCKET, NAME, "1", 8).unwrap_err();
+    let error = gcs(&base).media(BUCKET, NAME, "1", 8, None).unwrap_err();
     assert!(error.downcast_ref::<Retryable>().is_some());
     let (base, _) = serve(|_| (404, Vec::new()));
     assert_eq!(
-        format!("{:#}", gcs(&base).media(BUCKET, NAME, "1", 7).unwrap_err()),
+        format!(
+            "{:#}",
+            gcs(&base).media(BUCKET, NAME, "1", 7, None).unwrap_err()
+        ),
         "app_ci_results_http_404"
     );
 }
@@ -191,7 +196,7 @@ fn a_refused_connection_is_retryable_and_names_nothing() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
-    let error = gcs(&base).object(BUCKET, NAME).unwrap_err();
+    let error = gcs(&base).object(BUCKET, NAME, None).unwrap_err();
     assert!(error.downcast_ref::<Retryable>().is_some());
     assert!(!format!("{error:#}").contains("127.0.0.1"));
 }
@@ -238,7 +243,7 @@ fn each_read_has_one_total_deadline_that_body_reads_cannot_renew() {
     let (base, server) = dribble(projected(NAME));
     let mut storage = gcs(&base);
     storage.describe = Duration::from_millis(500);
-    let error = storage.object(BUCKET, NAME).unwrap_err();
+    let error = storage.object(BUCKET, NAME, None).unwrap_err();
     assert!(error.downcast_ref::<Retryable>().is_some(), "{error:#}");
     assert!(
         server.join().unwrap(),
@@ -249,7 +254,7 @@ fn each_read_has_one_total_deadline_that_body_reads_cannot_renew() {
     storage.download = Duration::from_millis(500);
     assert!(
         storage
-            .media(BUCKET, NAME, "1", 320)
+            .media(BUCKET, NAME, "1", 320, None)
             .unwrap_err()
             .downcast_ref::<Retryable>()
             .is_some()
@@ -290,7 +295,7 @@ fn a_listing_is_one_bounded_page_of_names_under_the_prefix() {
         }
     });
     let mut storage = gcs(&base);
-    let first = storage.list(BUCKET, "aa/bb-4/", None).unwrap();
+    let first = storage.list(BUCKET, "aa/bb-4/", None, None).unwrap();
     assert_eq!(
         first,
         Listing {
@@ -301,7 +306,9 @@ fn a_listing_is_one_bounded_page_of_names_under_the_prefix() {
             next: Some("Cg0next".into()),
         }
     );
-    let second = storage.list(BUCKET, "aa/bb-4/", Some("Cg0next")).unwrap();
+    let second = storage
+        .list(BUCKET, "aa/bb-4/", Some("Cg0next"), None)
+        .unwrap();
     assert_eq!(second.names, ["aa/bb-4/9/1/receipt.json"]);
     assert_eq!(second.next, None);
     let seen = seen.lock().unwrap();
@@ -321,7 +328,7 @@ fn a_listing_is_one_bounded_page_of_names_under_the_prefix() {
     // An empty key is a listing with no names.
     let (base, _) = serve(|_| (200, b"{}".to_vec()));
     assert_eq!(
-        gcs(&base).list(BUCKET, "aa/bb-4/", None).unwrap(),
+        gcs(&base).list(BUCKET, "aa/bb-4/", None, None).unwrap(),
         Listing {
             names: vec![],
             next: None
@@ -377,7 +384,7 @@ fn a_listing_reply_outside_its_shape_is_refused() {
                 let _ = stream.write_all(&reply);
             }
         });
-        let error = gcs(&base).list(BUCKET, "aa/bb-4/", None).unwrap_err();
+        let error = gcs(&base).list(BUCKET, "aa/bb-4/", None, None).unwrap_err();
         let shown = format!("{error:#} {error:?}");
         assert!(!shown.contains("not-a-secret"), "{shown}");
         assert_eq!(
@@ -388,8 +395,8 @@ fn a_listing_reply_outside_its_shape_is_refused() {
     }
     // A caller's own page token is checked before anything is sent.
     let (base, seen) = serve(|_| (200, b"{}".to_vec()));
-    assert!(gcs(&base).list(BUCKET, "aa/bb-4/", Some("")).is_err());
-    assert!(gcs(&base).list(BUCKET, "", None).is_err());
+    assert!(gcs(&base).list(BUCKET, "aa/bb-4/", Some(""), None).is_err());
+    assert!(gcs(&base).list(BUCKET, "", None, None).is_err());
     assert!(seen.lock().unwrap().is_empty());
     // With a token in hand, gcloud is never needed.
     let held = Gcs::with_token("synthetic".into()).unwrap();

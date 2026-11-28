@@ -57,3 +57,22 @@ payload synchronized with the jobs and expanded infrastructure matrix in
 The payload includes administrators, requires review of the latest push, resolves
 conversations, and disallows force-pushes and branch deletion. Obtain a passing
 first public CI run and verify the private advisory URL before announcing release.
+
+## App CI commands across SDK releases
+
+An instance's app CI workflow (`day2 instance ci-workflow`) is one file for every
+app, rendered by the operator's platform, but each app's job runs the `day2`
+commands of its own selected SDK release's tooling image. A release that adds
+or changes a command the workflow runs therefore couples the two:
+
+- Re-render and commit the workflow only once every app's selected SDK carries
+  the commands it renders. `ci reuse` and `ci check --reuse` are such commands:
+  an app on an older SDK fails its reuse step, and so its required check.
+- After that, no app can roll back to an SDK without those commands while its
+  CI passes. Rolling one back means rendering the workflow from an older
+  platform, which changes the workflow for every app.
+
+Neither the renderer nor `instance check` enforces this: a release manifest
+names its `platform_commit`, but whether that commit carries a command is not
+recorded in the manifest. Check each app's selected release before rendering
+(see [App CI's workflow](docs/INSTANCE.md#workflow)).

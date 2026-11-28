@@ -1,9 +1,9 @@
 //! `day2 ci reuse DIRECTORY CASES`: the org-scoped app CI workflow's second
 //! step, after `day2 ci fetch DIRECTORY` and before `day2 ci check --reuse
 //! DIRECTORY/reuse DIRECTORY/head CASES DIRECTORY/out`. A push run on main
-//! looks for the result an earlier push run on main stored under the same key,
-//! so check can verify it again instead of building the app and running its
-//! campaign:
+//! looks for the result an earlier push run on main built and verified for the
+//! same app source, so check can verify it again instead of building the app
+//! and running its campaign:
 //!
 //! `gs://<project>-<app>-ci/<sdk>/<source inputs>-<cases>/<run>/<attempt>/`
 //!
@@ -11,36 +11,53 @@
 //!   so and succeeds without reading a store input, minting a token, reaching
 //!   any service or writing anything.
 //! - **Run.** `DIRECTORY/event.json` must be the step's own run, as `ci store`
-//!   checks it, and `DIRECTORY/reuse` must not exist yet.
+//!   checks it, `DIRECTORY/reuse` must not exist yet, and the job token
+//!   (`GITHUB_TOKEN`) and the store inputs must be present and the run's.
 //! - **Key.** The store inputs' SDK (`DAY2_CI_SDK`), the source inputs of
 //!   `DIRECTORY/head/app`, recomputed as check and store compute them, and
 //!   CASES, the instance's verification cases the check step is rendered with.
-//! - **Custody** is exactly the deploy reader's ([`app_ci`]), applied to each
-//!   stored attempt under the key, newest run first, at most [`CANDIDATES`]:
-//!   the forge's record of that run (read with the job token from
-//!   `GITHUB_TOKEN`) must be app CI's scoped verification run of a push to
-//!   main, its current attempt the stored one, terminal and successful; both
-//!   objects must carry that run's metadata, with the run's head commit, and
-//!   have been created inside the attempt's window; the receipt must be a
-//!   complete run's bound to the key's source inputs and cases, seed 42 and
-//!   `DAY2_CI_DISTRIBUTION`; the archive must be the receipt's; the run must
-//!   still be the same attempt once the archive is read; and it must not be
-//!   this run. The CI repository is the one the forge names for this run's
-//!   own scoped record: the job token reads only its own repository.
+//! - **Trust.** A stored entry's key and receipt were written by its own run's
+//!   `ci store` from a directory the check step's app code could rewrite, so
+//!   neither proves which source the result is for. A result is reused only
+//!   when the forge binds it: the stored attempt is the current, successful
+//!   attempt of a scoped app CI push run on main, and the forge's archive of
+//!   that run's own commit has exactly this run's `app/` source inputs, as a
+//!   deploy binds its own commit's archive to the receipt it reads.
+//! - **Custody**, per stored attempt, newest run first, at most
+//!   [`CANDIDATES`], as `ops/CiReuse.roc` orders the steps: `candidate` (the
+//!   forge's record of that run: app CI's scoped verification run of a push
+//!   to main, its current attempt the stored one, terminal and successful, not
+//!   this run), `source` (the forge's archive of that run's commit, whose
+//!   `app/` source inputs must be the key's), `receipt` (this attempt's
+//!   metadata and creation window, a complete run's receipt for the key's
+//!   inputs and cases, seed 42 and `DAY2_CI_DISTRIBUTION`), `artifact` and
+//!   `download` (the receipt's archive) and `attempt` (the run read again is
+//!   the same attempt). The object, receipt, archive and re-read checks are
+//!   the deploy reader's own ([`app_ci`]). Unlike a deploy, reuse does not
+//!   require the newest run of a commit, and it takes the CI repository's ID
+//!   from this run's own scoped record: the job token reads only its own
+//!   repository.
 //! - **Credential.** git-oidc and Google STS, as `ci store` mints and
 //!   exchanges, but for `devstorage.read_only`: the push identity's object
 //!   read access, which includes listing.
-//! - **Never fails the run.** Absence, a refusal of every candidate, a read
-//!   that failed or stayed transient, missing inputs or the lookup's
-//!   [`BUDGET`]: each is recorded as why nothing was reused, and the command
-//!   succeeds, so check builds the app as it always does. Only a request, run
-//!   record or directory that no later step could use either fails it.
+//! - **Deadline.** The lookup ends [`BUDGET`] after it starts. Every forge,
+//!   git-oidc, STS and bucket request, downloads included, is bounded by the
+//!   time left as well as by its own deadline, and retries end there too.
+//! - **Misses and failures.** Absence under the key, every candidate refused,
+//!   a read that stayed transient, the deadline, and a refused mint or
+//!   exchange (which store fails on itself) are recorded as why nothing was
+//!   reused, and the command succeeds, so check builds the app. A stored
+//!   attempt refused by a custody check or by a non-transient read refuses
+//!   only that attempt. Misconfiguration fails the command (exit 6): an
+//!   unusable request, run record or directory, a missing or invalid input,
+//!   this run's own forge record refused or not app CI's, or a refused
+//!   listing.
 //! - **Output.** For a push run, `DIRECTORY/reuse/` (0700) with `reuse.json`
 //!   ([`Record`]) written last and, when a result was reused, its
 //!   `app.tar.gz` and its `receipt.json`, the stored bytes.
 use crate::{
-    ci_check::SEED,
-    ci_fetch::{self, Environment, Event, Waiting, retrying},
+    ci_check::{Receipt as Checked, SEED},
+    ci_fetch::{self, Environment, Event, Waiting, retrying_within, transient},
     ci_results::{Gcs, Storage, Stored, decimal},
     ci_store::{self, Inputs, Variables},
     instance_source::{self, Forge, System, Transport, app_ci},
@@ -78,7 +95,8 @@ pub const ABSENT: &str = "no earlier push run on main stored a result under this
 pub const CANDIDATES: usize = 8;
 /// The pages of names read, at most.
 pub const PAGES: usize = 10;
-/// The whole lookup's time: a step that would begin later records a miss.
+/// The whole lookup's deadline, from when it starts: every request is
+/// bounded by the time left, and a step that would begin later misses.
 pub const BUDGET: Duration = Duration::from_secs(300);
 const REQUEST_LIMIT: u64 = 65_536;
 const RECORD_LIMIT: u64 = 65_536;
@@ -246,8 +264,56 @@ enum Stage {
     Mint,
     Exchange,
     List,
-    Candidates,
+    /// The next stored attempt, at one of its custody steps.
+    Candidate(Custody),
     Done,
+}
+
+/// A stored attempt's custody steps, in `ops/CiReuse.roc`'s order: the deploy
+/// reader's run, source binding, receipt, artifact, download and re-read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Custody {
+    Run,
+    Source,
+    Receipt,
+    Artifact,
+    Download,
+    Attempt,
+}
+
+impl Custody {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Run => "candidate",
+            Self::Source => "source",
+            Self::Receipt => "receipt",
+            Self::Artifact => "artifact",
+            Self::Download => "download",
+            Self::Attempt => "attempt",
+        }
+    }
+
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Run => Some(Self::Source),
+            Self::Source => Some(Self::Receipt),
+            Self::Receipt => Some(Self::Artifact),
+            Self::Artifact => Some(Self::Download),
+            Self::Download => Some(Self::Attempt),
+            Self::Attempt => None,
+        }
+    }
+}
+
+/// What the current stored attempt's custody steps found so far.
+#[derive(Default)]
+struct Examined {
+    run: Option<app_ci::Run>,
+    /// The commit that run checked.
+    head: Option<String>,
+    receipt: Option<(Stored, Vec<u8>, Checked)>,
+    artifact: Option<Stored>,
+    archive: Option<Vec<u8>>,
 }
 
 /// A stored attempt that passed custody, and its bytes.
@@ -255,23 +321,6 @@ struct Found {
     source: Source,
     receipt: Vec<u8>,
     archive: Vec<u8>,
-}
-
-/// One stored attempt's verdict: reused, or refused by a custody check.
-enum Verdict {
-    Accepted(Box<Found>),
-    Refused(String),
-}
-
-/// A custody check's failure refuses the candidate; a failed read (`?`) ends
-/// the lookup instead.
-macro_rules! custody {
-    ($check:expr) => {
-        match $check {
-            Ok(value) => value,
-            Err(error) => return Ok(Verdict::Refused(format!("{error:#}"))),
-        }
-    };
 }
 
 pub struct Session {
@@ -287,7 +336,8 @@ pub struct Session {
     key: Option<String>,
     /// The CI repository the forge names for this run: its ID and name.
     source: Option<(u64, String)>,
-    started: Duration,
+    /// When the lookup ends, on the session's clock.
+    deadline: Duration,
     stage: Stage,
     finished: bool,
     missed: Option<String>,
@@ -295,14 +345,15 @@ pub struct Session {
     storage: Option<Box<dyn Storage>>,
     listed: u64,
     candidates: Vec<(u64, u64)>,
+    examined: Examined,
     tried: Vec<Tried>,
     found: Option<Found>,
 }
 
 impl Session {
     /// Validate the request, the run's record against the step's run and, for
-    /// a push run, the inputs and the key. Nothing leaves the host. Missing or
-    /// invalid inputs are a miss, not a failure.
+    /// a push run, the job token, the inputs and the key. Nothing leaves the
+    /// host. Anything missing or invalid fails: it is misconfiguration.
     pub fn prepare(path: &Path, mut effects: Effects) -> Result<Self> {
         let raw = day2_assets::read_regular(path, REQUEST_LIMIT)?;
         let request: Request = day2::json::decode(&raw)?;
@@ -335,7 +386,7 @@ impl Session {
                 directory.join(REUSE).display()
             );
         }
-        let started = effects.waiting.now();
+        let deadline = effects.waiting.now() + BUDGET;
         let mut session = Self {
             directory,
             cases: request.cases,
@@ -347,7 +398,7 @@ impl Session {
             head: None,
             key: None,
             source: None,
-            started,
+            deadline,
             stage: Stage::Done,
             finished: false,
             missed: None,
@@ -355,6 +406,7 @@ impl Session {
             storage: None,
             listed: 0,
             candidates: Vec::new(),
+            examined: Examined::default(),
             tried: Vec::new(),
             found: None,
         };
@@ -362,10 +414,8 @@ impl Session {
             session.missed = Some(PULL_REQUEST.to_owned());
             return Ok(session);
         }
-        match session.keyed() {
-            Ok(()) => session.stage = Stage::Run,
-            Err(error) => session.miss(&error),
-        }
+        session.keyed()?;
+        session.stage = Stage::Run;
         Ok(session)
     }
 
@@ -395,7 +445,7 @@ impl Session {
         Ok(())
     }
 
-    /// Whether to look: a push run whose inputs were read.
+    /// Whether to look: a push run.
     pub fn plan(&self) -> Value {
         json!({"lookup": self.stage != Stage::Done})
     }
@@ -409,20 +459,58 @@ impl Session {
             Stage::Mint => "mint",
             Stage::Exchange => "exchange",
             Stage::List => "list",
-            Stage::Candidates => "candidate",
+            Stage::Candidate(custody) => custody.name(),
             Stage::Done => "result",
         })
     }
 
-    /// The lookup ends with nothing reused, for `error`'s reason.
-    fn miss(&mut self, error: &anyhow::Error) {
-        self.missed = Some(format!("{error:#}"));
+    /// The time left before the lookup's deadline.
+    fn left(&mut self) -> Duration {
+        self.deadline.saturating_sub(self.effects.waiting.now())
+    }
+
+    /// The lookup ends with nothing reused, for `reason`.
+    fn miss(&mut self, reason: String) {
+        self.missed = Some(reason);
+        self.examined = Examined::default();
         self.stage = Stage::Done;
     }
 
-    /// Run the next step, which must be `name`. A lookup step that fails ends
-    /// the lookup with nothing reused and reports that it missed; only the
-    /// result can fail the command.
+    /// The current stored attempt.
+    fn current(&self) -> Result<(u64, u64)> {
+        self.candidates
+            .get(self.tried.len())
+            .copied()
+            .context("no stored attempt is left")
+    }
+
+    /// The current stored attempt is refused for `reason`; the next is tried,
+    /// or, after the last, the lookup misses.
+    fn refuse(&mut self, reason: String) -> Result<()> {
+        let (run, attempt) = self.current()?;
+        self.tried.push(Tried {
+            run,
+            attempt,
+            accepted: false,
+            reason: Some(reason),
+        });
+        self.examined = Examined::default();
+        if self.tried.len() == self.candidates.len() {
+            self.miss(format!(
+                "custody refused every stored result tried under this key ({})",
+                self.tried.len()
+            ));
+        } else {
+            self.stage = Stage::Candidate(Custody::Run);
+        }
+        Ok(())
+    }
+
+    /// Run the next step, which must be `name`. A step that fails transiently
+    /// (after its retries, or at the deadline), or a refused mint or exchange,
+    /// ends the lookup with nothing reused; a stored attempt's custody step
+    /// that fails otherwise refuses only that attempt. This run's own record
+    /// or the listing refused outright is misconfiguration: the step fails.
     pub fn step(&mut self, name: &str) -> Result<Value> {
         let expected = self.next();
         let Some(step) = expected.filter(|step| *step == name) else {
@@ -435,56 +523,111 @@ impl Session {
             self.finished = true;
             return self.result();
         }
-        let elapsed = self.effects.waiting.now().saturating_sub(self.started);
-        let outcome = if elapsed >= BUDGET {
-            Err(anyhow::anyhow!(
-                "the lookup ran past its {} s budget",
-                BUDGET.as_secs()
-            ))
+        let stage = self.stage;
+        let mut refused = false;
+        if self.left().is_zero() {
+            self.note(
+                stage,
+                &format!(
+                    "the lookup's {} s deadline passed before {step}",
+                    BUDGET.as_secs()
+                ),
+            );
         } else {
-            match step {
-                "run" => self.run(),
-                "mint" => self.mint(),
-                "exchange" => self.exchange(),
-                "list" => self.list(),
-                _ => self.candidate(),
+            let outcome = match stage {
+                Stage::Run => self.run(),
+                Stage::Mint => self.mint(),
+                Stage::Exchange => self.exchange(),
+                Stage::List => self.list(),
+                Stage::Candidate(custody) => self.custody(custody),
+                Stage::Done => bail!("the lookup has ended"),
+            };
+            if let Err(error) = outcome {
+                match stage {
+                    Stage::Candidate(_) if !transient(&error) => {
+                        self.refuse(format!("{error:#}"))?;
+                        refused = true;
+                    }
+                    Stage::Run if !transient(&error) => {
+                        return Err(error.context(
+                            "ci reuse could not bind this run's own forge record: the job token, \
+                             its actions: read permission or the run is misconfigured",
+                        ));
+                    }
+                    Stage::List if !transient(&error) => {
+                        return Err(error.context(
+                            "ci reuse could not list its key in the results bucket: the push \
+                             identity's read access or the bucket is misconfigured",
+                        ));
+                    }
+                    _ => {
+                        let reason = if self.left().is_zero() {
+                            format!(
+                                "the lookup's {} s deadline passed during {step}: {error:#}",
+                                BUDGET.as_secs()
+                            )
+                        } else {
+                            format!("{error:#}")
+                        };
+                        self.note(stage, &reason);
+                    }
+                }
             }
-        };
-        outcome.or_else(|error| {
-            self.miss(&error);
-            Ok(match step {
-                "list" => json!({"missed": true, "candidates": []}),
-                "candidate" => json!({"missed": true, "accepted": false}),
-                _ => json!({"missed": true}),
-            })
+        }
+        let missed = self.stage == Stage::Done && self.found.is_none();
+        Ok(match stage {
+            Stage::List => json!({"missed": missed, "candidates": self.candidates.iter()
+                .map(|(run, attempt)| json!({"run": run, "attempt": attempt})).collect::<Vec<_>>()}),
+            Stage::Candidate(_) => json!({"missed": missed, "refused": refused}),
+            _ => json!({"missed": missed}),
         })
+    }
+
+    /// The lookup misses for `reason`, which a stored attempt being examined
+    /// also records as its own.
+    fn note(&mut self, stage: Stage, reason: &str) {
+        if let (Stage::Candidate(_), Ok((run, attempt))) = (stage, self.current()) {
+            self.tried.push(Tried {
+                run,
+                attempt,
+                accepted: false,
+                reason: Some(reason.to_owned()),
+            });
+        }
+        self.miss(reason.to_owned());
     }
 
     fn inputs(&self) -> Result<&Inputs> {
         self.inputs.as_ref().context("the reuse inputs")
     }
 
-    /// One JSON read from the run's own repository with the job token,
-    /// retried while it fails transiently.
-    fn forge(&mut self, path: &str) -> Result<Value> {
+    /// One read from the run's own repository with the job token, retried
+    /// while it fails transiently, each request and the retries bounded by
+    /// the time left.
+    fn forge<T>(&mut self, what: &str, read: impl Fn(&mut Forge<'_>) -> Result<T>) -> Result<T> {
+        let limit = self.left();
         let effects = &mut self.effects;
-        let mut forge = Forge::new(
-            effects.transport.as_mut(),
-            self.token.as_deref(),
-            &self.server,
-            &self.event.repository,
-        );
-        let url = format!("{}{path}", forge.prefix);
-        retrying(effects.waiting.as_mut(), "a forge read", |_| {
+        let transport = &mut effects.transport;
+        let token = self.token.as_deref();
+        let (server, repository) = (&self.server, &self.event.repository);
+        retrying_within(effects.waiting.as_mut(), what, limit, |left| {
+            read(&mut Forge::new(transport.as_mut(), token, server, repository).within(left))
+        })
+    }
+
+    /// A JSON read below the repository's API prefix.
+    fn forge_json(&mut self, path: &str) -> Result<Value> {
+        self.forge("a forge read", |forge| {
+            let url = format!("{}{path}", forge.prefix);
             forge.json(&url)
         })
     }
 
     /// run: the forge's record of this run names the CI repository, as a
     /// scoped run of `<org>/day2-ci`'s verification workflow for this push.
-    fn run(&mut self) -> Result<Value> {
+    fn run(&mut self) -> Result<()> {
         let event = self.event.clone();
-        let record = self.forge(&format!("/actions/runs/{}", event.run))?;
+        let record = self.forge_json(&format!("/actions/runs/{}", event.run))?;
         let org = event.repository.split('/').next().unwrap_or_default();
         let source = format!("{org}/day2-ci");
         let source_id = record
@@ -503,20 +646,27 @@ impl Session {
         );
         self.source = Some((source_id, source));
         self.stage = Stage::Mint;
-        Ok(json!({"missed": false}))
+        Ok(())
     }
 
     /// mint: git-oidc's token for the audience, as `ci store` mints it.
-    fn mint(&mut self) -> Result<Value> {
+    fn mint(&mut self) -> Result<()> {
+        let within = Some(self.left());
         let inputs = self.inputs.as_ref().context("the reuse inputs")?;
-        let subject = ci_store::mint(&self.effects.client, self.effects.waiting.as_mut(), inputs)?;
+        let subject = ci_store::mint(
+            &self.effects.client,
+            self.effects.waiting.as_mut(),
+            inputs,
+            within,
+        )?;
         self.subject = Some(subject);
         self.stage = Stage::Exchange;
-        Ok(json!({"missed": false}))
+        Ok(())
     }
 
     /// exchange: Google STS's federated token, read only.
-    fn exchange(&mut self) -> Result<Value> {
+    fn exchange(&mut self) -> Result<()> {
+        let within = Some(self.left());
         let subject = self.subject.take().context("the minted token")?;
         let access = ci_store::exchange(
             &self.effects.client,
@@ -524,26 +674,31 @@ impl Session {
             self.inputs()?,
             &subject,
             SCOPE,
+            within,
         )?;
         self.storage = Some((self.effects.storage)(access)?);
         self.stage = Stage::List;
-        Ok(json!({"missed": false}))
+        Ok(())
     }
 
     /// list: every name under the key, at most [`PAGES`] pages; each
     /// `<run>/<attempt>/receipt.json`, the commit marker `ci store` writes
-    /// last, is a stored attempt. The newest [`CANDIDATES`] are tried.
-    fn list(&mut self) -> Result<Value> {
+    /// last, is a stored attempt. The newest [`CANDIDATES`] are tried. A key
+    /// with more pages, or with none, is a miss.
+    fn list(&mut self) -> Result<()> {
         let key = self.key.clone().context("the key")?;
         let bucket = self.inputs()?.bucket.clone();
-        let storage = self.storage.as_mut().context("the results bucket")?;
-        let waiting = self.effects.waiting.as_mut();
         let mut attempts = BTreeSet::new();
         let mut page: Option<String> = None;
         for _ in 0..PAGES {
-            let listing = retrying(waiting, "a results listing", |_| {
-                storage.list(&bucket, &key, page.as_deref())
-            })?;
+            let limit = self.left();
+            let storage = self.storage.as_mut().context("the results bucket")?;
+            let listing = retrying_within(
+                self.effects.waiting.as_mut(),
+                "a results listing",
+                limit,
+                |left| storage.list(&bucket, &key, page.as_deref(), Some(left)),
+            )?;
             for name in &listing.names {
                 let rest = name
                     .strip_prefix(&key)
@@ -557,155 +712,226 @@ impl Session {
                 break;
             }
         }
-        ensure!(
-            page.is_none(),
-            "the key holds more than {PAGES} pages of results, more than the lookup reads"
-        );
+        if page.is_some() {
+            self.miss(format!(
+                "the key holds more than {PAGES} pages of results, more than the lookup reads"
+            ));
+            return Ok(());
+        }
         self.listed = attempts.len() as u64;
         self.candidates = attempts.into_iter().rev().take(CANDIDATES).collect();
         if self.candidates.is_empty() {
-            self.missed = Some(ABSENT.to_owned());
-            self.stage = Stage::Done;
-            return Ok(json!({"missed": true, "candidates": []}));
+            self.miss(ABSENT.to_owned());
+        } else {
+            self.stage = Stage::Candidate(Custody::Run);
         }
-        self.stage = Stage::Candidates;
-        Ok(json!({"missed": false, "candidates": self.candidates.iter()
-            .map(|(run, attempt)| json!({"run": run, "attempt": attempt})).collect::<Vec<_>>()}))
+        Ok(())
     }
 
-    /// candidate: the next stored attempt, newest first, through every
-    /// custody check. The first accepted ends the lookup, as does the last
-    /// refused.
-    fn candidate(&mut self) -> Result<Value> {
-        let (run, attempt) = *self
-            .candidates
-            .get(self.tried.len())
-            .context("no stored attempt is left")?;
-        let verdict = match self.examine(run, attempt) {
-            Ok(verdict) => verdict,
-            Err(error) => {
-                self.tried.push(Tried {
-                    run,
-                    attempt,
-                    accepted: false,
-                    reason: Some(format!("{error:#}")),
-                });
-                return Err(error);
-            }
-        };
-        match verdict {
-            Verdict::Accepted(found) => {
-                self.tried.push(Tried {
-                    run,
-                    attempt,
-                    accepted: true,
-                    reason: None,
-                });
-                self.found = Some(*found);
-                self.stage = Stage::Done;
-                Ok(json!({"missed": false, "accepted": true}))
-            }
-            Verdict::Refused(reason) => {
-                self.tried.push(Tried {
-                    run,
-                    attempt,
-                    accepted: false,
-                    reason: Some(reason),
-                });
-                let over = self.tried.len() == self.candidates.len();
-                if over {
-                    self.missed = Some(format!(
-                        "custody refused every stored result tried under this key ({})",
-                        self.tried.len()
-                    ));
-                    self.stage = Stage::Done;
-                }
-                Ok(json!({"missed": over, "accepted": false}))
-            }
+    /// One custody step of the current stored attempt; on success, the next.
+    /// The last accepts the attempt.
+    fn custody(&mut self, custody: Custody) -> Result<()> {
+        match custody {
+            Custody::Run => self.candidate_run()?,
+            Custody::Source => self.candidate_source()?,
+            Custody::Receipt => self.candidate_receipt()?,
+            Custody::Artifact => self.candidate_artifact()?,
+            Custody::Download => self.candidate_download()?,
+            Custody::Attempt => self.candidate_attempt()?,
         }
+        if let Some(next) = custody.next() {
+            self.stage = Stage::Candidate(next);
+        }
+        Ok(())
     }
 
     fn object(&mut self, bucket: &str, name: &str) -> Result<Option<Stored>> {
+        let limit = self.left();
         let storage = self.storage.as_mut().context("the results bucket")?;
-        retrying(self.effects.waiting.as_mut(), "a results read", |_| {
-            storage.object(bucket, name)
-        })
+        retrying_within(
+            self.effects.waiting.as_mut(),
+            "a results read",
+            limit,
+            |left| storage.object(bucket, name, Some(left)),
+        )
     }
 
     fn media(&mut self, bucket: &str, name: &str, stored: &Stored) -> Result<Vec<u8>> {
+        let limit = self.left();
         let storage = self.storage.as_mut().context("the results bucket")?;
-        retrying(self.effects.waiting.as_mut(), "a results read", |_| {
-            storage.media(bucket, name, &stored.generation, stored.size)
-        })
+        retrying_within(
+            self.effects.waiting.as_mut(),
+            "a results download",
+            limit,
+            |left| storage.media(bucket, name, &stored.generation, stored.size, Some(left)),
+        )
     }
 
-    /// One stored attempt under the deploy reader's custody checks, in its
-    /// order: the run, the receipt object and bytes, the artifact object and
-    /// bytes, the run again.
-    fn examine(&mut self, id: u64, attempt: u64) -> Result<Verdict> {
-        if id == self.event.run {
-            return Ok(Verdict::Refused("it is this run's own result".to_owned()));
-        }
+    /// `<key><run>/<attempt>/<file>` for the current stored attempt.
+    fn object_name(&self, file: &str) -> Result<String> {
+        let (run, attempt) = self.current()?;
+        Ok(format!(
+            "{}{run}/{attempt}/{file}",
+            self.key.as_deref().context("the key")?
+        ))
+    }
+
+    fn examined_run(&self) -> Result<(app_ci::Run, String)> {
+        Ok((
+            self.examined
+                .run
+                .clone()
+                .context("the stored attempt's run")?,
+            self.examined
+                .head
+                .clone()
+                .context("the stored attempt's commit")?,
+        ))
+    }
+
+    /// candidate: the next stored attempt's run, as the forge reports it by
+    /// ID ([`candidate`]); never this run.
+    fn candidate_run(&mut self) -> Result<()> {
+        let (id, attempt) = self.current()?;
+        ensure!(id != self.event.run, "it is this run's own result");
         let (source_id, source) = self.source.clone().context("the CI repository")?;
-        let repository_id = json!(self.event.repository_id);
-        let (bucket, distribution) = {
-            let inputs = self.inputs()?;
-            (inputs.bucket.clone(), inputs.distribution.clone())
-        };
-        let key = self.key.clone().context("the key")?;
-        let record = self.forge(&format!("/actions/runs/{id}"))?;
-        let (run, head) = custody!(candidate(
+        let record = self.forge_json(&format!("/actions/runs/{id}"))?;
+        let (run, head) = candidate(
             &record,
             id,
             attempt,
             source_id,
             &source,
-            &repository_id
-        ));
-        let receipt_name = format!("{key}{id}/{attempt}/{}", app_ci::RECEIPT);
-        let Some(receipt) = self.object(&bucket, &receipt_name)? else {
-            return Ok(Verdict::Refused(
-                "its receipt is no longer stored".to_owned(),
-            ));
+            &json!(self.event.repository_id),
+        )?;
+        self.examined = Examined {
+            run: Some(run),
+            head: Some(head),
+            ..Examined::default()
         };
-        custody!(app_ci::receipt_object(&receipt, &run, &head));
-        let bytes = self.media(&bucket, &receipt_name, &receipt)?;
-        let checked = custody!(app_ci::decoded_receipt(&bytes));
-        let head_inputs = self.head.clone().context("the head's source inputs")?;
-        custody!(app_ci::binds(
+        Ok(())
+    }
+
+    /// source: the forge's archive of the run's own commit, read as fetch
+    /// and deploy read one, must have exactly this run's `app/` source inputs,
+    /// computed by the function deploy binds a commit's archive with. The
+    /// key and the receipt alone are the stored run's own claims.
+    fn candidate_source(&mut self) -> Result<()> {
+        let (_, head) = self.examined_run()?;
+        let archive = self.forge("a forge archive read", |forge| forge.archive(&head))?;
+        let inputs = crate::instance_candidate::source_inputs(&archive, ci_fetch::APP)
+            .context("the forge's archive of the run's commit")?;
+        ensure!(
+            Some(&inputs) == self.head.as_ref(),
+            "the forge's archive of the run's commit {head} has other app/ source inputs than \
+             this run's"
+        );
+        Ok(())
+    }
+
+    /// receipt: this attempt's, created during it, a complete run's for the
+    /// key's source inputs and cases, seed 42 and `DAY2_CI_DISTRIBUTION`.
+    fn candidate_receipt(&mut self) -> Result<()> {
+        let (run, head) = self.examined_run()?;
+        let (bucket, distribution) = {
+            let inputs = self.inputs()?;
+            (inputs.bucket.clone(), inputs.distribution.clone())
+        };
+        let name = self.object_name(app_ci::RECEIPT)?;
+        let stored = self
+            .object(&bucket, &name)?
+            .context("its receipt is no longer stored")?;
+        app_ci::receipt_object(&stored, &run, &head)?;
+        let bytes = self.media(&bucket, &name, &stored)?;
+        let checked = app_ci::decoded_receipt(&bytes)?;
+        let inputs = self.head.clone().context("the head's source inputs")?;
+        app_ci::binds(
             &checked,
-            &head_inputs,
-            &json!({"version": 1, "seed": SEED, "cases": self.cases})
-        ));
-        if checked.sdk_distribution.digest != distribution {
-            return Ok(Verdict::Refused(
-                "app CI checked the artifact on another SDK's tooling distribution".to_owned(),
-            ));
-        }
-        let artifact_name = format!("{key}{id}/{attempt}/{}", app_ci::ARTIFACT);
-        let Some(artifact) = self.object(&bucket, &artifact_name)? else {
-            return Ok(Verdict::Refused(
-                "its artifact is no longer stored".to_owned(),
-            ));
-        };
-        custody!(app_ci::artifact_object(
-            &artifact,
-            &run,
-            &head,
-            &checked.archive
-        ));
-        let archive = self.media(&bucket, &artifact_name, &artifact)?;
-        custody!(app_ci::archive(&archive, &checked.archive));
-        let latest = self.forge(&format!("/actions/runs/{id}"))?;
-        custody!(app_ci::unchanged(
+            &inputs,
+            &json!({"version": 1, "seed": SEED, "cases": self.cases}),
+        )?;
+        ensure!(
+            checked.sdk_distribution.digest == distribution,
+            "app CI checked the artifact on another SDK's tooling distribution"
+        );
+        self.examined.receipt = Some((stored, bytes, checked));
+        Ok(())
+    }
+
+    /// artifact: this attempt's, created during it, the receipt's size.
+    fn candidate_artifact(&mut self) -> Result<()> {
+        let (run, head) = self.examined_run()?;
+        let bucket = self.inputs()?.bucket.clone();
+        let expected = self
+            .examined
+            .receipt
+            .as_ref()
+            .context("the stored receipt")?
+            .2
+            .archive
+            .clone();
+        let name = self.object_name(app_ci::ARTIFACT)?;
+        let stored = self
+            .object(&bucket, &name)?
+            .context("its artifact is no longer stored")?;
+        app_ci::artifact_object(&stored, &run, &head, &expected)?;
+        self.examined.artifact = Some(stored);
+        Ok(())
+    }
+
+    /// download: the artifact's bytes at that generation, the receipt's
+    /// archive.
+    fn candidate_download(&mut self) -> Result<()> {
+        let bucket = self.inputs()?.bucket.clone();
+        let stored = self
+            .examined
+            .artifact
+            .clone()
+            .context("the stored artifact")?;
+        let expected = self
+            .examined
+            .receipt
+            .as_ref()
+            .context("the stored receipt")?
+            .2
+            .archive
+            .clone();
+        let name = self.object_name(app_ci::ARTIFACT)?;
+        let archive = self.media(&bucket, &name, &stored)?;
+        app_ci::archive(&archive, &expected)?;
+        self.examined.archive = Some(archive);
+        Ok(())
+    }
+
+    /// attempt: the run read again is still the same successful attempt of
+    /// the same commit; only then is the stored attempt accepted.
+    fn candidate_attempt(&mut self) -> Result<()> {
+        let (run, head) = self.examined_run()?;
+        let (id, attempt) = self.current()?;
+        let (source_id, source) = self.source.clone().context("the CI repository")?;
+        let latest = self.forge_json(&format!("/actions/runs/{id}"))?;
+        app_ci::unchanged(
             &latest,
             &head,
             source_id,
             &source,
-            &repository_id,
-            &run
-        ));
-        Ok(Verdict::Accepted(Box::new(Found {
+            &json!(self.event.repository_id),
+            &run,
+        )?;
+        let bucket = self.inputs()?.bucket.clone();
+        let receipt_name = self.object_name(app_ci::RECEIPT)?;
+        let artifact_name = self.object_name(app_ci::ARTIFACT)?;
+        let examined = std::mem::take(&mut self.examined);
+        let (receipt, bytes, _) = examined.receipt.context("the stored receipt")?;
+        let artifact = examined.artifact.context("the stored artifact")?;
+        let archive = examined.archive.context("the downloaded artifact")?;
+        self.tried.push(Tried {
+            run: id,
+            attempt,
+            accepted: true,
+            reason: None,
+        });
+        self.found = Some(Found {
             source: Source {
                 run: run.id,
                 attempt: run.attempt,
@@ -727,7 +953,9 @@ impl Session {
             },
             receipt: bytes,
             archive,
-        })))
+        });
+        self.stage = Stage::Done;
+        Ok(())
     }
 
     /// result: for a push run, `DIRECTORY/reuse/` with the reused result's

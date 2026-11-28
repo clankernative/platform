@@ -226,21 +226,27 @@ COMMANDS
                   reaches no service. For main's push run, look under
                   gs://<DAY2_CI_BUCKET>/<sdk>/<source inputs>-<cases>/ (the
                   fetched head app's source inputs) for a result an earlier
-                  push run on main stored, newest run first, at most 8:
-                  accept the first that passes deploy's custody checks
-                  (the forge's record of that run, read with GITHUB_TOKEN:
-                  a scoped push run of <org>/day2-ci's verification.yml on
+                  push run on main stored, newest run first, at most 8, and
+                  accept the first whose custody holds, step by step: the
+                  forge's record of that run, read with GITHUB_TOKEN (a
+                  scoped push run of <org>/day2-ci's verification.yml on
                   main whose current, successful attempt is the stored
-                  one; both objects carrying its metadata and created
-                  during that attempt; a receipt for these inputs, <cases>,
-                  seed 42 and DAY2_CI_DISTRIBUTION; the receipt's archive),
-                  reading with a read-only token from git-oidc and Google
-                  STS, as ci store mints one. Write <directory>/reuse/:
-                  reuse.json, the source or why nothing was reused, and
-                  the reused app.tar.gz and receipt.json. Absence, a
-                  refusal, a failed read or a missing input is reported
-                  and succeeds, so check builds as always; exits 6 only
-                  on an unusable request, run record or directory.
+                  one); the forge's archive of that run's commit, whose
+                  app/ must have these source inputs; both objects carrying
+                  its metadata and created during that attempt; a receipt
+                  for these inputs, <cases>, seed 42 and
+                  DAY2_CI_DISTRIBUTION; the receipt's archive; the same
+                  attempt again. Reads with a read-only token from git-oidc
+                  and Google STS, as ci store mints one, every request
+                  bounded by the lookup's 300 s deadline. Write
+                  <directory>/reuse/: reuse.json, the source or why nothing
+                  was reused, and the reused app.tar.gz and receipt.json.
+                  Absence, every attempt refused, a read that stays
+                  transient, the deadline or a refused mint or exchange is
+                  reported and succeeds, so check builds as always. Exits
+                  6 on misconfiguration: an unusable request, run record or
+                  directory, a missing input, this run's own forge record
+                  refused or not app CI's, or a refused listing.
   ci store        The last step of an app's org-scoped CI run, after ci fetch
                   <directory> and ci check <directory>/head [<directory>/base]
                   <cases> <directory>/out. When ci check wrote an artifact

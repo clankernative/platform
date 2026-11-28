@@ -1,7 +1,7 @@
 //! Exercise the compiled Roc workflows through the real private protocol. Failure
 //! injection verifies that policy cannot proceed to later effects after a failed
 //! native check, while the Reports integration tests exercise the real adapters.
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use day2::automation;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -650,14 +650,16 @@ fn ci_fetch_reads_a_base_tree_only_when_the_event_has_one() -> Result<()> {
     Ok(())
 }
 
-/// The steps `day2 ci reuse`'s recipe requests, each answered from `replies`
-/// by name (a candidate's in turn), when the plan has `lookup`.
+/// The steps `day2 ci reuse`'s recipe requests when the plan has `lookup`,
+/// each answered by the next of `replies` queued for its name: a lookup step
+/// by `{"missed": false}` and a custody step by `{"missed": false, "refused":
+/// false}` once its queue is empty.
 fn ci_reuse_effects(lookup: bool, replies: &[(&str, Value)]) -> Result<Vec<String>> {
     let mut effects = Vec::new();
-    let mut candidates = replies
+    let mut queued: Vec<(String, Value)> = replies
         .iter()
-        .filter(|(name, _)| *name == "candidate")
-        .map(|(_, reply)| reply.clone());
+        .map(|(name, reply)| ((*name).to_owned(), reply.clone()))
+        .collect();
     automation::run(
         &automation::runner()?,
         &["ci-reuse-session", "/work/request.json"],
@@ -672,13 +674,20 @@ fn ci_reuse_effects(lookup: bool, replies: &[(&str, Value)]) -> Result<Vec<Strin
                 "ci-reuse-step" => {
                     let name = input["name"].as_str().unwrap_or_default().to_owned();
                     effects.push(name.clone());
-                    Ok(match name.as_str() {
-                        "candidate" => candidates.next().context("an unplanned candidate")?,
-                        "result" => json!({}),
-                        _ => replies
-                            .iter()
-                            .find(|(step, _)| *step == name)
-                            .map_or(json!({"missed": false}), |(_, reply)| reply.clone()),
+                    let custody = [
+                        "candidate",
+                        "source",
+                        "receipt",
+                        "artifact",
+                        "download",
+                        "attempt",
+                    ]
+                    .contains(&name.as_str());
+                    Ok(match queued.iter().position(|(step, _)| *step == name) {
+                        Some(at) => queued.remove(at).1,
+                        None if name == "result" => json!({}),
+                        None if custody => json!({"missed": false, "refused": false}),
+                        None => json!({"missed": false}),
                     })
                 }
                 action => bail!("unexpected CI reuse capability: {action}"),
@@ -689,68 +698,84 @@ fn ci_reuse_effects(lookup: bool, replies: &[(&str, Value)]) -> Result<Vec<Strin
 }
 
 #[test]
-fn ci_reuse_tries_stored_attempts_in_order_and_always_writes_its_result() -> Result<()> {
+fn ci_reuse_takes_each_stored_attempt_through_custody_in_order() -> Result<()> {
     let listed = |count: u64| {
         json!({"missed": false, "candidates": (1..=count)
             .map(|run| json!({"run": 50 - run, "attempt": 1})).collect::<Vec<_>>()})
     };
-    let tried = |missed: bool, accepted: bool| json!({"missed": missed, "accepted": accepted});
+    let custody = |missed: bool, refused: bool| json!({"missed": missed, "refused": refused});
+    let lookup = ["ci-reuse-prepare", "run", "mint", "exchange", "list"];
+    let examined = [
+        "candidate",
+        "source",
+        "receipt",
+        "artifact",
+        "download",
+        "attempt",
+    ];
     // A pull request run looks for nothing.
     assert_eq!(
         ci_reuse_effects(false, &[])?,
         ["ci-reuse-prepare", "result"]
     );
-    // Newest first, until one is accepted.
+    // Newest first: the first attempt's receipt is refused, the second passes
+    // every custody step and is accepted.
     assert_eq!(
         ci_reuse_effects(
             true,
-            &[
-                ("list", listed(3)),
-                ("candidate", tried(false, false)),
-                ("candidate", tried(false, true)),
-            ]
+            &[("list", listed(3)), ("receipt", custody(false, true))]
         )?,
         [
-            "ci-reuse-prepare",
-            "run",
-            "mint",
-            "exchange",
-            "list",
-            "candidate",
-            "candidate",
-            "result"
+            &lookup[..],
+            &["candidate", "source", "receipt"],
+            &examined,
+            &["result"]
         ]
+        .concat()
     );
-    // Every lookup step that misses ends the lookup; the result still runs.
+    // Its commit's source refuses an attempt before its receipt is read.
+    assert_eq!(
+        ci_reuse_effects(
+            true,
+            &[("list", listed(2)), ("source", custody(false, true))]
+        )?,
+        [
+            &lookup[..],
+            &["candidate", "source"],
+            &examined,
+            &["result"]
+        ]
+        .concat()
+    );
+    // Every lookup or custody step that misses ends the lookup; the result
+    // still runs.
     assert_eq!(
         ci_reuse_effects(true, &[("mint", json!({"missed": true}))])?,
         ["ci-reuse-prepare", "run", "mint", "result"]
     );
     assert_eq!(
         ci_reuse_effects(true, &[("list", json!({"missed": true, "candidates": []}))])?,
-        [
-            "ci-reuse-prepare",
-            "run",
-            "mint",
-            "exchange",
-            "list",
-            "result"
-        ]
+        [&lookup[..], &["result"]].concat()
     );
     assert_eq!(
         ci_reuse_effects(
             true,
-            &[("list", listed(2)), ("candidate", tried(true, false))]
+            &[("list", listed(2)), ("download", custody(true, false))]
         )?,
         [
-            "ci-reuse-prepare",
-            "run",
-            "mint",
-            "exchange",
-            "list",
-            "candidate",
-            "result"
+            &lookup[..],
+            &["candidate", "source", "receipt", "artifact", "download"],
+            &["result"]
         ]
+        .concat()
+    );
+    // The last attempt refused ends the lookup as a miss.
+    assert_eq!(
+        ci_reuse_effects(
+            true,
+            &[("list", listed(1)), ("candidate", custody(true, true))]
+        )?,
+        [&lookup[..], &["candidate"], &["result"]].concat()
     );
     Ok(())
 }

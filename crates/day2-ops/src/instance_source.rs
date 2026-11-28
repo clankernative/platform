@@ -166,13 +166,21 @@ pub trait Transport {
     /// GET `url` with `Accept: application/json` and, given `token`,
     /// `Authorization: token <token>`. A redirect is never followed: any
     /// non-2xx response comes back with its Location and no body. A 2xx body is
-    /// read up to `limit + 1` bytes. A failed connection, a failed or short body
-    /// read and a timeout are `Retryable`.
-    fn get(&mut self, url: &str, token: Option<&str>, limit: u64) -> Result<Response>;
+    /// read up to `limit + 1` bytes. Given `within`, the whole request, its
+    /// body included, must finish within it. A failed connection, a failed or
+    /// short body read and a timeout are `Retryable`.
+    fn get(
+        &mut self,
+        url: &str,
+        token: Option<&str>,
+        limit: u64,
+        within: Option<Duration>,
+    ) -> Result<Response>;
 }
 
 /// reqwest over rustls: HTTPS only, no redirects, `TIMEOUT` up to the response
-/// headers and again for each body read. Proxies come from the environment.
+/// headers and again for each body read, and a caller's total bound for the
+/// whole request when it gives one. Proxies come from the environment.
 pub struct Native {
     client: reqwest::blocking::Client,
 }
@@ -194,11 +202,21 @@ impl Native {
 }
 
 impl Transport for Native {
-    fn get(&mut self, url: &str, token: Option<&str>, limit: u64) -> Result<Response> {
+    fn get(
+        &mut self,
+        url: &str,
+        token: Option<&str>,
+        limit: u64,
+        within: Option<Duration>,
+    ) -> Result<Response> {
         let mut request = self
             .client
             .get(url)
             .header(reqwest::header::ACCEPT, "application/json");
+        // A request's own timeout is its total, which body reads cannot renew.
+        if let Some(within) = within {
+            request = request.timeout(within);
+        }
         if let Some(token) = token {
             let mut value = reqwest::header::HeaderValue::from_str(&format!("token {token}"))
                 .map_err(|_| anyhow!("the source token is not a valid header value"))?;
@@ -2440,6 +2458,8 @@ pub(crate) struct Forge<'a> {
     token: Option<&'a str>,
     /// `<server>/api/v1/repos/<repository>`.
     pub(crate) prefix: String,
+    /// The most each request may take in all, when the caller bounds it.
+    within: Option<Duration>,
 }
 
 impl<'a> Forge<'a> {
@@ -2453,6 +2473,15 @@ impl<'a> Forge<'a> {
             transport,
             token,
             prefix: format!("{server}/api/v1/repos/{repository}"),
+            within: None,
+        }
+    }
+
+    /// The same repository, each request bounded in all by `within`.
+    pub(crate) fn within(self, within: Duration) -> Self {
+        Self {
+            within: Some(within),
+            ..self
         }
     }
 
@@ -2471,7 +2500,7 @@ impl<'a> Forge<'a> {
     /// is refused; any other status is the caller's to report.
     fn get(&mut self, url: &str, limit: u64, authenticated: bool) -> Result<Got> {
         let token = self.token.filter(|_| authenticated);
-        let response = self.transport.get(url, token, limit)?;
+        let response = self.transport.get(url, token, limit, self.within)?;
         match response.status {
             200..=299 => {
                 ensure!(

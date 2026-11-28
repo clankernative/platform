@@ -352,8 +352,8 @@ ci_fetched! = |run| {
 }
 
 ## Look for an earlier main push run's stored result under this run's key through the platform host, which reads the CI
-## environment, the job token and the store inputs itself and validates the request again. Finding nothing, or failing
-## to read, is reported and succeeds; only an unusable request or run directory exits 6.
+## environment, the job token and the store inputs itself and validates the request again. Finding nothing, a transient
+## read or the deadline is reported and succeeds; misconfiguration exits 6.
 ci_reused! : Cli.CiReuseRequest => Output.Outcome
 ci_reused! = |reuse| {
 	failed = |problem| Output.Outcome.Failed(problem, reuse.parts().format, Cli.Command.CiReuse)

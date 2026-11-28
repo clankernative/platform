@@ -23,6 +23,11 @@ pub(crate) struct World {
     pub(crate) routes: BTreeMap<String, VecDeque<Option<Response>>>,
     /// Each request's URL and whether it carried the token.
     pub(crate) calls: Vec<(String, bool)>,
+    /// Each forge request's total bound, when its caller gave one.
+    pub(crate) withins: Vec<Option<Duration>>,
+    /// How long a request takes, by URL or results object name; one bounded
+    /// by less times out at its bound.
+    pub(crate) slow: BTreeMap<String, Duration>,
     pub(crate) objects: BTreeMap<String, Vec<u8>>,
     /// App CI's results: each object's projected metadata and bytes, by bucket and name.
     pub(crate) stored: BTreeMap<(String, String), (crate::ci_results::Stored, Vec<u8>)>,
@@ -62,11 +67,40 @@ impl Fake {
     }
 }
 
+impl Fake {
+    /// A request to `key` takes its `slow` time on the fake clock, or times out
+    /// at `within` when that is less.
+    pub(crate) fn take(&self, key: &str, within: Option<Duration>) -> Result<()> {
+        let mut world = self.0.borrow_mut();
+        let Some(taken) = world.slow.get(key).copied() else {
+            return Ok(());
+        };
+        match within {
+            Some(within) if within < taken => {
+                world.now += within;
+                Err(Retryable(TEMPORARY).into())
+            }
+            _ => {
+                world.now += taken;
+                Ok(())
+            }
+        }
+    }
+}
+
 impl Transport for Fake {
-    fn get(&mut self, url: &str, token: Option<&str>, limit: u64) -> Result<Response> {
+    fn get(
+        &mut self,
+        url: &str,
+        token: Option<&str>,
+        limit: u64,
+        within: Option<Duration>,
+    ) -> Result<Response> {
+        self.take(url, within)?;
         let mut world = self.0.borrow_mut();
         assert!(token.is_none_or(|token| token == TOKEN));
         world.calls.push((url.to_owned(), token.is_some()));
+        world.withins.push(within);
         let queue = world
             .routes
             .get_mut(url)
@@ -127,7 +161,13 @@ impl instance_release::Tools for Fake {
 }
 
 impl crate::ci_results::Storage for Fake {
-    fn object(&mut self, bucket: &str, name: &str) -> Result<Option<crate::ci_results::Stored>> {
+    fn object(
+        &mut self,
+        bucket: &str,
+        name: &str,
+        within: Option<Duration>,
+    ) -> Result<Option<crate::ci_results::Stored>> {
+        self.take(name, within)?;
         let mut world = self.0.borrow_mut();
         world.reads.push((bucket.to_owned(), name.to_owned(), None));
         Ok(world
@@ -136,7 +176,15 @@ impl crate::ci_results::Storage for Fake {
             .map(|(stored, _)| stored.clone()))
     }
 
-    fn media(&mut self, bucket: &str, name: &str, generation: &str, size: u64) -> Result<Vec<u8>> {
+    fn media(
+        &mut self,
+        bucket: &str,
+        name: &str,
+        generation: &str,
+        size: u64,
+        within: Option<Duration>,
+    ) -> Result<Vec<u8>> {
+        self.take(&format!("media:{name}"), within)?;
         let mut world = self.0.borrow_mut();
         world.reads.push((
             bucket.to_owned(),
@@ -161,7 +209,9 @@ impl crate::ci_results::Storage for Fake {
         bucket: &str,
         prefix: &str,
         page: Option<&str>,
+        within: Option<Duration>,
     ) -> Result<crate::ci_results::Listing> {
+        self.take(&format!("list:{prefix}"), within)?;
         let mut world = self.0.borrow_mut();
         world.lists.push((
             bucket.to_owned(),
@@ -2228,7 +2278,7 @@ fn the_native_transport_never_follows_a_redirect_and_sends_the_token_only_when_a
     let (origin, seen) = serve(
         b"HTTP/1.1 302 Found\r\nLocation: https://storage.googleapis.com/b/o\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
     );
-    let response = native.get(&format!("{origin}/zip"), Some(TOKEN), 10)?;
+    let response = native.get(&format!("{origin}/zip"), Some(TOKEN), 10, None)?;
     assert_eq!(
         (
             response.status,
@@ -2243,18 +2293,18 @@ fn the_native_transport_never_follows_a_redirect_and_sends_the_token_only_when_a
     assert!(head.contains(&format!("authorization: token {TOKEN}\r\n")));
     let (origin, seen) =
         serve(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n0123456789ab");
-    let response = native.get(&format!("{origin}/json"), None, 10)?;
+    let response = native.get(&format!("{origin}/json"), None, 10, None)?;
     assert_eq!((response.status, response.body.len()), (200, 11));
     assert!(!seen.recv()?.to_ascii_lowercase().contains("authorization"));
     // A refused connection is a retryable transport failure.
     let closed = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
     let failure = native
-        .get(&format!("http://{closed}/"), None, 10)
+        .get(&format!("http://{closed}/"), None, 10, None)
         .unwrap_err();
     assert!(failure.downcast_ref::<Retryable>().is_some());
     // The production transport speaks HTTPS only.
     let refused = Native::new()?
-        .get(&format!("{origin}/json"), None, 10)
+        .get(&format!("{origin}/json"), None, 10, None)
         .unwrap_err();
     assert_eq!(format!("{refused:#}"), "invalid source URL");
     Ok(())
@@ -2265,7 +2315,7 @@ fn a_dropped_connection_short_body_or_timeout_is_retryable() -> Result<()> {
     let retryable = |native: &mut Native, response: &'static [u8], hold: Duration| {
         let (origin, _seen) = serve_holding(response, hold);
         let failure = native
-            .get(&format!("{origin}/archive"), Some(TOKEN), 1000)
+            .get(&format!("{origin}/archive"), Some(TOKEN), 1000, None)
             .unwrap_err();
         assert_eq!(
             format!("{:#}", reported(failure)),
@@ -2299,7 +2349,37 @@ fn a_dropped_connection_short_body_or_timeout_is_retryable() -> Result<()> {
     // A non-2xx status stays the caller's to classify; its body is never read.
     let (origin, _seen) =
         serve(b"HTTP/1.1 404 Not Found\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx");
-    assert_eq!(native.get(&format!("{origin}/x"), None, 10)?.status, 404);
+    assert_eq!(
+        native.get(&format!("{origin}/x"), None, 10, None)?.status,
+        404
+    );
+    Ok(())
+}
+
+#[test]
+fn a_callers_bound_is_the_whole_requests_deadline() -> Result<()> {
+    // Each read would wait up to 10 s; the caller's 300 ms bounds the whole
+    // request, its stalled body included.
+    let mut native = Native::build(false, Duration::from_secs(10))?;
+    let (origin, _seen) = serve_holding(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc",
+        Duration::from_secs(3),
+    );
+    let started = std::time::Instant::now();
+    let failure = native
+        .get(
+            &format!("{origin}/archive"),
+            Some(TOKEN),
+            1000,
+            Some(Duration::from_millis(300)),
+        )
+        .unwrap_err();
+    assert!(failure.downcast_ref::<Retryable>().is_some());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
     Ok(())
 }
 

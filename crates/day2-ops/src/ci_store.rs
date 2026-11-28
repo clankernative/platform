@@ -37,7 +37,7 @@
 //!   failure included, fails the step and so the required job.
 use crate::{
     ci_check::Receipt,
-    ci_fetch::{Environment, Event, Transient, Waiting, retrying},
+    ci_fetch::{Environment, Event, Transient, Waiting, retrying_within},
     instance_source,
     offsite::{self, Uploader},
 };
@@ -463,7 +463,12 @@ impl Session {
     /// git-oidc's token for the audience ([`mint`]).
     fn mint(&mut self) -> Result<Value> {
         let inputs = self.inputs.as_ref().context("the store inputs")?;
-        let subject = mint(&self.effects.client, self.effects.waiting.as_mut(), inputs)?;
+        let subject = mint(
+            &self.effects.client,
+            self.effects.waiting.as_mut(),
+            inputs,
+            None,
+        )?;
         self.subject = Some(subject);
         Ok(json!({"minted": true}))
     }
@@ -477,6 +482,7 @@ impl Session {
             self.inputs()?,
             &subject,
             SCOPE,
+            None,
         )?;
         self.access = Some(access);
         Ok(json!({"exchanged": true}))
@@ -617,11 +623,13 @@ fn checked(output: &Path) -> Result<Checked> {
 /// git-oidc's token for the inputs' audience, as the instance workflows
 /// request it: network failures, 408, 429 and 5xx are retried within 120 s;
 /// any other answer fails at once with git-oidc's reason. `ci store` and `ci
-/// reuse` mint the same way.
+/// reuse` mint the same way; given `within`, retries and each attempt end by
+/// then.
 pub fn mint(
     client: &reqwest::blocking::Client,
     waiting: &mut dyn Waiting,
     inputs: &Inputs,
+    within: Option<Duration>,
 ) -> Result<String> {
     // The URL already has its query (checked when the inputs were read).
     let url = format!(
@@ -630,7 +638,8 @@ pub fn mint(
         instance_source::quote(&inputs.audience)
     );
     let authorization = header(&format!("bearer {}", inputs.id_token))?;
-    let token = retrying(waiting, "git-oidc's token mint", |left| {
+    let limit = within.unwrap_or(crate::ci_fetch::DEADLINE);
+    let token = retrying_within(waiting, "git-oidc's token mint", limit, |left| {
         let response = client
             .get(&url)
             .header(reqwest::header::AUTHORIZATION, authorization.clone())
@@ -662,14 +671,15 @@ pub fn mint(
 }
 
 /// Google STS at `sts`: the subject token for a federated access token
-/// limited to `scope`, one Cloud Storage scope. A refusal fails at once with
-/// STS's error code.
+/// limited to `scope`, one Cloud Storage scope, within 60 s or `within` when
+/// sooner. A refusal fails at once with STS's error code.
 pub fn exchange(
     client: &reqwest::blocking::Client,
     sts: &str,
     inputs: &Inputs,
     subject: &str,
     scope: &str,
+    within: Option<Duration>,
 ) -> Result<String> {
     let body = json!({
         "audience": inputs.sts_audience(),
@@ -683,7 +693,7 @@ pub fn exchange(
         .post(sts)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
-        .timeout(EXCHANGE)
+        .timeout(within.map_or(EXCHANGE, |within| within.min(EXCHANGE)))
         .send()
         .map_err(|_| anyhow!("Google STS could not be reached"))?;
     let status = response.status().as_u16();

@@ -2,14 +2,14 @@ import Capability
 
 ## `day2 ci reuse`: the second step of an app's org-scoped CI run, after fetch and before check. The CLI hands over a
 ## request naming the run's directory and the instance's case count; the host reads the run's record, the job token and
-## the store inputs, and refuses any step out of order. A pull request run never reuses. For main's push run this recipe
-## owns the order: the forge's record of this run (it names the CI repository), git-oidc's token, Google STS's read-only
-## token, the key's listing, then each stored attempt newest first until one passes the deploy reader's custody checks,
-## then the result, which writes what check reads. Every lookup step that misses ends the lookup; the result always runs,
-## so a miss never fails the run.
+## the store inputs, refuses any step out of order, and fails the command on misconfiguration. A pull request run never
+## reuses. For main's push run this recipe owns the order: the forge's record of this run (it names the CI repository),
+## git-oidc's token, Google STS's read-only token and the key's listing; then each stored attempt, newest first, through
+## its custody steps until one is accepted; then the result, which writes what check reads. Every step that misses ends
+## the lookup, and the result always runs, so a miss never fails the run.
 CiReuse :: [].{
 
-	## Whether a push run's inputs were read, so there is a key to look under.
+	## Whether this is a push run, which looks under its key.
 	Plan : { lookup : Bool }
 
 	## A lookup step's outcome: whether the lookup ended with nothing reused.
@@ -18,8 +18,8 @@ CiReuse :: [].{
 	## The stored attempts under the key that will be tried, newest first.
 	Listed : { missed : Bool, candidates : List({ run : U64, attempt : U64 }) }
 
-	## One stored attempt's outcome.
-	Tried : { missed : Bool, accepted : Bool }
+	## One custody step of a stored attempt: whether it refused that attempt, and whether the lookup ended.
+	Custody : { missed : Bool, refused : Bool }
 
 	run! : Str, (Str => Try(Str, Str)) => Try(Str, Str)
 	run! = |request, host!| {
@@ -49,13 +49,29 @@ CiReuse :: [].{
 			return Ok({})
 		}
 		for _candidate in listed.candidates {
-			tried : Tried
-			tried = Json.parse(step!("candidate", host!)?).map_err(|_| "invalid CI reuse candidate")?
-			if tried.missed or tried.accepted {
+			examined = examine!(host!)?
+			# A refused attempt gives way to the next; an accepted one, or a miss, ends the lookup.
+			if examined.missed or !examined.refused {
 				return Ok({})
 			}
 		}
 		Ok({})
+	}
+
+	## One stored attempt, in the deploy reader's custody order: the forge's record of its run, the forge's archive of
+	## that run's commit (whose app/ source inputs must be this run's), its receipt, its artifact and the artifact's
+	## bytes, then its run again. The first step that refuses the attempt, or ends the lookup, stops it; an attempt
+	## through every step is accepted.
+	examine! : (Str => Try(Str, Str)) => Try(Custody, Str)
+	examine! = |host!| {
+		for name in ["candidate", "source", "receipt", "artifact", "download", "attempt"] {
+			custody : Custody
+			custody = Json.parse(step!(name, host!)?).map_err(|_| "invalid CI reuse custody step")?
+			if custody.missed or custody.refused {
+				return Ok(custody)
+			}
+		}
+		Ok({ missed: Bool.False, refused: Bool.False })
 	}
 }
 

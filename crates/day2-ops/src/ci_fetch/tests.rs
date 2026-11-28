@@ -245,7 +245,7 @@ fn member(builder: &mut tar::Builder<Vec<u8>>, name: &str, kind: u8, mode: u32, 
 }
 
 /// A gzip tar as git archive writes one: a pax global comment, then members.
-fn archive(members: &[(&str, u8, u32, &[u8])]) -> Vec<u8> {
+pub(crate) fn archive(members: &[(&str, u8, u32, &[u8])]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     crate::instance_source::tests::entry(&mut builder, b"pax_global_header", b'g', &comment());
     for (name, kind, mode, data) in members {
