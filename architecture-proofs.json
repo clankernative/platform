@@ -386,6 +386,7 @@
       "consuming_methods": [],
       "methods": [
         "pub fn create (binding : Binding) -> Result < Self , Error >",
+        "pub fn pending_envelope_data (& self) -> [u8 ; FRAME_BYTES]",
         "pub fn send_pending (mut self , socket : BorrowedFd < '_ >) -> Result < PendingPublication , Error >"
       ],
       "factories": [
@@ -395,6 +396,10 @@
         }
       ],
       "material_uses": [
+        {
+          "owner": "FreshPage",
+          "signature": "pub fn pending_envelope_data (& self) -> [u8 ; FRAME_BYTES]"
+        },
         {
           "owner": "FreshPage",
           "signature": "pub fn send_pending (mut self , socket : BorrowedFd < '_ >) -> Result < PendingPublication , Error >"
