@@ -154,7 +154,7 @@ Nothing below can be configured, restated or overridden.
 | App backups | `<project>-<id>-backups` |
 | App CI results | `<project>-<id>-ci`, where the required workflow's store step writes; in the app's `app-edge` root when `forge.oidc` is set |
 | App resources | from `size`: `standard` 512 MiB, `large` 2048 MiB; both 1000m CPU, 1024 processes, 4 concurrent requests, 30 s shutdown and a 5 GiB SQLite volume |
-| Extension downloads | `/downloads/<id>.crx` and `/downloads/updates.xml`, when `extension` is set: the app edge's `public_download_paths`, sorted, and the only paths that bypass IAP |
+| Extension downloads | `/downloads/<id>.crx` and `/downloads/updates.xml`, when `extension` is set: the app edge's `public_download_paths`, sorted, and the only download paths that bypass IAP |
 | Extension update URL | `https://<id>.<domains.apps>/downloads/updates.xml`, when `extension` is set |
 | Extension signing key | Secret Manager secret `<id>-chrome-extension-signing-key`, when `extension` is set |
 

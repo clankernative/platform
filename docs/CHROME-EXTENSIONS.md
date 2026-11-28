@@ -10,20 +10,22 @@ source and their extension's tests.
 
 ```text
 .chrome-extension/
-  extension.json   {"id": "<32 letters a-p>", "package": "<name>.crx"}
+  extension.json   {"id": "<32 letters a-p>", "package": "<app>.crx"}
   src/             the exact unpacked extension; src/manifest.json is required
   local/           optional files that replace src/ files in local builds only
 public-downloads/
-  <name>.crx       signed release, written by `extension pack`
+  <app>.crx        signed release, written by `extension pack`
   updates.xml      Chrome update manifest, written by `extension pack`
 ```
 
 The instance spec also pins each app's extension ID and derives its names
 (`/downloads/<app>.crx`, the update URL and `<app>-chrome-extension-signing-key`;
 see [INSTANCE.md](INSTANCE.md)). The instance already exposes exactly the derived
-download paths at the app edge, so `package` must be `<app>.crx`. Until roadmap
-step 4 makes the other derived names authoritative and removes `extension.json`,
-`extension.json` remains what `extension pack` and `verify` read.
+download paths at the app edge, so `package` must be `<app>.crx`: another name
+publishes a CRX that browsers cannot fetch through IAP. Nothing checks this yet.
+Until roadmap step 4 makes the other derived names authoritative and removes
+`extension.json`, `extension.json` remains what `extension pack` and `verify`
+read.
 
 `.chrome-extension/` sits at the app root, which is the directory passed to
 `platform check`. The app build never captures it. Other files there, such as

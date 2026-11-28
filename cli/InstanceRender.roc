@@ -16,7 +16,7 @@ import "JsonValue.roc" as json_value_source : Str
 ## qualification-runner, and roots an instance owns itself.
 ##
 ## App CI's federation (project) and results buckets (app-edge) render only when day2.json sets forge.oidc; without it
-## every root renders exactly what it did before app CI existed.
+## no root renders app CI's variable.
 InstanceRender :: [].{
 
 	## `app_ci_repository` is the forge repository whose IDs the root's app CI variables need, which plan and apply
@@ -71,12 +71,13 @@ InstanceRender :: [].{
 		}
 
 		## The variables the platform renders for this root, named exactly as its stack declares them. Each is
-		## a derived name, the app's size preset or a fixed platform constant. An input at its stack default is
-		## rendered only when another rendered value is computed from it, so two roots read one constant.
-		## Everything else is still the instance's to commit: identity lists that may name its CI service
-		## accounts (state readers and writers, platform automation), node counts and other cluster
-		## choices, discovered IDs, images and digests, extension routes, and per-app identities, secrets,
-		## catalogs and labels. App CI's variable comes last, and only with forge.oidc.
+		## a derived name, the app's size preset or a fixed platform constant. A constant at its stack default is
+		## rendered only when another rendered value is computed from it, so two roots read one constant. A value
+		## derived from the spec renders even at its default, so a committed copy never replaces it: an app with no
+		## extension renders no download paths. Everything else is still the instance's to commit: identity lists
+		## that may name its CI service accounts (state readers and writers, platform automation), node counts and
+		## other cluster choices, discovered IDs, images and digests, and per-app identities, secrets, catalogs and
+		## labels. App CI's variable comes last, and only with forge.oidc.
 		variables : Root, InstanceSpec.Derived -> List((Str, Value))
 		variables = |root, names| root.core_variables(names).concat(root.app_ci(names))
 
@@ -176,8 +177,8 @@ InstanceRender :: [].{
 					("storage_class_name", Text(storage_class_name)),
 					("kube_dns_service_ip", Text(network.dns_service_ip)),
 					("cluster_cidrs", Texts([network.pod_cidr, network.service_cidr, network.subnet_cidr])),
-					# The only paths that bypass IAP: the pinned extension's CRX and update manifest, or none. The
-					# platform always renders them, so a committed copy can never publish another path.
+					# The only download paths that bypass IAP: the pinned extension's CRX and update manifest, or none.
+					# The platform always renders them, so a committed copy can never publish another download.
 					(
 						"public_download_paths",
 						Texts(
