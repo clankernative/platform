@@ -1332,7 +1332,9 @@ jobs:
         with:
           archive: true
           name: day2-storage-lifecycle-failures-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/storage-lifecycle-simulation/failure-*/failure.json
+          path: |
+            artifacts/storage-lifecycle-simulation/failure-*/failure.json
+            artifacts/simulations/backup-root-confirmation/failed-*/replay.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Retain failed ordinary backup lifecycle histories

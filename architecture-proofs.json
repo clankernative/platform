@@ -3242,7 +3242,8 @@
         "pub (in crate :: security_epoch) fn read (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & Names) -> Result < EpochObservation >",
         "pub (in crate :: security_epoch) fn read_restored (& mut self , stage : & mut EnrolledRoleStage < '_ > , selection : & EpochStore , names : & firestore :: RestoreWriterPeerRead) -> Result < RestoredEpochObservation >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
-        "fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Sample >"
+        "fn sample (& mut self , stage : & mut EnrolledRoleStage < '_ >) -> Result < Sample >",
+        "pub (in crate :: security_epoch) fn confirm_scheduled_backup_root_creation (& mut self , stage : & mut EnrolledRoleStage < '_ > , pending : & mut crate :: security_epoch :: storage_authority :: PendingBackupRoot , permit : crate :: security_epoch :: bootstrap :: RootBirthWritePermit < '_ , '_ , '_ >) -> Result < () >"
       ],
       "factories": [
         {
@@ -3302,6 +3303,10 @@
         {
           "owner": "CounterRequest < '_ >",
           "signature": "pub (in crate :: security_epoch) fn refuse (& mut self)"
+        },
+        {
+          "owner": "CounterRequest < '_ >",
+          "signature": "pub (in crate :: security_epoch) fn confirm_scheduled_backup_root_creation (& mut self , stage : & mut EnrolledRoleStage < '_ > , pending : & mut crate :: security_epoch :: storage_authority :: PendingBackupRoot , permit : crate :: security_epoch :: bootstrap :: RootBirthWritePermit < '_ , '_ , '_ >) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -7582,7 +7587,8 @@
       "methods": [
         "fn check (& mut self) -> Result < () >",
         "pub (in crate :: security_epoch) fn create_known (mut self) -> Result < KnownScheduledBackupRoot >",
-        "fn refuse (& mut self)"
+        "fn refuse (& mut self)",
+        "fn confirm_birth (& mut self) -> Result < () >"
       ],
       "factories": [
         {
@@ -7602,6 +7608,10 @@
         {
           "owner": "PendingScheduledRootBirth < '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn create_known (mut self) -> Result < KnownScheduledBackupRoot >"
+        },
+        {
+          "owner": "PendingScheduledRootBirth < '_ , '_ >",
+          "signature": "fn confirm_birth (& mut self) -> Result < () >"
         }
       ],
       "proof_uses": [],
@@ -7622,6 +7632,10 @@
         {
           "owner": "PendingScheduledRootBirth < '_ , '_ >",
           "signature": "pub (in crate :: security_epoch) fn create_known (mut self) -> Result < KnownScheduledBackupRoot >"
+        },
+        {
+          "owner": "PendingScheduledRootBirth < '_ , '_ >",
+          "signature": "fn confirm_birth (& mut self) -> Result < () >"
         }
       ],
       "material_uses": [
@@ -23379,7 +23393,10 @@
       "methods": [
         "pub (in crate :: security_epoch) fn observe_birth_data (& mut self , bytes : & [u8]) -> Result < () >",
         "pub (in crate :: security_epoch) fn refuse (& mut self)",
-        "pub (in crate :: security_epoch) fn submit_birth_data (& mut self , selection : & EpochStore) -> Result < serde_json :: Value >"
+        "pub (in crate :: security_epoch) fn submit_birth_data (& mut self , selection : & EpochStore) -> Result < serde_json :: Value >",
+        "pub (in crate :: security_epoch) fn begin_confirmation_data (& mut self , selected : & EpochStore) -> Result < serde_json :: Value >",
+        "pub (in crate :: security_epoch) fn observe_confirmation_data (& mut self , selected : & EpochStore , bytes : & [u8]) -> Result < () >",
+        "pub (in crate :: security_epoch) fn require_confirmed_data (& self) -> Result < () >"
       ],
       "factories": [
         {
@@ -23403,6 +23420,18 @@
         {
           "owner": "PendingBackupRoot",
           "signature": "pub (in crate :: security_epoch) fn submit_birth_data (& mut self , selection : & EpochStore) -> Result < serde_json :: Value >"
+        },
+        {
+          "owner": "PendingBackupRoot",
+          "signature": "pub (in crate :: security_epoch) fn begin_confirmation_data (& mut self , selected : & EpochStore) -> Result < serde_json :: Value >"
+        },
+        {
+          "owner": "PendingBackupRoot",
+          "signature": "pub (in crate :: security_epoch) fn observe_confirmation_data (& mut self , selected : & EpochStore , bytes : & [u8]) -> Result < () >"
+        },
+        {
+          "owner": "PendingBackupRoot",
+          "signature": "pub (in crate :: security_epoch) fn require_confirmed_data (& self) -> Result < () >"
         }
       ],
       "proof_uses": [],
