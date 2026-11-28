@@ -165,6 +165,24 @@ pub struct FreshPage {
 }
 pub struct PendingPublication {
     inner: Option<Backing>,
+    phase: AttemptState,
+    failure: Option<Error>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AttemptState {
+    Fresh,
+    Failed,
+    Sent,
+    Prepared,
+}
+
+/// Spent local failure, retaining the same mapping and descriptor until the
+/// caller's independent posts finish. This cannot retry, prepare or publish;
+/// it never claims that a competing alias's Known became Refused.
+pub struct FailedPublication {
+    inner: Backing,
+    error: Error,
 }
 pub struct ReadyPublication {
     inner: Option<Backing>,
@@ -248,55 +266,113 @@ impl FreshPage {
         })
     }
 
-    /// Exactly one fixed pending envelope and THIS read-only page descriptor.
-    /// The actual caller owns socket authentication, waits and original/posts.
-    /// No retry is performed, including after a consumed/ambiguous send.
-    pub fn send_pending(mut self, socket: BorrowedFd<'_>) -> Result<PendingPublication, Error> {
-        let inner = self.inner.as_ref().expect("private fresh page");
-        inner.check()?;
-        if sockopt::socket_type(socket).map_err(|e| io_error(FailureKind::Socket, e))?
-            != SocketType::SEQPACKET
-            || sockopt::socket_domain(socket).map_err(|e| io_error(FailureKind::Socket, e))?
-                != AddressFamily::UNIX
-        {
-            return Err(Error::invalid(FailureKind::Socket));
-        }
-        let fds = [inner
-            .descriptor
-            .as_ref()
-            .expect("private RO descriptor")
-            .as_fd()];
-        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
-        let mut ancillary = SendAncillaryBuffer::new(&mut space);
-        if !ancillary.push(SendAncillaryMessage::ScmRights(&fds)) {
-            return Err(Error::invalid(FailureKind::Send));
-        }
-        if sendmsg(
-            socket,
-            &[IoSlice::new(&inner.frame)],
-            &mut ancillary,
-            SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
-        )
-        .map_err(|e| io_error(FailureKind::Send, e))?
-            != FRAME_BYTES
-        {
-            return Err(Error::invalid(FailureKind::Send));
-        }
-        Ok(PendingPublication {
-            inner: self.inner.take(),
-        })
+    /// Infallible ownership move only. The native caller installs this whole
+    /// attempt BEFORE invoking either mutable operation, so even a caught
+    /// unwind cannot drop its mapping/descriptor before independent posts.
+    pub fn into_pending_attempt(mut self) -> PendingPublication {
+        PendingPublication { inner: self.inner.take(), phase: AttemptState::Fresh, failure: None }
     }
 }
 
 impl PendingPublication {
-    /// All mechanical fallible checks precede the caller's final native posts.
-    /// This is NOT those posts, native completion or an authenticated creator.
-    pub fn prepare(mut self) -> Result<ReadyPublication, Error> {
-        self.inner.as_ref().expect("private pending page").check()?;
-        Ok(ReadyPublication {
-            inner: self.inner.take(),
-        })
+    /// One fixed envelope and this read-only descriptor. Never retries. The
+    /// preinstalled owner retains Backing on both error AND caught unwind.
+    pub fn send_pending(&mut self, socket: BorrowedFd<'_>) -> Result<(), Error> {
+        self.spend(AttemptState::Fresh)?;
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let inner = self.inner.as_ref().expect("private pending attempt");
+            inner.check()?;
+            if sockopt::socket_type(socket).map_err(|e| io_error(FailureKind::Socket, e))?
+                != SocketType::SEQPACKET
+                || sockopt::socket_domain(socket).map_err(|e| io_error(FailureKind::Socket, e))?
+                    != AddressFamily::UNIX
+            {
+                return Err(Error::invalid(FailureKind::Socket));
+            }
+            let fds = [inner
+                .descriptor
+                .as_ref()
+                .expect("private RO descriptor")
+                .as_fd()];
+            let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+            let mut ancillary = SendAncillaryBuffer::new(&mut space);
+            if !ancillary.push(SendAncillaryMessage::ScmRights(&fds)) {
+                return Err(Error::invalid(FailureKind::Send));
+            }
+            if sendmsg(
+                socket,
+                &[IoSlice::new(&inner.frame)],
+                &mut ancillary,
+                SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
+            )
+            .map_err(|e| io_error(FailureKind::Send, e))?
+                != FRAME_BYTES
+            {
+                return Err(Error::invalid(FailureKind::Send));
+            }
+            Ok(())
+        }));
+        self.settle_attempt(requested, AttemptState::Sent)
     }
+
+    /// All fallible mechanical work precedes final native posts. Backing stays
+    /// in this preinstalled owner even when the check errors or unwinds.
+    pub fn prepare(&mut self) -> Result<(), Error> {
+        self.spend(AttemptState::Sent)?;
+        let requested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner.as_ref().expect("private pending attempt").check()
+        }));
+        self.settle_attempt(requested, AttemptState::Prepared)
+    }
+
+    fn spend(&mut self, expected: AttemptState) -> Result<(), Error> {
+        let previous = std::mem::replace(&mut self.phase, AttemptState::Failed);
+        if previous != expected {
+            self.inner.as_ref().expect("private pending attempt").refuse();
+            return Err(*self.failure.get_or_insert(Error::invalid(FailureKind::State)));
+        }
+        Ok(())
+    }
+
+    // Both operations above supply fixed nonescaping closures, never callbacks
+    // from a caller. Preserve the original panic while refusing without I/O;
+    // the actual mapping/descriptor remains owned for external native posts.
+    fn settle_attempt(
+        &mut self,
+        requested: std::thread::Result<Result<(), Error>>,
+        next: AttemptState,
+    ) -> Result<(), Error> {
+        match requested {
+            Ok(Ok(())) => { self.phase = next; Ok(()) }
+            Ok(Err(error)) => {
+                self.inner.as_ref().expect("private failed pending attempt").refuse();
+                Err(*self.failure.get_or_insert(error))
+            }
+            Err(panic) => {
+                self.inner.as_ref().expect("private failed pending attempt").refuse();
+                std::panic::resume_unwind(panic)
+            }
+        }
+    }
+
+    /// Pure state gate/owning move, with no check, allocation or cleanup. The
+    /// caller retains the entire success/error owner before final native posts.
+    pub fn into_ready(mut self) -> Result<ReadyPublication, FailedPublication> {
+        let inner = self.inner.take().expect("private pending attempt");
+        if self.phase == AttemptState::Prepared {
+            Ok(ReadyPublication { inner: Some(inner) })
+        } else {
+            inner.refuse();
+            Err(FailedPublication { inner, error: self.failure.unwrap_or_else(|| Error::invalid(FailureKind::State)) })
+        }
+    }
+}
+
+impl FailedPublication {
+    pub fn error_data(&self) -> Error { self.error }
+
+    /// Later resource cleanup only, not a deferred native acceptance check.
+    pub fn dispose(&mut self) -> CleanupData { self.inner.dispose() }
 }
 
 impl ReadyPublication {
@@ -421,6 +497,17 @@ const _: () = {
     assert_not_impl!(Backing, std::ops::Deref);
     assert_not_impl!(Backing, Send);
     assert_not_impl!(Backing, Sync);
+    assert_not_impl!(FailedPublication, Clone);
+    assert_not_impl!(FailedPublication, Copy);
+    assert_not_impl!(FailedPublication, Default);
+    assert_not_impl!(FailedPublication, std::fmt::Debug);
+    assert_not_impl!(FailedPublication, rustix::fd::AsFd);
+    assert_not_impl!(FailedPublication, rustix::fd::AsRawFd);
+    assert_not_impl!(FailedPublication, std::ops::Deref);
+    assert_not_impl!(FailedPublication, Send);
+    assert_not_impl!(FailedPublication, Sync);
+    assert_not_impl!(FailedPublication, std::error::Error);
+    assert_not_impl!(FailedPublication, Into<Error>);
     assert_not_impl!(FreshPage, Clone);
     assert_not_impl!(FreshPage, Copy);
     assert_not_impl!(FreshPage, Default);
@@ -582,20 +669,27 @@ mod tests {
 
     fn delivered() -> (PendingPublication, ReceivedData) {
         let (left, right) = sockets();
-        let pending = FreshPage::create(binding())
+        let mut pending = FreshPage::create(binding())
             .unwrap()
-            .send_pending(left.as_fd())
-            .unwrap();
+            .into_pending_attempt();
+        pending.send_pending(left.as_fd()).unwrap();
         let (fd, frame) = packet(right.as_fd());
         let received = validate_received_data(fd, frame, binding()).unwrap();
         (pending, received)
+    }
+
+    fn prepared(mut pending: PendingPublication) -> ReadyPublication {
+        pending.prepare().unwrap();
+        pending.into_ready().unwrap_or_else(|failed| {
+            panic!("mechanical preparation refused: {:?}", failed.error_data())
+        })
     }
 
     #[cfg_attr(not(feature = "kernel-qualification"), test)]
     fn real_pending_publication_and_later_cleanup_keep_known_irreversible() {
         let (pending, received) = delivered();
         assert_eq!(received.state_data().unwrap(), StateData::Pending);
-        let Publication::Known(mut data) = pending.prepare().unwrap().publish() else {
+        let Publication::Known(mut data) = prepared(pending).publish() else {
             panic!("first publication refused")
         };
         assert_eq!(received.state_data().unwrap(), StateData::Known);
@@ -619,7 +713,7 @@ mod tests {
         drop(pending);
         assert_eq!(received.state_data().unwrap(), StateData::Refused);
         let (pending, received) = delivered();
-        drop(pending.prepare().unwrap());
+        drop(prepared(pending));
         assert_eq!(received.state_data().unwrap(), StateData::Refused);
     }
 
@@ -627,7 +721,7 @@ mod tests {
     fn competing_terminal_state_never_becomes_local_known_or_gets_overwritten() {
         for terminal in [KNOWN, REFUSED, 255] {
             let (pending, received) = delivered();
-            let ready = pending.prepare().unwrap();
+            let ready = prepared(pending);
             ready
                 .inner
                 .as_ref()
@@ -660,10 +754,10 @@ mod tests {
     #[cfg_attr(not(feature = "kernel-qualification"), test)]
     fn exact_immutable_header_frame_and_all_binding_fields_are_required() {
         let (left, right) = sockets();
-        let pending = FreshPage::create(binding())
+        let mut pending = FreshPage::create(binding())
             .unwrap()
-            .send_pending(left.as_fd())
-            .unwrap();
+            .into_pending_attempt();
+        pending.send_pending(left.as_fd()).unwrap();
         let (fd, frame) = packet(right.as_fd());
         for index in [
             0, 16, 17, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 360, 367,
@@ -908,6 +1002,125 @@ mod tests {
         assert!(validate_received_data(fd, frame, binding()).is_ok());
     }
 
+    fn backing_identity(inner: &Backing) -> (usize, i32, u64, u64) {
+        let fd = inner.descriptor.as_ref().unwrap();
+        let stat = rustix::fs::fstat(fd).unwrap();
+        (inner.address.unwrap().as_ptr() as usize, fd.as_raw_fd(), stat.st_dev, stat.st_ino)
+    }
+
+    #[cfg_attr(not(feature = "kernel-qualification"), test)]
+    fn failed_attempts_retain_actual_backing_and_refuse_every_reentry() {
+        // Independent protocol cuts: prepare-before-send, ready-before-send,
+        // ready-before-prepare, duplicate-send, and duplicate-prepare.
+        for cut in 0..5 {
+            let (left, _right) = sockets();
+            let mut attempt = FreshPage::create(binding()).unwrap().into_pending_attempt();
+            let identity = backing_identity(attempt.inner.as_ref().unwrap());
+            if cut >= 2 { attempt.send_pending(left.as_fd()).unwrap(); }
+            if cut == 4 { attempt.prepare().unwrap(); }
+            if cut == 0 || cut == 4 { assert!(attempt.prepare().is_err()); }
+            if cut == 3 { assert!(attempt.send_pending(left.as_fd()).is_err()); }
+            let mut failed = match attempt.into_ready() {
+                Err(failed) => failed,
+                Ok(_) => panic!("out-of-order attempt became ready"),
+            };
+            assert_eq!(failed.error_data().kind, FailureKind::State);
+            assert_eq!(backing_identity(&failed.inner), identity);
+            assert_eq!(failed.inner.state().load(Ordering::Relaxed), REFUSED);
+            let cleanup = failed.dispose();
+            assert!(cleanup.unmapped && cleanup.descriptor_released);
+        }
+        let (stream, _peer) = rustix::net::socketpair(
+            AddressFamily::UNIX, SocketType::STREAM, SocketFlags::CLOEXEC, None,
+        ).unwrap();
+        let mut attempt = FreshPage::create(binding()).unwrap().into_pending_attempt();
+        let identity = backing_identity(attempt.inner.as_ref().unwrap());
+        let first = attempt.send_pending(stream.as_fd()).unwrap_err();
+        assert_eq!(first.kind, FailureKind::Socket);
+        assert_eq!(backing_identity(attempt.inner.as_ref().unwrap()), identity);
+        assert_eq!(attempt.inner.as_ref().unwrap().state().load(Ordering::Relaxed), REFUSED);
+        let (valid, receiving) = sockets();
+        assert_eq!(attempt.send_pending(valid.as_fd()).unwrap_err(), first);
+        assert_eq!(attempt.prepare().unwrap_err(), first);
+        let mut byte = [0];
+        assert_eq!(rustix::net::recv(&receiving, &mut byte, RecvFlags::DONTWAIT).unwrap_err(), rustix::io::Errno::AGAIN);
+        let mut failed = match attempt.into_ready() {
+            Err(failed) => failed,
+            Ok(_) => panic!("failed attempt regained readiness"),
+        };
+        assert_eq!(failed.error_data(), first);
+        assert_eq!(backing_identity(&failed.inner), identity);
+        // Mechanical external-post cut: the failure owner is still alive.
+        let caught = std::panic::catch_unwind(|| panic!("post refusal"));
+        assert!(caught.is_err());
+        assert_eq!(backing_identity(&failed.inner), identity);
+        let cleanup = failed.dispose();
+        assert!(cleanup.unmapped && cleanup.descriptor_released);
+        assert!(failed.inner.address.is_none() && failed.inner.descriptor.is_none());
+        assert!(failed.dispose().unmapped);
+    }
+
+    #[cfg_attr(not(feature = "kernel-qualification"), test)]
+    fn failed_prepare_and_unwind_keep_the_preinstalled_owner_and_original_failure() {
+        for already_known in [false, true] {
+            let (mut attempt, received) = delivered();
+            let identity = backing_identity(attempt.inner.as_ref().unwrap());
+            attempt.inner.as_ref().unwrap().state().store(if already_known {KNOWN} else {REFUSED}, Ordering::Relaxed);
+            let first = attempt.prepare().unwrap_err();
+            assert_eq!(first.kind, FailureKind::State);
+            assert_eq!(backing_identity(attempt.inner.as_ref().unwrap()), identity);
+            let mut failed = match attempt.into_ready() {
+                Err(failed) => failed,
+                Ok(_) => panic!("failed preparation regained readiness"),
+            };
+            assert_eq!(failed.error_data(), first);
+            assert_eq!(backing_identity(&failed.inner), identity);
+            let expected = if already_known {StateData::Known} else {StateData::Refused};
+            assert_eq!(received.state_data().unwrap(), expected);
+            let cleanup = failed.dispose();
+            assert!(cleanup.unmapped && cleanup.descriptor_released);
+            assert_eq!(received.state_data().unwrap(), expected);
+        }
+        // Invoke the actual fixed-operation settlement helper with a panic;
+        // source controls below bind BOTH public operations to this helper.
+        let (mut attempt, received) = delivered();
+        let identity = backing_identity(attempt.inner.as_ref().unwrap());
+        attempt.spend(AttemptState::Sent).unwrap();
+        let payload = Box::new(91u32);
+        let original = std::ptr::from_ref(&*payload);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            attempt.settle_attempt(Err(payload), AttemptState::Prepared)
+        })).unwrap_err();
+        assert_eq!(std::ptr::from_ref(&*caught.downcast::<u32>().unwrap()), original);
+        assert_eq!(backing_identity(attempt.inner.as_ref().unwrap()), identity);
+        assert_eq!(received.state_data().unwrap(), StateData::Refused);
+        assert!(attempt.prepare().is_err());
+        assert!(attempt.into_ready().is_err());
+    }
+
+    #[cfg_attr(not(feature = "kernel-qualification"), test)]
+    fn foreign_reader_retains_data_while_failed_creator_waits_for_its_own_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("socket");
+        let listener = listener(&path);
+        let child = child(&path, "reader-refused");
+        let peer = accept(listener.as_fd());
+        let mut attempt = FreshPage::create(binding()).unwrap().into_pending_attempt();
+        let identity = backing_identity(attempt.inner.as_ref().unwrap());
+        attempt.send_pending(peer.as_fd()).unwrap();
+        ack(peer.as_fd(), b'P');
+        attempt.inner.as_ref().unwrap().state().store(REFUSED, Ordering::Relaxed);
+        assert!(attempt.prepare().is_err());
+        let mut failed = match attempt.into_ready() {
+            Err(failed) => failed,
+            Ok(_) => panic!("failed creator regained readiness"),
+        };
+        reaped(child);
+        assert_eq!(backing_identity(&failed.inner), identity);
+        let cleanup = failed.dispose();
+        assert!(cleanup.unmapped && cleanup.descriptor_released);
+    }
+
     #[cfg_attr(not(feature = "kernel-qualification"), test)]
     fn failed_fixed_send_refuses_the_page_and_never_supplies_a_ready_publisher() {
         let (left, right) = sockets();
@@ -915,6 +1128,7 @@ mod tests {
         assert!(
             FreshPage::create(binding())
                 .unwrap()
+                .into_pending_attempt()
                 .send_pending(left.as_fd())
                 .is_err()
         );
@@ -928,6 +1142,7 @@ mod tests {
         assert!(
             FreshPage::create(binding())
                 .unwrap()
+                .into_pending_attempt()
                 .send_pending(left.as_fd())
                 .is_err()
         );
@@ -980,7 +1195,7 @@ mod tests {
             }
             for _ in 0..2 {
                 let (pending, received) = delivered();
-                let mut ready = Some(pending.prepare().unwrap());
+                let mut ready = Some(prepared(pending));
                 let mut actual = Vec::new();
                 let mut holds = Vec::new();
                 for op in operations {
@@ -1152,19 +1367,19 @@ mod tests {
             let listener = listener(&path);
             let child = child(&path, mode);
             let peer = accept(listener.as_fd());
-            let pending = FreshPage::create(binding())
+            let mut pending = FreshPage::create(binding())
                 .unwrap()
-                .send_pending(peer.as_fd())
-                .unwrap();
+                .into_pending_attempt();
+            pending.send_pending(peer.as_fd()).unwrap();
             ack(peer.as_fd(), b'P');
             if mode == "reader-known" {
-                let Publication::Known(data) = pending.prepare().unwrap().publish() else {
+                let Publication::Known(data) = prepared(pending).publish() else {
                     panic!("first known refused")
                 };
                 reaped(child);
                 drop(data);
             } else {
-                drop(pending.prepare().unwrap());
+                drop(prepared(pending));
                 reaped(child);
             }
         }
@@ -1249,7 +1464,7 @@ mod tests {
             "PASS actual_backend\nPASS published_cleanup\nPASS abandonment\nPASS competing_terminal\n",
             "PASS all_binding_fields\nPASS readonly_transfer\nPASS forged_known_data\nPASS seals_and_state\n",
             "PASS failed_send\nPASS twice_replay\nPASS foreign_reader\nPASS producer_death\n",
-            "PASS older_nonatomic_alias\nPASS descriptor_zero_cleanup\nCOMPLETE 14\n"
+            "PASS older_nonatomic_alias\nPASS descriptor_zero_cleanup\nPASS retained_failed_send\nPASS retained_prepare_unwind\nPASS retained_foreign_reader\nCOMPLETE 17\n"
         );
         assert_eq!(
             actual,
@@ -1308,7 +1523,7 @@ mod tests {
             file.write_all(bytes).unwrap();
             file.sync_all().unwrap();
         }
-        let cases: [(&str, fn()); 14] = [
+        let cases: [(&str, fn()); 17] = [
             (
                 "actual_backend",
                 actual_selected_rustix_backend_is_bound_to_its_build_script,
@@ -1365,15 +1580,18 @@ mod tests {
                 "descriptor_zero_cleanup",
                 isolated_descriptor_zero_and_repeated_cleanup_are_real_kernel_cases,
             ),
+            ("retained_failed_send", failed_attempts_retain_actual_backing_and_refuse_every_reentry),
+            ("retained_prepare_unwind", failed_prepare_and_unwind_keep_the_preinstalled_owner_and_original_failure),
+            ("retained_foreign_reader", foreign_reader_retains_data_while_failed_creator_waits_for_its_own_cleanup),
         ];
         for (name, case) in cases {
             case();
             writeln!(report, "PASS {name}").unwrap();
             report.sync_all().unwrap();
         }
-        writeln!(report, "COMPLETE 14").unwrap();
+        writeln!(report, "COMPLETE 17").unwrap();
         report.sync_all().unwrap();
-        println!("COMPLETION_KERNEL_COMPLETE 14");
+        println!("COMPLETION_KERNEL_COMPLETE 17");
     }
 
     #[cfg_attr(not(feature = "kernel-qualification"), test)]
@@ -1512,11 +1730,11 @@ mod tests {
             );
         } else {
             ack(socket.as_fd(), b'S');
-            let pending = FreshPage::create(binding())
+            let mut pending = FreshPage::create(binding())
                 .unwrap()
-                .send_pending(socket.as_fd())
-                .unwrap();
-            let ready = pending.prepare().unwrap();
+                .into_pending_attempt();
+            pending.send_pending(socket.as_fd()).unwrap();
+            let ready = prepared(pending);
             if mode == "producer-death-pending" {
                 println!("COMPLETION_CHILD_PASS");
                 std::process::exit(0);

@@ -46,7 +46,7 @@ jobs:
       - name: Install the pinned executable
         run: install -m 0555 /tmp/completion-bazel /usr/local/bin/bazel
       # One atomic ABI unit harness, no provider/native owner or F recipe. Its
-      # receipt requires all14 real cases and the ACTUAL rustix producer cfg.
+      # receipt requires all17 real cases and the ACTUAL rustix producer cfg.
       - name: Qualify the actual fixed ABI on the selected backend
         run: bazel --batch --nosystem_rc --nohome_rc test --define=DAY2_COMPLETION_BACKEND=${{ matrix.backend }} --verbose_failures=false --announce_rc=false --test_output=errors --zip_undeclared_test_outputs //crates/day2-completion-page:kernel_qualification
       - name: Require the complete bounded kernel evidence archive
