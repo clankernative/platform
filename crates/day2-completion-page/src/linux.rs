@@ -760,6 +760,7 @@ mod tests {
         for terminal in [KNOWN, REFUSED, 255] {
             let (pending, received) = delivered();
             let ready = prepared(pending);
+            let identity = backing_identity(ready.inner.as_ref().unwrap());
             ready
                 .inner
                 .as_ref()
@@ -769,6 +770,7 @@ mod tests {
             let Publication::Refused(mut local) = ready.publish() else {
                 panic!("competing state regranted local Known")
             };
+            assert_eq!(backing_identity(&local.inner), identity);
             if terminal == KNOWN {
                 assert_eq!(received.state_data().unwrap(), StateData::Known);
             } else if terminal == REFUSED {

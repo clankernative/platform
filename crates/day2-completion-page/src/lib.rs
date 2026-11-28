@@ -535,6 +535,96 @@ mod tests {
         }
     }
 
+    fn retained_allocation(source: &str) -> bool {
+        use syn::visit::Visit;
+        #[derive(Default)]
+        struct Allocation {
+            constructors: usize,
+            unboxed: bool,
+        }
+        impl<'a> Visit<'a> for Allocation {
+            fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
+                if let syn::Expr::Path(path) = &*call.func
+                    && path.path.segments.iter().any(|p|p.ident=="Box")
+                {
+                    if path.path.segments.last().is_some_and(|p|p.ident=="new") {
+                        self.constructors += 1;
+                    } else {
+                        self.unboxed = true;
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+
+            fn visit_expr_unary(&mut self, unary: &'a syn::ExprUnary) {
+                if matches!(unary.op, syn::UnOp::Deref(_))
+                    && matches!(&*unary.expr, syn::Expr::Path(p) if p.path.is_ident("inner"))
+                {
+                    self.unboxed = true;
+                }
+                syn::visit::visit_expr_unary(self, unary);
+            }
+        }
+        fn container(ty: &syn::Type, name: &str) -> Option<syn::Type> {
+            let syn::Type::Path(path) = ty else { return None; };
+            if path.path.segments.len()!=1 { return None; }
+            let segment=path.path.segments.first()?;
+            if segment.ident!=name { return None; }
+            let syn::PathArguments::AngleBracketed(args)=&segment.arguments else { return None; };
+            if args.args.len()!=1 { return None; }
+            let syn::GenericArgument::Type(inner)=args.args.first()? else { return None; };
+            Some(inner.clone())
+        }
+        let Ok(file) = syn::parse_file(source) else { return false; };
+        let mut allocations = Vec::new();
+        let mut owners = Vec::new();
+        for item in &file.items {
+            if let syn::Item::Struct(item)=item {
+                let name=item.ident.to_string();
+                let optional=["FreshPage","PendingPublication","ReadyPublication"].contains(&name.as_str());
+                if optional || ["FailedPublication","PublishedData","LocalRefusalData"].contains(&name.as_str()) {
+                    let fields=item.fields.iter().filter(|f|f.ident.as_ref().is_some_and(|i|i=="inner")).collect::<Vec<_>>();
+                    let [field]=fields.as_slice() else { return false; };
+                    let ty=if optional {container(&field.ty,"Option")}else{Some(field.ty.clone())};
+                    if !ty.and_then(|ty|container(&ty,"Box")).is_some_and(|ty|matches!(ty,syn::Type::Path(p) if p.path.is_ident("Backing"))) { return false; }
+                    owners.push(name);
+                }
+            }
+            if let syn::Item::Impl(item) = item {
+                let syn::Type::Path(owner) = &*item.self_ty else { return false; };
+                for member in &item.items {
+                    if let syn::ImplItem::Fn(method) = member {
+                        let mut observed = Allocation::default();
+                        observed.visit_block(&method.block);
+                        if observed.unboxed { return false; }
+                        if observed.constructors != 0 {
+                            allocations.push((owner.path.is_ident("FreshPage"), method.sig.ident == "create", observed.constructors));
+                        }
+                    }
+                }
+            }
+        }
+        owners.sort();
+        allocations == [(true, true, 1)] && owners == ["FailedPublication","FreshPage","LocalRefusalData","PendingPublication","PublishedData","ReadyPublication"]
+    }
+
+    #[test]
+    fn actual_backing_is_boxed_only_at_creation_and_never_unboxed_in_transitions() {
+        let source = include_str!("linux.rs");
+        assert!(retained_allocation(source));
+        for (old, new) in [
+            ("Some(Box::new(backing))", "Some(Box::new(*Box::new(backing)))"),
+            ("PublishedData { inner }", "PublishedData { inner: Box::new(*inner) }"),
+            ("LocalRefusalData { inner }", "LocalRefusalData { inner: *inner }"),
+            ("inner,\n                error:", "inner: Box::new(*inner),\n                error:"),
+            ("PublishedData { inner }", "PublishedData { inner: Box::into_inner(inner) }"),
+            ("pub struct FailedPublication {\n    inner: Box<Backing>", "pub struct FailedPublication {\n    inner: Backing"),
+        ] {
+            assert_eq!(source.matches(old).count(), 1);
+            assert!(!retained_allocation(&source.replacen(old, new, 1)));
+        }
+    }
+
     #[test]
     fn actual_component_has_no_raw_getter_callback_mapping_or_native_constructor() {
         let source = include_str!("linux.rs");
