@@ -2,6 +2,11 @@
   "version": 1,
   "trait_checks": [
     {
+      "source": "crates/day2-completion-page/src/linux.rs",
+      "scope": "const",
+      "fingerprint": "sha256:11b323945464a7ff5cb26ab03b817537ae96bc19012cc372ca7d2286317fe7bb"
+    },
+    {
       "source": "crates/day2-control/src/release.rs",
       "scope": "const",
       "fingerprint": "sha256:9c616765ed20205205236e2e4d7cc7a77a49512dcd9d0c33c34e1c40da5209e3",
@@ -330,6 +335,180 @@
     }
   ],
   "proofs": [
+    {
+      "source": "crates/day2-completion-page/src/linux.rs",
+      "type_name": "Backing",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "fn check (& self) -> Result < () , Error >",
+        "fn dispose (& mut self) -> CleanupData",
+        "fn refuse (& self)",
+        "fn state (& self) -> & AtomicU8"
+      ],
+      "factories": [
+        {
+          "owner": "FreshPage",
+          "signature": "pub fn create (binding : Binding) -> Result < Self , Error >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "Backing",
+          "signature": "fn check (& self) -> Result < () , Error >"
+        },
+        {
+          "owner": "Backing",
+          "signature": "fn dispose (& mut self) -> CleanupData"
+        },
+        {
+          "owner": "Backing",
+          "signature": "fn refuse (& self)"
+        },
+        {
+          "owner": "Backing",
+          "signature": "fn state (& self) -> & AtomicU8"
+        }
+      ],
+      "owning_children": [],
+      "destructor": "sha256:69907a0eef5eef7987b9144ad97a7dcbd373ca2da50230beca81590b50427363"
+    },
+    {
+      "source": "crates/day2-completion-page/src/linux.rs",
+      "type_name": "FreshPage",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub fn create (binding : Binding) -> Result < Self , Error >",
+        "pub fn send_pending (mut self , socket : BorrowedFd < '_ >) -> Result < PendingPublication , Error >"
+      ],
+      "factories": [
+        {
+          "owner": "FreshPage",
+          "signature": "pub fn create (binding : Binding) -> Result < Self , Error >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "FreshPage",
+          "signature": "pub fn send_pending (mut self , socket : BorrowedFd < '_ >) -> Result < PendingPublication , Error >"
+        }
+      ],
+      "owning_children": [],
+      "destructor": "sha256:3882b53d5ff8bf57ae57e1178dec183103227e53e7ca44a0b9b62d4f9163dab8"
+    },
+    {
+      "source": "crates/day2-completion-page/src/linux.rs",
+      "type_name": "LocalRefusalData",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub fn dispose (& mut self) -> CleanupData"
+      ],
+      "factories": [
+        {
+          "owner": "ReadyPublication",
+          "signature": "pub fn publish (mut self) -> Publication"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "LocalRefusalData",
+          "signature": "pub fn dispose (& mut self) -> CleanupData"
+        }
+      ],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2-completion-page/src/linux.rs",
+      "type_name": "PendingPublication",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub fn prepare (mut self) -> Result < ReadyPublication , Error >"
+      ],
+      "factories": [
+        {
+          "owner": "FreshPage",
+          "signature": "pub fn send_pending (mut self , socket : BorrowedFd < '_ >) -> Result < PendingPublication , Error >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PendingPublication",
+          "signature": "pub fn prepare (mut self) -> Result < ReadyPublication , Error >"
+        }
+      ],
+      "owning_children": [],
+      "destructor": "sha256:d390b072c2ffb0a6f5bdbf4ea295850a64a071c86323ac0cc1cf24612d48854c"
+    },
+    {
+      "source": "crates/day2-completion-page/src/linux.rs",
+      "type_name": "PublishedData",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub fn dispose (& mut self) -> CleanupData"
+      ],
+      "factories": [
+        {
+          "owner": "ReadyPublication",
+          "signature": "pub fn publish (mut self) -> Publication"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "PublishedData",
+          "signature": "pub fn dispose (& mut self) -> CleanupData"
+        }
+      ],
+      "owning_children": []
+    },
+    {
+      "source": "crates/day2-completion-page/src/linux.rs",
+      "type_name": "ReadyPublication",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub fn publish (mut self) -> Publication"
+      ],
+      "factories": [
+        {
+          "owner": "PendingPublication",
+          "signature": "pub fn prepare (mut self) -> Result < ReadyPublication , Error >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ReadyPublication",
+          "signature": "pub fn publish (mut self) -> Publication"
+        }
+      ],
+      "owning_children": [],
+      "destructor": "sha256:41f78c887b08317073c41054fc6d5afadb91969ebda61f978fed3b57fce68318"
+    },
+    {
+      "source": "crates/day2-completion-page/src/linux.rs",
+      "type_name": "ReceivedData",
+      "kind": "private_material",
+      "consuming_methods": [],
+      "methods": [
+        "pub fn state_data (& self) -> Result < StateData , Error >"
+      ],
+      "factories": [
+        {
+          "owner": null,
+          "signature": "pub fn validate_received_data (descriptor : OwnedFd , frame : [u8 ; FRAME_BYTES] , expected : Binding) -> Result < ReceivedData , Error >"
+        }
+      ],
+      "material_uses": [
+        {
+          "owner": "ReceivedData",
+          "signature": "pub fn state_data (& self) -> Result < StateData , Error >"
+        }
+      ],
+      "owning_children": []
+    },
     {
       "source": "crates/day2-control/src/release.rs",
       "type_name": "ApprovedRelease",

@@ -60,6 +60,7 @@ crate.from_cargo(
             "//crates/xtask:Cargo.toml",
             "//crates/day2:Cargo.toml",
             "//crates/day2-assets:Cargo.toml",
+            "//crates/day2-completion-page:Cargo.toml",
             "//crates/day2-contracts:Cargo.toml",
             "//crates/day2-control:Cargo.toml",
             "//crates/day2-kernel:Cargo.toml",
@@ -217,4 +218,4 @@ crate.annotation(
     patch_args = ["-p1"],
 )
 
-use_repo(crate, "crates")
+use_repo(crate, "crates", "crates__rustix-1.1.5")

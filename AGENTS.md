@@ -78,7 +78,17 @@ module byte changes and refresh admission pins explicitly, never bypass the chec
 Keep arbitrary I/O out of the app platform. The native worker exposes only a pure
 entrypoint. Its process protocol is private; validate all requested effects in
 the supervisor. Generated ABI code is derived from the pinned Roc compiler.
-Unsafe authored Rust is confined to the worker's allocator and ABI boundary.
+Unsafe authored Rust is confined to the worker's allocator and ABI boundary. The sole
+additional exception, approved by the user on 2026-11-25, is
+`crates/day2-completion-page/src/linux.rs`: the fixed Linux completion-page ABI
+for scheduled native backup. Its safe closed interface owns only its fresh
+page mapping, one fixed pending-descriptor send, terminal publication and later
+DATA cleanup. It supplies no native owner, creator authentication or upload
+permission. No arbitrary mapping, pointer/FD getter, callback or general socket
+API is allowed. All other authored sources in that crate deny unsafe code, and
+`day2` retains `forbid(unsafe_code)`. The accepting native route stays closed
+until independent review and actual Linux qualification on both rustix backends.
+
 
 Apps register only commands and queries. Handler.local, Handler.prepared and
 Handler.effects describe phases of the same operation. Observe accepts read-only

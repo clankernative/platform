@@ -128,6 +128,7 @@ impl PlatformInputs {
             "Cargo.toml",
             "Cargo.lock",
             ".github/workflows/ci.yml",
+            ".github/workflows/completion-page.yml",
             ".github/workflows/mac-compatibility.yml",
             ".github/workflows/native-images.yml",
             ".github/actions/pinned-release/action.yml",

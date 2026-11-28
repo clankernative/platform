@@ -396,6 +396,7 @@ const WORKSPACE_TEST_PACKAGES: &[&str] = &[
     "day2-cli-checks",
     "day2-control",
     "day2-assets",
+    "day2-completion-page",
     "day2-contracts",
     "day2-capabilities",
     "day2-kernel",
@@ -2387,6 +2388,7 @@ mod tests {
             "//crates/worker:unit_lib",
             "//crates/day2:unit_lib",
             "//crates/day2-assets:unit_lib",
+            "//crates/day2-completion-page:unit_lib",
             "//crates/day2-contracts:unit_lib",
             "//crates/day2-control:unit_lib",
             "//crates/day2-kernel:unit_lib",
@@ -2399,7 +2401,7 @@ mod tests {
         .into_iter()
         .collect::<BTreeSet<_>>();
         assert_eq!(labels(&selected), expected);
-        assert_eq!(selected.len(), 10);
+        assert_eq!(selected.len(), 11);
         let helpers = [
             "//crates/day2-sandbox:day2-compiler-sandbox",
             "//crates/day2-sandbox:day2-sandbox",
@@ -2412,12 +2414,12 @@ mod tests {
             labels(&compile),
             expected.union(&helpers).cloned().collect()
         );
-        assert_eq!(compile.len(), 13);
+        assert_eq!(compile.len(), 14);
         let (ordinary, ordinary_compile) = select_suite_targets(&catalog, "libraries")?;
         let mut ordinary_expected = expected.clone();
         ordinary_expected.insert("//cli/checks:unit_lib".into());
         assert_eq!(labels(&ordinary), ordinary_expected);
-        assert_eq!(ordinary_compile.len(), 32);
+        assert_eq!(ordinary_compile.len(), 33);
         let (_, full) = select_suite_targets(&catalog, "workspace-runtime")?;
         let mut programs = catalog
             .iter()

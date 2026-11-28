@@ -1,11 +1,12 @@
 {
   "format": 1,
   "inputs": {
-    "Cargo.lock": "sha256:609cc24ad5b37e01885a560b733a1674e78e62ebeca134d8c1ce94fcb4d6d537",
-    "Cargo.toml": "sha256:b145bd03cb16db8e864ace41e6bc1c34adf402d51b80e3c5cb69b9ffe5a264b3",
+    "Cargo.lock": "sha256:753f33870733b86ba19244e9196f8e67ba1933793e807c9aa80d68c598b6cfd7",
+    "Cargo.toml": "sha256:2aa6bbaee8b65928355a109ad33dcc925724f2c9bc4cbfb0e47331e52e0340d5",
     "cli/checks/Cargo.toml": "sha256:a5e5872d548a9c32bbfcc9867934b9a5d2d1b4fa4994363dcddc089606523b01",
     "crates/day2-assets/Cargo.toml": "sha256:9ef1888fc4a0ff3483c90fd36f0182a376a7c40f5a79725f60fcfef996b7e1ae",
     "crates/day2-capabilities/Cargo.toml": "sha256:0d9916493bcaacc484579530f33625184320b2e29d7a28781f9df895de11c01c",
+    "crates/day2-completion-page/Cargo.toml": "sha256:7aaef812f6d2e35c82ad00d0d7bbc75f4c5b50e43db56894a2a140746f71bae6",
     "crates/day2-contracts/Cargo.toml": "sha256:3dfc7584df543b818d9b4847c108c61fc6cca980325965fdc4f891a53198ab09",
     "crates/day2-control/Cargo.toml": "sha256:50311605b49fb338d29cc1ea802fc8f83854eacab0d635dd032b2aaf5b50638c",
     "crates/day2-kernel/Cargo.toml": "sha256:98e6408b79530d7e32318f68d5b2bfe604306c54d2a2008782fc9b5ac25dcb69",
@@ -17,7 +18,7 @@
     "crates/xtask/Cargo.toml": "sha256:a039a7d170cee0b13cce334c790f03491bb2b977711fce591c53c3f775ce06a2"
   },
   "models": {
-    "build/bazel/cargo_contexts.bzl": "sha256:6aa8fb99903d8e7594442c9187822405012cb002972db280f1ba029063ecbb76",
-    "build/bazel/cargo_production_contexts.bzl": "sha256:b875a88487dec2a8423cad261cf0384e3b887389dc64b7f9be57ae96a728fd9f"
+    "build/bazel/cargo_contexts.bzl": "sha256:a5ff915558aad00b8eb9e55ed824c52b1ab982bd14567095b5498f0a08698617",
+    "build/bazel/cargo_production_contexts.bzl": "sha256:a99fa4c69dbe6948c1417814987841b0c46edd1578289b6aeec66524931a4b68"
   }
 }

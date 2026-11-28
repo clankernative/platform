@@ -10,6 +10,7 @@ COMPILE_INPUTS = [
     "src/app_secrets/steps.json",
     ":font_fixture_bytes",
     "//:.github/workflows/ci.yml",
+    "//:.github/workflows/completion-page.yml",
     "//:.github/workflows/mac-compatibility.yml",
     "//:.github/workflows/native-images.yml",
     "//:.github/actions/pinned-release/action.yml",

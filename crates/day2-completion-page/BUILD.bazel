@@ -1,0 +1,46 @@
+load("//build/bazel:rust.bzl", "platform_rust_library", "platform_rust_test")
+
+load(":backend.bzl", "selected_backend_flags")
+
+package(default_visibility = ["//crates/day2:__pkg__", "//crates/day2-ops:__pkg__"])
+
+platform_rust_library(
+    name = "lib",
+    crate_name = "day2_completion_page",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]),
+)
+
+selected_backend_flags(
+    name = "selected_backend_flags",
+    producer = "@crates__rustix-1.1.5//:build_script_build",
+)
+
+# Ordinary authored-source harness: qualifier-only generated compile_data would
+# relocate the crate root and violate the normal producer/source catalog.
+platform_rust_test(
+    name = "unit_lib",
+    crate_name = "day2_completion_page",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]),
+)
+
+# Real unit-level kernel conformance; custom main cannot accept a zero-test
+# libtest filter. This is not a native operational or accepting supplier target.
+platform_rust_test(
+    name = "kernel_qualification",
+    crate_name = "day2_completion_page",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [":selected_backend_flags"],
+    rustc_env = {"COMPLETION_RUSTIX_FLAGS": "$(execpath :selected_backend_flags)"},
+    crate_features = ["kernel-qualification"] + select({
+        "//build/bazel:completion_page_libc_qualification": ["qualification-libc"],
+        "//conditions:default": [],
+    }),
+    use_libtest_harness = False,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    tags = ["manual"],
+)
+
+exports_files(["Cargo.toml"])

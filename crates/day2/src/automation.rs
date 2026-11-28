@@ -169,6 +169,10 @@ pub const SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("../../../.github/workflows/ci.yml"),
     ),
     (
+        ".github/workflows/completion-page.yml",
+        include_bytes!("../../../.github/workflows/completion-page.yml"),
+    ),
+    (
         ".github/workflows/mac-compatibility.yml",
         include_bytes!("../../../.github/workflows/mac-compatibility.yml"),
     ),
