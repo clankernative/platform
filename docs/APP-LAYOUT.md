@@ -230,11 +230,11 @@ its recorded world and does not consult a live release journal.
 
 ## Public release downloads
 
-Apps may opt into anonymous, artifact-pinned release files by placing `.crx`
-and `.xml` files directly under `public-downloads/`. These are the release of
-the Chrome extension the instance pins for the app, which `day2 instance
-extension pack` writes and app CI verifies; an app without a pin publishes
-none. See [Chrome extensions](CHROME-EXTENSIONS.md). The build rejects other
+An app whose instance pins a Chrome extension publishes its release as
+anonymous, artifact-pinned files directly under `public-downloads/`: `<app>.crx`
+and `updates.xml`, which `day2 instance extension pack` writes. App CI admits no
+other file there, and none at all for an app without a pin; see
+[Chrome extensions](CHROME-EXTENSIONS.md). The build itself rejects other
 types, subdirectories, symlinks, special files, invalid filenames and excess
 files/bytes (32 files, 2 MiB per file, 16 MiB total). It pins the selected bytes
 and MIME types in `Artifact.public_downloads`, copies them into the immutable

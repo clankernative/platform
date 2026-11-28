@@ -970,6 +970,14 @@ pins the fixture instance's file.
   the variable ignores it, so the workflow renders it for every app; an SDK
   that reads it refuses a run without it, so render the workflow before any app
   selects such an SDK.
+  - Such an SDK also refuses an extension source that still declares the
+    names it injects, and CI runs the SDK `apps.<id>.sdk` selects, which an
+    app pull request cannot change. Move an extension app in two steps: select
+    the SDK, then merge the app's change that drops `extension.json` and the
+    manifest's `key` and `update_url`, raises the version and packs the release
+    with `day2 instance extension pack`. In between, the app's CI fails, so
+    merge that change right after the selection; a deploy meanwhile still takes
+    the last checked main commit's stored artifact.
 - **Logic.** The check step passes `/tmp/day2-ci/base` for `pull_request` and
   `--reuse /tmp/day2-ci/reuse` otherwise, that is for the push run
   (`${{ github.event_name == 'pull_request' && '/tmp/day2-ci/base' || '--reuse

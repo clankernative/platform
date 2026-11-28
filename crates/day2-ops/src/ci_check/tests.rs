@@ -604,6 +604,28 @@ fn the_extension_check_verifies_against_the_workflows_pin() -> Result<()> {
         format!("{:#}", checked.step("extension").unwrap_err())
             .contains("src/manifest.json is missing")
     );
+    // With sources, the pinned check reaches the package: one that is not the
+    // pinned extension's release, here not a CRX3 at all, is refused.
+    write(
+        head.path(),
+        "app/.chrome-extension/src/manifest.json",
+        br#"{"manifest_version":3,"name":"App","version":"1"}"#,
+    );
+    write(
+        head.path(),
+        "app/public-downloads/app.crx",
+        b"not a package",
+    );
+    write(
+        head.path(),
+        "app/public-downloads/updates.xml",
+        b"<gupdate/>",
+    );
+    let mut checked = session(head.path(), Some(base.path()), work.path())?;
+    checked.step("route")?;
+    checked.pin = extension_pin(Some(pinned.into()))?;
+    assert!(format!("{:#}", checked.step("extension").unwrap_err()).contains("not a CRX3 package"));
+    fs::remove_dir_all(head.path().join("app/public-downloads"))?;
     let mut checked = session(head.path(), Some(base.path()), work.path())?;
     checked.step("route")?;
     assert!(

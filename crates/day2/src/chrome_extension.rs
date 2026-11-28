@@ -167,16 +167,16 @@ pub fn verify(binding: &Binding, source: &Files, downloads: &Files) -> Result<Re
         binding.id
     );
     ensure!(
-        archive == zip(&released(binding, source, &manifest, public_key)?)?,
+        downloads[UPDATE_MANIFEST] == update_manifest(binding, &manifest),
+        "chrome_extension_update_manifest: {} does not describe this release; run `day2 instance extension pack`",
+        UPDATE_MANIFEST
+    );
+    ensure!(
+        archive == zip(&released(binding, source, public_key)?)?,
         "chrome_extension_stale: {} differs from {}/{}; bump the manifest version and run `day2 instance extension pack`",
         binding.crx,
         DIRECTORY,
         SOURCE_DIRECTORY
-    );
-    ensure!(
-        downloads[UPDATE_MANIFEST] == update_manifest(binding, &manifest),
-        "chrome_extension_update_manifest: {} does not describe this release; run `day2 instance extension pack`",
-        UPDATE_MANIFEST
     );
     Ok(release(binding, &manifest, crx))
 }
@@ -209,7 +209,7 @@ pub fn pack(
         "chrome_extension_signing_key: the key does not belong to extension {}, which day2.json pins",
         binding.id
     );
-    let archive = zip(&released(binding, source, &manifest, &public_key)?)?;
+    let archive = zip(&released(binding, source, &public_key)?)?;
     if let Some(previous) = previous(binding, downloads)? {
         ensure!(
             manifest.version >= previous.0,
@@ -498,22 +498,33 @@ fn release(binding: &Binding, manifest: &Manifest, crx: &[u8]) -> Release {
     }
 }
 
-/// The files a release packs: the sources, with a manifest that also names the
-/// signing key's public key and the instance's update URL.
-fn released(
-    binding: &Binding,
-    source: &Files,
-    manifest: &Manifest,
-    public_key: &[u8],
-) -> Result<Files> {
-    let mut value = manifest.value.clone();
-    value.insert("key".into(), Value::String(STANDARD.encode(public_key)));
-    value.insert(
-        "update_url".into(),
-        Value::String(binding.update_url.clone()),
+/// The files a release packs: the sources, with the signing key's public key
+/// and the instance's update URL inserted as the manifest's first members. The
+/// rest of the manifest is the source's bytes, so a release never depends on how
+/// a JSON library writes. Neither value needs escaping: the key is base64 and
+/// [`Binding::validate`] admits only plain URL bytes.
+fn released(binding: &Binding, source: &Files, public_key: &[u8]) -> Result<Files> {
+    let bytes = &source["manifest.json"];
+    let opening = bytes
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+        .filter(|start| bytes[*start] == b'{')
+        .context("chrome_extension_manifest: expected a JSON object")?;
+    let injected = format!(
+        "\n  \"key\": \"{}\",\n  \"update_url\": \"{}\",",
+        STANDARD.encode(public_key),
+        binding.update_url
     );
     let mut files = source.clone();
-    files.insert("manifest.json".into(), pretty(&value)?);
+    files.insert(
+        "manifest.json".into(),
+        [
+            &bytes[..=opening],
+            injected.as_bytes(),
+            &bytes[opening + 1..],
+        ]
+        .concat(),
+    );
     Ok(files)
 }
 

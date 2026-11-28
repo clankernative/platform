@@ -19,8 +19,8 @@ public-downloads/
   updates.xml      Chrome update manifest, written by `instance extension pack`
 ```
 
-`.chrome-extension/` sits at the app root, which is the directory passed to
-`platform check`. The app build never captures it. Other files there, such as
+`.chrome-extension/` sits at the app root, `app/` in the app repository. The
+app build never captures it. Other files there, such as
 the extension's own JavaScript tests, are app-owned and ignored by the Platform.
 An app whose instance pins no extension may have neither `.chrome-extension/`
 nor anything in `public-downloads/`.
@@ -35,11 +35,12 @@ From the pin and the app the instance derives:
 - the update URL `https://<app host>/downloads/updates.xml`;
 - the signing key's secret, `<app>-chrome-extension-signing-key`.
 
-`src/manifest.json` must declare `manifest_version: 3`, `name` and a Chrome
-`version` (one to four integers 0-65535, no leading zeros), and must not declare
-`key` or `update_url`. Every release's manifest carries both, injected by the
-Platform: `key` is the signing key's base64 public key, so unpacked builds keep
-the release identity (`chrome.identity` OAuth clients and extension-origin CORS
+`src/manifest.json` must be a JSON object that declares `manifest_version: 3`,
+`name` and a Chrome `version` (one to four integers 0-65535, no leading zeros),
+and must not declare `key` or `update_url`. Every release's manifest is
+`src/manifest.json` byte for byte with both inserted as its first two members:
+`key` is the signing key's base64 public key, so unpacked builds keep the
+release identity (`chrome.identity` OAuth clients and extension-origin CORS
 allowlists depend on it), and `update_url` is the derived update URL.
 
 `minimum_chrome_version`, when present, is published as `prodversionmin`. File

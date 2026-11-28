@@ -293,7 +293,7 @@ fn packing_is_deterministic_and_verifies_against_source() -> Result<()> {
     );
     let (public_key, archive) = open(&package.crx)?;
     assert_eq!(extension_id(public_key), TEST_ID);
-    let released = released(&binding(), &source, &manifest(&source)?, public_key)?;
+    let released = released(&binding(), &source, public_key)?;
     assert_eq!(archive, zip(&released)?);
     assert_eq!(
         released.keys().collect::<Vec<_>>(),
@@ -307,6 +307,62 @@ fn packing_is_deterministic_and_verifies_against_source() -> Result<()> {
     );
     assert_eq!(packed["update_url"], UPDATE_URL);
     assert_eq!(packed["name"], "Reminders");
+    Ok(())
+}
+
+#[test]
+fn a_release_is_pinned_byte_for_byte() -> Result<()> {
+    // Hand-written, so nothing here depends on how a JSON library writes.
+    let manifest = "{\n  \"manifest_version\": 3,\n  \"name\": \"Reminders\",\n  \"version\": \"1.0\",\n  \"background\": { \"service_worker\": \"background.js\" }\n}\n";
+    let source = Files::from([
+        ("manifest.json".into(), manifest.as_bytes().to_vec()),
+        ("background.js".into(), b"export {};\n".to_vec()),
+    ]);
+    let package = pack_with(TEST_KEY, &source, &Files::new())?;
+    let (public_key, archive) = open(&package.crx)?;
+    let released = released(&binding(), &source, public_key)?;
+    assert_eq!(
+        String::from_utf8(released["manifest.json"].clone())?,
+        format!(
+            "{{\n  \"key\": \"{}\",\n  \"update_url\": \"{UPDATE_URL}\",{}",
+            TEST_PUBLIC_KEY.split_whitespace().collect::<String>(),
+            &manifest[1..]
+        ),
+        "the source's bytes, after the two injected members"
+    );
+    assert_eq!(archive, zip(&released)?);
+    assert_eq!(
+        package.release.crx_digest,
+        "sha256:a1fd72b8502f61cc1abb2762756cf61180a1a7fb6c2a3495c6a854e660d8884a"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_release_for_another_update_url_never_verifies() -> Result<()> {
+    let source = source("1");
+    let moved = Binding {
+        update_url: "https://elsewhere.example.com/downloads/updates.xml".into(),
+        ..binding()
+    };
+    let elsewhere = pack(
+        &moved,
+        &source,
+        &Files::new(),
+        TEST_KEY.as_bytes(),
+        &SystemRandom::new(),
+    )?;
+    assert!(
+        error(verify(&binding(), &source, &downloads(&elsewhere)))
+            .contains("chrome_extension_update_manifest")
+    );
+    // With this pin's update manifest, the package itself still names the other URL.
+    let mut mixed = downloads(&elsewhere);
+    mixed.insert(
+        UPDATE_MANIFEST.into(),
+        pack_with(TEST_KEY, &source, &Files::new())?.update_manifest,
+    );
+    assert!(error(verify(&binding(), &source, &mixed)).contains("chrome_extension_stale"));
     Ok(())
 }
 
