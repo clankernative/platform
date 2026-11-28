@@ -154,8 +154,8 @@ pub struct CleanupData {
 mod linux;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_has_atomic = "8"))]
 pub use linux::{
-    FailedPublication, FreshPage, LocalRefusalData, PendingPublication, Publication, PublishedData, ReadyPublication,
-    ReceivedData, validate_received_data,
+    FailedPublication, FreshPage, LocalRefusalData, PendingPublication, Publication, PublishedData,
+    ReadyPublication, ReceivedData, validate_received_data,
 };
 
 // The explicit Bazel kernel target disables libtest. Its fixed main cannot
@@ -402,60 +402,123 @@ mod tests {
         fn path(expr: &syn::Expr, parts: &[&str]) -> bool {
             matches!(expr,syn::Expr::Path(path) if path.path.segments.iter().map(|p|p.ident.to_string()).eq(parts.iter().map(|p|(*p).to_owned())))
         }
-        let file=syn::parse_file(source).unwrap();
+        let file = syn::parse_file(source).unwrap();
         let methods=file.items.into_iter().filter_map(|item|match item {
             syn::Item::Impl(item) if matches!(&*item.self_ty,syn::Type::Path(p) if p.path.is_ident("PendingPublication"))=>Some(item),_=>None,
         }).flat_map(|item|item.items).filter_map(|item|match item {syn::ImplItem::Fn(f) if f.sig.ident==name=>Some(f),_=>None}).collect::<Vec<_>>();
-        let [method]=methods.as_slice() else {return false;};
-        let Some(syn::FnArg::Receiver(receiver))=method.sig.inputs.first() else {return false;};
-        if receiver.mutability.is_none() || !receiver.reference.as_ref().is_some_and(|(_,lifetime)|lifetime.is_none())
-            || method.sig.inputs.len()!=if name=="send_pending" {2}else{1}
-            || !method.sig.generics.params.is_empty() || method.sig.unsafety.is_some() || method.sig.asyncness.is_some()
-        {return false;}
-        let [syn::Stmt::Expr(syn::Expr::Try(spent),_),syn::Stmt::Local(local),syn::Stmt::Expr(syn::Expr::MethodCall(settle),None)]=method.block.stmts.as_slice() else {return false;};
-        let syn::Expr::MethodCall(spend)=&*spent.expr else {return false;};
-        if !ident(&spend.receiver,"self") || spend.method!="spend" || spend.args.len()!=1 || !phase(&spend.args[0],expected)
-            || !ident(&settle.receiver,"self") || settle.method!="settle_attempt" || settle.args.len()!=2
-            || !ident(&settle.args[0],"requested") || !phase(&settle.args[1],next)
+        let [method] = methods.as_slice() else {
+            return false;
+        };
+        let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+            return false;
+        };
+        if receiver.mutability.is_none()
+            || !receiver
+                .reference
+                .as_ref()
+                .is_some_and(|(_, lifetime)| lifetime.is_none())
+            || method.sig.inputs.len() != if name == "send_pending" { 2 } else { 1 }
+            || !method.sig.generics.params.is_empty()
+            || method.sig.unsafety.is_some()
+            || method.sig.asyncness.is_some()
+        {
+            return false;
+        }
+        let [
+            syn::Stmt::Expr(syn::Expr::Try(spent), _),
+            syn::Stmt::Local(local),
+            syn::Stmt::Expr(syn::Expr::MethodCall(settle), None),
+        ] = method.block.stmts.as_slice()
+        else {
+            return false;
+        };
+        let syn::Expr::MethodCall(spend) = &*spent.expr else {
+            return false;
+        };
+        if !ident(&spend.receiver, "self")
+            || spend.method != "spend"
+            || spend.args.len() != 1
+            || !phase(&spend.args[0], expected)
+            || !ident(&settle.receiver, "self")
+            || settle.method != "settle_attempt"
+            || settle.args.len() != 2
+            || !ident(&settle.args[0], "requested")
+            || !phase(&settle.args[1], next)
             || !matches!(&local.pat,syn::Pat::Ident(p) if p.ident=="requested")
-        {return false;}
-        let Some(init)=&local.init else {return false;};
-        let syn::Expr::Call(catch)=&*init.expr else {return false;};
-        if !path(&catch.func,&["std","panic","catch_unwind"]) || catch.args.len()!=1 {return false;}
-        let syn::Expr::Call(safe)=&catch.args[0] else {return false;};
-        if !path(&safe.func,&["std","panic","AssertUnwindSafe"]) || safe.args.len()!=1 {return false;}
-        let syn::Expr::Closure(body)=&safe.args[0] else {return false;};
-        if !body.inputs.is_empty() || body.capture.is_some() || body.asyncness.is_some() {return false;}
+        {
+            return false;
+        }
+        let Some(init) = &local.init else {
+            return false;
+        };
+        let syn::Expr::Call(catch) = &*init.expr else {
+            return false;
+        };
+        if !path(&catch.func, &["std", "panic", "catch_unwind"]) || catch.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Call(safe) = &catch.args[0] else {
+            return false;
+        };
+        if !path(&safe.func, &["std", "panic", "AssertUnwindSafe"]) || safe.args.len() != 1 {
+            return false;
+        }
+        let syn::Expr::Closure(body) = &safe.args[0] else {
+            return false;
+        };
+        if !body.inputs.is_empty() || body.capture.is_some() || body.asyncness.is_some() {
+            return false;
+        }
         #[derive(Default)]
         struct Moves(bool);
         impl<'a> Visit<'a> for Moves {
-            fn visit_expr_method_call(&mut self,call:&'a syn::ExprMethodCall) {
-                if ["take","replace","dispose","into_ready","publish","into_raw_fd"].iter().any(|n|call.method==*n) {self.0=true;}
-                syn::visit::visit_expr_method_call(self,call);
+            fn visit_expr_method_call(&mut self, call: &'a syn::ExprMethodCall) {
+                if [
+                    "take",
+                    "replace",
+                    "dispose",
+                    "into_ready",
+                    "publish",
+                    "into_raw_fd",
+                ]
+                .iter()
+                .any(|n| call.method == *n)
+                {
+                    self.0 = true;
+                }
+                syn::visit::visit_expr_method_call(self, call);
             }
-            fn visit_expr_call(&mut self,call:&'a syn::ExprCall) {
-                if matches!(&*call.func,syn::Expr::Path(p) if p.path.segments.last().is_some_and(|p|["take","replace","drop","forget","munmap","try_close"].iter().any(|n|p.ident==*n))) {self.0=true;}
-                syn::visit::visit_expr_call(self,call);
+            fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
+                if matches!(&*call.func,syn::Expr::Path(p) if p.path.segments.last().is_some_and(|p|["take","replace","drop","forget","munmap","try_close"].iter().any(|n|p.ident==*n)))
+                {
+                    self.0 = true;
+                }
+                syn::visit::visit_expr_call(self, call);
             }
         }
-        let mut moved=Moves::default();moved.visit_expr(&body.body);!moved.0
+        let mut moved = Moves::default();
+        moved.visit_expr(&body.body);
+        !moved.0
     }
 
     #[test]
     fn actual_fallible_operations_borrow_the_preinstalled_spent_owner_through_unwind() {
-        let source=include_str!("linux.rs");
-        for (name,before,after) in [("send_pending","Fresh","Sent"),("prepare","Sent","Prepared")] {
-            assert!(borrowed_attempt_operation(source,name,before,after));
-            for (old,new) in [
+        let source = include_str!("linux.rs");
+        for (name, before, after) in [
+            ("send_pending", "Fresh", "Sent"),
+            ("prepare", "Sent", "Prepared"),
+        ] {
+            assert!(borrowed_attempt_operation(source, name, before, after));
+            for (old, new) in [
                 ("self.spend(AttemptState::", "self.bypass(AttemptState::"),
                 ("std::panic::catch_unwind", "std::panic::bypass"),
                 ("self.settle_attempt(requested", "self.bypass(requested"),
             ] {
                 assert!(source.contains(old));
-                let mutant=source.replace(old,new);
-                assert!(!borrowed_attempt_operation(&mutant,name,before,after));
+                let mutant = source.replace(old, new);
+                assert!(!borrowed_attempt_operation(&mutant, name, before, after));
             }
-            assert!(!borrowed_attempt_operation(source,name,after,before));
+            assert!(!borrowed_attempt_operation(source, name, after, before));
         }
     }
 
