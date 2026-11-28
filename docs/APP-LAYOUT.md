@@ -249,11 +249,13 @@ parameters are accepted for Chrome's update protocol. Unknown files return no
 content and never fall through to a catch-all app redirect. Other methods are
 refused. The `downloads` namespace is reserved from page/redirect declarations.
 
-If the installation uses IAP at its load balancer, it must also explicitly list
-the exact file URLs in `app-edge.public_download_paths`; otherwise IAP blocks
-the request before it reaches the app. That module keeps the default backend
-authenticated and adds an IAP-free backend only for selected exact download
-paths. Do not select a wildcard or disable IAP for the app.
+If the installation uses IAP at its load balancer, IAP blocks a download
+before it reaches the app unless its exact URL is in the app edge's
+`public_download_paths`. The instance renders that list from the app's
+`extension` pin: its CRX and `updates.xml`, or nothing for an app without one.
+Any other file in `public-downloads/` builds but stays behind IAP. The module
+keeps the default backend authenticated and adds an IAP-free backend only for
+those exact paths. Do not select a wildcard or disable IAP for the app.
 
 An app declares its extension in the app-root `.chrome-extension/` directory
 (`extension.json`, the unpacked `src/`, and an optional `local/` overlay). The

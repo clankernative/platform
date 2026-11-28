@@ -16,7 +16,7 @@ import "JsonValue.roc" as json_value_source : Str
 ## qualification-runner, and roots an instance owns itself.
 ##
 ## App CI's federation (project) and results buckets (app-edge) render only when day2.json sets forge.oidc; without it
-## every root renders exactly what it did before app CI existed.
+## no root renders app CI's variable.
 InstanceRender :: [].{
 
 	## `app_ci_repository` is the forge repository whose IDs the root's app CI variables need, which plan and apply
@@ -71,12 +71,13 @@ InstanceRender :: [].{
 		}
 
 		## The variables the platform renders for this root, named exactly as its stack declares them. Each is
-		## a derived name, the app's size preset or a fixed platform constant. An input at its stack default is
-		## rendered only when another rendered value is computed from it, so two roots read one constant.
-		## Everything else is still the instance's to commit: identity lists that may name its CI service
-		## accounts (state readers and writers, platform automation), node counts and other cluster
-		## choices, discovered IDs, images and digests, extension routes, and per-app identities, secrets,
-		## catalogs and labels. App CI's variable comes last, and only with forge.oidc.
+		## a derived name, the app's size preset or a fixed platform constant. A constant at its stack default is
+		## rendered only when another rendered value is computed from it, so two roots read one constant. A value
+		## derived from the spec renders even at its default, so a committed copy never replaces it: an app with no
+		## extension renders no download paths. Everything else is still the instance's to commit: identity lists
+		## that may name its CI service accounts (state readers and writers, platform automation), node counts and
+		## other cluster choices, discovered IDs, images and digests, and per-app identities, secrets, catalogs and
+		## labels. App CI's variable comes last, and only with forge.oidc.
 		variables : Root, InstanceSpec.Derived -> List((Str, Value))
 		variables = |root, names| root.core_variables(names).concat(root.app_ci(names))
 
@@ -176,6 +177,17 @@ InstanceRender :: [].{
 					("storage_class_name", Text(storage_class_name)),
 					("kube_dns_service_ip", Text(network.dns_service_ip)),
 					("cluster_cidrs", Texts([network.pod_cidr, network.service_cidr, network.subnet_cidr])),
+					# The only download paths that bypass IAP: the pinned extension's CRX and update manifest, or none.
+					# The platform always renders them, so a committed copy can never publish another download.
+					(
+						"public_download_paths",
+						Texts(
+							match bound.extension {
+								Ok(extension) => extension.downloads
+								Err(Null) => []
+							},
+						),
+					),
 				]
 
 				Day2App(bound) => [
@@ -488,7 +500,7 @@ sample =
 	\\"domains":{"people":"example.com","apps":"apps.example.com"},
 	\\"operators":["ada@example.com"],
 	\\"apps":{"go":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"automatic",
-	\\"extension":null,"owners":["ada@example.com"],"size":"standard","verification":4,"schedules":"enabled"},
+	\\"extension":"jldmikbinomhomcbmeppagennfohakni","owners":["ada@example.com"],"size":"standard","verification":4,"schedules":"enabled"},
 	\\"home":{"sdk":"sha256:98fb0ae80067840dd056a3c71ddfb482c756ce9475ec34a572cd8698c733f848","delivery":"manual",
 	\\"extension":null,"owners":["ada@example.com"],"size":"large","verification":6,"schedules":"paused"}}}
 
@@ -534,15 +546,15 @@ tfvars = |raw| match InstanceSpec.from_json(raw) {
 	Err(_) => []
 }
 
-# Golden: without forge.oidc every root renders exactly what it rendered before app CI existed.
+# Golden: without forge.oidc. Only the edges carry an extension's download paths, and an edge without one renders none.
 expect
 	tfvars(sample_without_oidc)
 		== [
 			"project {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"state_bucket_name\":\"exampleco-tools-tofu-state\",\"state_prefixes\":{\"foundation\":\"foundation/\",\"cluster\":\"platform/cluster/\",\"tenancy\":\"platform/tenancy/\",\"app\":\"platform/app/\",\"day2\":\"day2/\"}}",
 			"cluster {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"zone\":\"us-central1-a\",\"cluster_name\":\"day2\",\"cluster_labels\":{\"managed_by\":\"opentofu\",\"stack\":\"platform-cluster\",\"environment\":\"day2\"},\"subnet_cidr\":\"10.10.0.0/20\",\"pod_cidr\":\"10.20.0.0/16\",\"service_cidr\":\"10.30.0.0/20\",\"shared_node_pod_pids_limit\":1024}",
 			"tenancy {\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_namespace_prefix\":\"app-\"}",
-			"app-edge/go {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace_prefix\":\"app-\",\"domain\":\"go.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}",
-			"app-edge/home {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace_prefix\":\"app-\",\"domain\":\"home.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"]}",
+			"app-edge/go {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace_prefix\":\"app-\",\"domain\":\"go.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"],\"public_download_paths\":[\"/downloads/go.crx\",\"/downloads/updates.xml\"]}",
+			"app-edge/home {\"project_id\":\"exampleco-tools\",\"region\":\"us-central1\",\"cluster_name\":\"day2\",\"cluster_location\":\"us-central1-a\",\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace_prefix\":\"app-\",\"domain\":\"home.apps.example.com\",\"iap_members\":[\"domain:example.com\",\"user:ada@example.com\"],\"deployer_subjects\":[\"user:ada@example.com\"],\"offsite_backup_readers\":[\"user:ada@example.com\"],\"sqlite_storage_gb\":5,\"storage_class_name\":\"app-sqlite-rwo\",\"kube_dns_service_ip\":\"10.30.0.10\",\"cluster_cidrs\":[\"10.20.0.0/16\",\"10.30.0.0/20\",\"10.10.0.0/20\"],\"public_download_paths\":[]}",
 			"day2-app/go {\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"go\",\"namespace\":\"app-go\",\"installation\":\"exampleco\",\"environment\":\"production\",\"hosted_domain\":\"example.com\",\"admins\":[\"ada@example.com\",\"tools-infra@exampleco-tools.iam.gserviceaccount.com\"],\"edge_origin\":\"https://go.apps.example.com\",\"runtime_resources\":{\"memory_mib\":512,\"cpu_millis\":1000,\"process_limit\":1024,\"http_concurrency\":4,\"shutdown_seconds\":30},\"pod_pids_limit\":1024,\"backup_bucket\":\"exampleco-tools-go-backups\"}",
 			"day2-app/home {\"kube_context\":\"gke_exampleco-tools_us-central1-a_day2\",\"app_id\":\"home\",\"namespace\":\"app-home\",\"installation\":\"exampleco\",\"environment\":\"production\",\"hosted_domain\":\"example.com\",\"admins\":[\"ada@example.com\",\"tools-infra@exampleco-tools.iam.gserviceaccount.com\"],\"edge_origin\":\"https://home.apps.example.com\",\"runtime_resources\":{\"memory_mib\":2048,\"cpu_millis\":1000,\"process_limit\":1024,\"http_concurrency\":4,\"shutdown_seconds\":30},\"pod_pids_limit\":1024,\"backup_bucket\":\"exampleco-tools-home-backups\"}",
 		]
