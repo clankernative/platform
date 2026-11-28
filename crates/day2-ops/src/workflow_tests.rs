@@ -1182,7 +1182,11 @@ fn instance_sessions_have_no_platform_entry() -> Result<()> {
 
 /// Runs a release session against a fake host in which the step `failing`
 /// fails. Returns the session's result and its effects in order.
-fn release_session(session: &str, failing: &str) -> Result<(Result<Value>, Vec<String>)> {
+fn release_session(
+    session: &str,
+    rolling_required: bool,
+    failing: &str,
+) -> Result<(Result<Value>, Vec<String>)> {
     assert!(
         automation::SOURCES
             .iter()
@@ -1215,7 +1219,11 @@ fn release_session(session: &str, failing: &str) -> Result<(Result<Value>, Vec<S
             if step == failing {
                 bail!("injected {step} refusal");
             }
-            Ok(json!({ "step": step }))
+            if request.action == "instance-release-blob" {
+                Ok(json!({ "step": step, "rolling_required": rolling_required }))
+            } else {
+                Ok(json!({ "step": step }))
+            }
         },
     );
     Ok((result, effects))
@@ -1223,11 +1231,10 @@ fn release_session(session: &str, failing: &str) -> Result<(Result<Value>, Vec<S
 
 #[test]
 fn release_publication_verifies_images_then_blobs_and_publishes_the_manifest_last() -> Result<()> {
-    let (result, effects) = release_session("instance-release-publish-session", "")?;
-    assert_eq!(result?, json!({"step": "manifest"}));
-    assert_eq!(
-        effects,
-        [
+    let session = "instance-release-publish-session";
+    for rolling in [false, true] {
+        let (result, effects) = release_session(session, rolling, "")?;
+        let mut expected = vec![
             "prepare",
             "image runtime",
             "image tooling",
@@ -1235,41 +1242,48 @@ fn release_publication_verifies_images_then_blobs_and_publishes_the_manifest_las
             "blob strict",
             "blob distribution",
             "blob operator",
-            "manifest",
-        ]
-    );
+        ];
+        if rolling {
+            expected.push("blob rolling");
+        }
+        expected.push("manifest");
+        assert_eq!(result?, json!({"step": "manifest"}));
+        assert_eq!(effects, expected);
+    }
     // A refused image stops before anything is uploaded; a failed upload stops
     // before the manifest, so no release becomes selectable.
-    let (result, effects) = release_session("instance-release-publish-session", "image tooling")?;
+    let (result, effects) = release_session(session, false, "image tooling")?;
     assert!(result.is_err());
     assert_eq!(effects, ["prepare", "image runtime", "image tooling"]);
-    let (result, effects) =
-        release_session("instance-release-publish-session", "blob distribution")?;
-    assert!(result.is_err());
-    assert_eq!(
-        effects.last().map(String::as_str),
-        Some("blob distribution")
-    );
-    assert!(!effects.iter().any(|step| step == "manifest"));
+    for failed in ["blob distribution", "blob rolling"] {
+        let (result, effects) = release_session(session, true, failed)?;
+        assert!(result.is_err());
+        assert_eq!(effects.last().map(String::as_str), Some(failed));
+        assert!(!effects.iter().any(|step| step == "manifest"));
+    }
     Ok(())
 }
 
 #[test]
 fn release_fetch_binds_each_blob_before_the_operator() -> Result<()> {
-    let (result, effects) = release_session("instance-release-fetch-session", "")?;
-    assert_eq!(result?, json!({"step": "operator"}));
-    assert_eq!(
-        effects,
-        [
+    let session = "instance-release-fetch-session";
+    for rolling in [false, true] {
+        let (result, effects) = release_session(session, rolling, "")?;
+        let mut expected = vec![
             "prepare",
             "blob manifest",
             "blob distribution",
             "blob native",
             "blob strict",
-            "operator",
-        ]
-    );
-    let (result, effects) = release_session("instance-release-fetch-session", "blob native")?;
+        ];
+        if rolling {
+            expected.push("blob rolling");
+        }
+        expected.push("operator");
+        assert_eq!(result?, json!({"step": "operator"}));
+        assert_eq!(effects, expected);
+    }
+    let (result, effects) = release_session(session, false, "blob native")?;
     assert!(result.is_err());
     assert_eq!(
         effects,
@@ -1280,6 +1294,9 @@ fn release_fetch_binds_each_blob_before_the_operator() -> Result<()> {
             "blob native"
         ]
     );
+    let (result, effects) = release_session(session, true, "blob rolling")?;
+    assert!(result.is_err());
+    assert_eq!(effects.last().map(String::as_str), Some("blob rolling"));
     for session in ["instance-release-publish", "instance-release-fetch"] {
         let result = automation::run(
             &automation::runner()?,

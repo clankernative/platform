@@ -540,6 +540,10 @@ impl Session {
             self.release.as_mut(),
         )?;
         ensure!(
+            verified.release.profile == sdk_release::PROFILE,
+            "rolling releases require the rolling delivery controller"
+        );
+        ensure!(
             self.candidate["security_requirements"]["containment"]["evidence"]["receipt_digest"]
                 == verified.release.evidence.native.digest.as_str(),
             "candidate uses another platform qualification"

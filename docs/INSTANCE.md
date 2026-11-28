@@ -503,8 +503,9 @@ release` publishes and fetches those releases in the instance's state bucket,
 one object per blob at `gs://<project>-tofu-state/day2/platform-releases/sha256/<hex>`,
 named by its sha256. Both names come from `day2.json`.
 
-- **Profile.** Only `linux_sqlite_single_v1`, one exclusive SQLite runtime per
-  app. Rolling releases (`linux_sqlite_rwo_v1`) are refused.
+- **Profile.** `linux_sqlite_single_v1` carries native and strict-admission
+  evidence. `linux_sqlite_rwo_v1` adds a passing same-node rolling receipt
+  bound to the exact platform commit, images, native qualification and operator.
 - **Images.** Each image is digest-pinned in the artifact registry:
   `<region>-docker.pkg.dev/<project>/<repository>/<name>@sha256:<hex>`, in any
   repository there. They are checked against the registry root, not the SDK
@@ -513,7 +514,9 @@ named by its sha256. Both names come from `day2.json`.
 - **Publish.** For operators. `REQUEST` names exactly `profile`,
   `platform_commit`, `runtime` and `tooling` (each `{image, config}`), and the
   paths of the `distribution`, `operator` archive and `native` and `strict`
-  evidence, relative to the current directory.
+  evidence, relative to the current directory. The rolling profile also
+  requires a `rolling` receipt file with all nine acceptance checks and zero
+  availability failures.
   - Before anything is pulled or uploaded, the manifest is built from the
     files' identities and checked, and the distribution and evidence must bind
     it: the same commit, images, workflows, toolchain, distribution, operator
@@ -527,7 +530,8 @@ named by its sha256. Both names come from `day2.json`.
     fields sorted, indented two spaces, with a final newline. The command prints
     its digest and size; selecting it is a reviewed `day2.json` change.
 - **Fetch.** Reads the approved manifest, then the distribution and evidence it
-  names, and checks them as a publication does. It then installs the operator
+  names, including the rolling receipt for a rolling release. It checks them
+  as a publication does and then installs the operator
   CLI and prints its path and the cached manifest, distribution and evidence. It
   needs only read access to the bucket. It verifies integrity and qualification
   evidence, not approval: approval is the digest the caller pinned.

@@ -231,6 +231,10 @@ pub fn check(
     let manifest = instance_release::manifest(cache, &releases.registry, &reference, tools)
         .context("the candidate's qualified SDK release")?;
     ensure!(
+        manifest.profile == day2::sdk_release::PROFILE,
+        "rolling releases require the rolling delivery controller"
+    );
+    ensure!(
         candidate["security_requirements"]["containment"]["evidence"]["receipt_digest"]
             == manifest.evidence.native.digest.as_str(),
         "candidate uses another platform qualification"
@@ -579,7 +583,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_rolling_or_foreign_release_manifest_is_refused() {
+    fn an_incomplete_rolling_or_foreign_release_manifest_is_refused() {
         let (candidate, manifest) = selected_candidate();
         let mut value: Value = serde_json::from_slice(&manifest).unwrap();
         value["profile"] = json!("linux_sqlite_rwo_v1");
@@ -592,7 +596,7 @@ pub(crate) mod tests {
                 &BlobIdentity::of(&rolling),
                 &mut fake
             )),
-            "unsupported qualified release profile: only linux_sqlite_single_v1 releases are supported"
+            "rolling evidence must match the qualified release profile"
         );
         let (_directory, cache, mut fake) = with_manifest(&manifest);
         assert!(
